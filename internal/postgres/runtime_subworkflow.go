@@ -101,6 +101,12 @@ func descendantRunIDsTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime
 // cancelSubworkflowDescendantsTx invalidates descendant leases immediately;
 // workers can no longer commit after a parent cancellation is durable.
 func cancelSubworkflowDescendantsTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, parentRunID string, now time.Time) error {
+	return cancelSubworkflowDescendantsWithReasonTx(ctx, tx, tenantID, parentRunID, now, "parent_cancelled")
+}
+
+// cancelSubworkflowDescendantsWithReasonTx recursively terminalizes child
+// runs when their parent can no longer observe or safely join their results.
+func cancelSubworkflowDescendantsWithReasonTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, parentRunID string, now time.Time, reason string) error {
 	ids, err := descendantRunIDsTx(ctx, tx, tenantID, parentRunID)
 	if err != nil {
 		return err
@@ -133,9 +139,13 @@ func cancelSubworkflowDescendantsTx(ctx context.Context, tx pgx.Tx, tenantID wor
 		if _, updateErr = releaseRunAdmissionTx(ctx, tx, tenantID, runID, now); updateErr != nil {
 			return updateErr
 		}
+		payload, marshalErr := json.Marshal(map[string]string{"reason": reason})
+		if marshalErr != nil {
+			return marshalErr
+		}
 		if _, updateErr = appendRuntimeEvents(ctx, tx, tenantID, runID, []workflowruntime.Event{
-			{Type: "run.cancel_requested", Data: json.RawMessage(`{"reason":"parent_cancelled"}`)},
-			{Type: "run.cancelled", Data: json.RawMessage(`{"reason":"parent_cancelled"}`)},
+			{Type: "run.cancel_requested", Data: payload},
+			{Type: "run.cancelled", Data: payload},
 		}); updateErr != nil {
 			return updateErr
 		}

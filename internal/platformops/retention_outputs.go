@@ -12,8 +12,8 @@ import (
 // ArchiveNodeOutputs marks expired runtime output metadata archived and writes
 // durable audit evidence in the same transaction. Payload bytes remain
 // available during the archive grace period.
-func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID string, now time.Time, limit int) (int, error) {
-	if tenantID == "" || actorID == "" || now.IsZero() || limit <= 0 || limit > 1000 {
+func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID string, limit int) (int, error) {
+	if tenantID == "" || actorID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -21,6 +21,10 @@ func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID st
 		return 0, fmt.Errorf("begin node output archive: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var now time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return 0, fmt.Errorf("read database clock for node output archive: %w", err)
+	}
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
 			SELECT tenant_id,id FROM node_outputs
@@ -50,8 +54,8 @@ func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID st
 
 // DeleteArchivedNodeOutputs removes inline bytes and tombstones metadata. An
 // external output is tombstoned only after its managed object is deleted.
-func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, actorID string, archivedBefore time.Time, limit int) (int, error) {
-	if tenantID == "" || actorID == "" || archivedBefore.IsZero() || limit <= 0 || limit > 1000 {
+func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, actorID string, grace time.Duration, limit int) (int, error) {
+	if tenantID == "" || actorID == "" || grace < 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -65,18 +69,18 @@ func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, act
 			LEFT JOIN managed_objects object
 			  ON object.tenant_id=output.tenant_id AND object.id=output.object_ref
 			WHERE output.tenant_id=$1 AND output.retention_status='archived'
-			  AND output.archived_at <= $2
+			  AND output.archived_at <= clock_timestamp() - make_interval(secs => $2)
 			  AND (output.inline_value IS NOT NULL OR object.status='deleted')
 			ORDER BY output.archived_at,output.id FOR UPDATE OF output SKIP LOCKED LIMIT $3
 		)
 		UPDATE node_outputs output SET retention_status='deleted',inline_value=NULL,object_ref=NULL,deleted_at=now()
-		FROM expired WHERE output.tenant_id=expired.tenant_id AND output.id=expired.id`, tenantID, archivedBefore, limit)
+		FROM expired WHERE output.tenant_id=expired.tenant_id AND output.id=expired.id`, tenantID, grace.Seconds(), limit)
 	if err != nil {
 		return 0, fmt.Errorf("tombstone node outputs: %w", err)
 	}
 	count := int(tag.RowsAffected())
 	if count > 0 {
-		metadata, _ := json.Marshal(map[string]any{"count": count, "archivedBefore": archivedBefore})
+		metadata, _ := json.Marshal(map[string]any{"count": count, "grace": grace.String()})
 		if _, err = insertAuditTx(ctx, tx, AuditRecord{
 			TenantID: tenantID, ActorID: actorID, Action: "retention.outputs.delete",
 			ResourceType: "node_output", ResourceID: "batch", Outcome: AuditAllowed, Metadata: metadata,

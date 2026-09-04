@@ -118,3 +118,73 @@ func TestRetentionBackfillSerializesWithPolicyTightening(t *testing.T) {
 		t.Fatal("concurrent backfill extended retention beyond tightened policy")
 	}
 }
+
+// 验证事件清理从读取策略到不可逆删除始终持有 tenant lock，新策略不能在中途提交。
+func TestRetentionEventSweepSerializesWithPolicyUpdate(t *testing.T) {
+	ctx, pool, objects, tenantA, tenantB := objectRecoveryFixture(t)
+	for index, archive := range []bool{false, true} {
+		tenantID := []string{tenantA, tenantB}[index]
+		workflowID := fmt.Sprintf("retention_workflow_%d", index)
+		if _, err := pool.Exec(ctx, `INSERT INTO workflows (tenant_id,id,slug,name,created_by)
+			VALUES ($1,$2,$2,$2,'integration')`, tenantID, workflowID); err != nil {
+			t.Fatal(err)
+		}
+		_, runID, err := seedRunningAttempt(ctx, pool, tenantID, workflowID, fmt.Sprintf("retention_%d", index))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `UPDATE runs SET status='success',finished_at=now() WHERE tenant_id=$1 AND id=$2`, tenantID, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO run_events(id,tenant_id,run_id,sequence,event_type,payload,created_at)
+			VALUES($3,$1,$2,1,'completed','{}',now()-interval '2 days')`,
+			tenantID, runID, fmt.Sprintf("event_%d", index)); err != nil {
+			t.Fatal(err)
+		}
+		retention, err := NewRetention(pool, objects, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = retention.SetPolicy(ctx, RetentionPolicy{
+			TenantID: tenantID, EventDays: 1, OutputDays: 30, ArchiveBeforeDelete: archive,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		functionName := fmt.Sprintf("delay_event_sweep_%d_%d", index, time.Now().UnixNano())
+		triggerName := functionName + "_trigger"
+		if _, err = pool.Exec(ctx, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN PERFORM pg_sleep(0.4); RETURN OLD; END $$;
+			CREATE TRIGGER %s BEFORE DELETE ON run_events FOR EACH ROW
+			WHEN (OLD.tenant_id='%s') EXECUTE FUNCTION %s()`,
+			functionName, triggerName, tenantID, functionName)); err != nil {
+			t.Fatal(err)
+		}
+		sweepDone := make(chan error, 1)
+		go func() {
+			_, sweepErr := retention.SweepTenant(ctx, tenantID, time.Now().UTC(), 10)
+			sweepDone <- sweepErr
+		}()
+		waitForRetentionLock(t, ctx, pool, tenantID)
+		policyDone := make(chan error, 1)
+		go func() {
+			policyDone <- retention.SetPolicy(ctx, RetentionPolicy{
+				TenantID: tenantID, EventDays: 30, OutputDays: 30, ArchiveBeforeDelete: archive,
+			})
+		}()
+		select {
+		case policyErr := <-policyDone:
+			t.Fatalf("archive=%t policy update bypassed in-flight event sweep: %v", archive, policyErr)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err = <-sweepDone; err != nil {
+			t.Fatal(err)
+		}
+		if err = <-policyDone; err != nil {
+			t.Fatal(err)
+		}
+		var eventDays int
+		if err = pool.QueryRow(ctx, `SELECT event_days FROM retention_policies WHERE tenant_id=$1`, tenantID).Scan(&eventDays); err != nil || eventDays != 30 {
+			t.Fatalf("archive=%t eventDays=%d err=%v", archive, eventDays, err)
+		}
+	}
+}

@@ -71,6 +71,11 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		nodeStatus, outputID, request.Now); err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish node", err)
 	}
+	if request.RunStatus == workflowruntime.RunCancelled {
+		if err = terminateRemainingRunWorkTx(ctx, tx, request.TenantID, request.RunID, request.Now); err != nil {
+			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish cancelled run work", err)
+		}
+	}
 	for _, next := range request.Next {
 		if err = enqueueDAGSuccessor(ctx, tx, request.TenantID, request.RunID, next, request.Now); err != nil {
 			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not create successor attempt", err)
@@ -109,7 +114,10 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		request.AttemptID, request.Snapshot, sequence, request.Now); err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist completion snapshot", err)
 	}
-	if err = releaseTerminalLease(ctx, tx, request.TenantID, request.AttemptID); err != nil {
+	if request.RunStatus != workflowruntime.RunCancelled {
+		err = releaseTerminalLease(ctx, tx, request.TenantID, request.AttemptID)
+	}
+	if err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release completed lease", err)
 	}
 	run, err := scanRuntimeRunProjection(tx.QueryRow(ctx, runtimeRunProjectionByIDSQL, string(request.TenantID), request.RunID))
@@ -120,4 +128,29 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not commit attempt completion", workflowruntime.MarkCommitOutcomeUnknown(err))
 	}
 	return run, nil
+}
+
+// terminateRemainingRunWorkTx makes the first terminal result the single
+// terminalization point for every branch of a fan-out. Late workers are fenced
+// by removal of all run leases and cannot leave unreachable live work.
+func terminateRemainingRunWorkTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, runID string, now time.Time) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE node_attempts SET status='cancelled',finished_at=$3,updated_at=$3
+		WHERE tenant_id=$1 AND run_id=$2
+		  AND status IN ('pending','retry_ready','running','suspended')`, tenantID, runID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE node_states SET status='cancelled',updated_at=$3
+		WHERE tenant_id=$1 AND run_id=$2
+		  AND status IN ('pending','ready','running','suspended')`, tenantID, runID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE interrupts SET status='cancelled',resolved_at=$3
+		WHERE tenant_id=$1 AND run_id=$2 AND status='pending'`, tenantID, runID, now); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM worker_leases WHERE tenant_id=$1 AND run_id=$2`, tenantID, runID)
+	return err
 }

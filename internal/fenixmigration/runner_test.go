@@ -12,12 +12,13 @@ import (
 )
 
 type fakeTarget struct {
-	versions  map[string]ImportedVersion
-	drafts    map[string]bool
-	triggers  map[string]bool
-	runs      map[string]bool
-	writes    int
-	tenantIDs []string
+	versions            map[string]ImportedVersion
+	drafts              map[string]bool
+	triggers            map[string]bool
+	runs                map[string]bool
+	writes              int
+	tenantIDs           []string
+	attestationOverride *TargetAttestation
 }
 
 func newFakeTarget() *fakeTarget {
@@ -56,6 +57,20 @@ func (f *fakeTarget) ImportRun(_ context.Context, request platformops.ImportRunP
 	f.runs[request.RunID], f.writes = true, f.writes+1
 	return true, nil
 }
+func (f *fakeTarget) Attest(context.Context) (TargetAttestation, error) {
+	if f.attestationOverride != nil {
+		return *f.attestationOverride, nil
+	}
+	return TargetAttestation{
+		SchemaVersion:   1,
+		InstallationID:  "11111111-1111-4111-8111-111111111111",
+		ContentHash:     fmt.Sprintf("%064d", f.writes+1),
+		DefinitionCount: len(f.versions),
+		DraftCount:      len(f.drafts),
+		TriggerCount:    len(f.triggers),
+		RunCount:        len(f.runs),
+	}, nil
+}
 
 // 验证完整迁移顺序可从头安全重放，版本、草稿、触发器和终态历史都有独立幂等证据。
 func TestMigrateIsRestartable(t *testing.T) {
@@ -76,12 +91,38 @@ func TestMigrateIsRestartable(t *testing.T) {
 	if first.CreatedDefinitions != 1 || first.CreatedDrafts != 1 || first.CreatedTriggers != 1 || first.CreatedRuns != 1 {
 		t.Fatalf("first report = %#v", first)
 	}
+	if first.TargetInstallationID != "11111111-1111-4111-8111-111111111111" || first.TargetContentHash == "" {
+		t.Fatalf("first report has no production target attestation: %#v", first)
+	}
 	second, err := Migrate(context.Background(), snapshot, mapping, target, RunOptions{ActorID: "admin"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second.ReplayedDefinitions != 1 || second.ReplayedDrafts != 1 || second.ReplayedTriggers != 1 || second.ReplayedRuns != 1 {
 		t.Fatalf("second report = %#v", second)
+	}
+}
+
+// 验证报告计数即使完整，只要 target attestation 来自错误内容集合也不能成为删表证据。
+func TestMigrateRejectsWrongTargetAttestation(t *testing.T) {
+	now := time.Now().UTC()
+	yaml := []byte("schema_version: '1'\nname: flow\nnodes:\n  - {id: finish, type: end}\n")
+	snapshot := Snapshot{Workflows: []SourceWorkflow{{
+		ID: "flow", OrganizationID: "org", Name: "flow",
+		Versions: []SourceVersion{{Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}},
+	}}, Runs: []SourceRun{{
+		ID: "run", OrganizationID: "org", WorkflowID: "flow", Status: "SUCCESS",
+		Input: json.RawMessage(`{}`), Output: json.RawMessage(`{"ok":true}`),
+		StartedAt: now, FinishedAt: now, CreatedAt: now,
+	}}}
+	target := newFakeTarget()
+	target.attestationOverride = &TargetAttestation{
+		SchemaVersion: 1, InstallationID: "22222222-2222-4222-8222-222222222222",
+		ContentHash: "a" + fmt.Sprintf("%063d", 0), DefinitionCount: 1, RunCount: 0,
+	}
+	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	if err == nil {
+		t.Fatal("wrong production target attestation must fail closed")
 	}
 }
 

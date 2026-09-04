@@ -144,7 +144,6 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	if request.DecidedBy == "" || len(request.IdempotencyKey) < 8 || len(request.IdempotencyKey) > 128 {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeInvalidArgument, "approval actor and idempotency key are required", nil)
 	}
-	request.Now = timeOrNow(request.Now)
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resolve approval", err)
@@ -188,6 +187,10 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not inspect approval idempotency key", err)
 	}
+	var databaseNow time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
+		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
+	}
 	var interrupt workflowruntime.Interrupt
 	var tenant string
 	var digest []byte
@@ -222,7 +225,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	if status != "pending" || interrupt.ResolvedAt != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalConsumed, "approval was already resolved", nil)
 	}
-	if !request.Now.Before(interrupt.ExpiresAt) {
+	if !databaseNow.Before(interrupt.ExpiresAt) {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalExpired, "approval token has expired", nil)
 	}
 	if attemptStatus != "suspended" || (runStatus != "suspended" && runStatus != "running") {
@@ -242,27 +245,27 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE interrupts SET status = 'resolved', resolved_at = $3
-		WHERE tenant_id = $1 AND id = $2 AND status = 'pending'`, request.TenantID, request.InterruptID, request.Now); err != nil {
+		WHERE tenant_id = $1 AND id = $2 AND status = 'pending'`, request.TenantID, request.InterruptID, databaseNow); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not consume approval", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_attempts SET status = 'pending', resume_data = $4,
 		    available_at = $3, updated_at = $3
-		WHERE tenant_id = $1 AND id = $2 AND status = 'suspended'`, request.TenantID, interrupt.AttemptID, request.Now, decision); err != nil {
+		WHERE tenant_id = $1 AND id = $2 AND status = 'suspended'`, request.TenantID, interrupt.AttemptID, databaseNow, decision); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume attempt", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'pending', updated_at = $3
-		WHERE tenant_id = $1 AND run_id = $2 AND node_id = $4`, request.TenantID, interrupt.RunID, request.Now, interrupt.NodeID); err != nil {
+		WHERE tenant_id = $1 AND run_id = $2 AND node_id = $4`, request.TenantID, interrupt.RunID, databaseNow, interrupt.NodeID); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume node", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runs SET status = CASE WHEN status = 'suspended' THEN 'pending' ELSE status END,
 		    updated_at = $3, version = version + 1
-		WHERE tenant_id = $1 AND id = $2 AND status IN ('suspended','running')`, request.TenantID, interrupt.RunID, request.Now); err != nil {
+		WHERE tenant_id = $1 AND id = $2 AND status IN ('suspended','running')`, request.TenantID, interrupt.RunID, databaseNow); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume run", err)
 	}
-	interrupt.ResolvedAt = &request.Now
+	interrupt.ResolvedAt = &databaseNow
 	interrupt.Status = workflowruntime.InterruptResolved
 	interrupt.Decision = decision
 	if _, err = appendEventTx(ctx, tx, string(request.TenantID), interrupt.RunID, "approval.resolved", decision); err != nil {

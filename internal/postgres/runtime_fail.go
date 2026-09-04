@@ -94,6 +94,12 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 			nodeStatus, errorData, request.Now); err != nil {
 			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not fail node", err)
 		}
+		if err = terminateRemainingRunWorkTx(ctx, tx, request.TenantID, request.RunID, request.Now); err != nil {
+			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish terminal run work", err)
+		}
+		if err = cancelSubworkflowDescendantsWithReasonTx(ctx, tx, request.TenantID, request.RunID, request.Now, "parent_terminal"); err != nil {
+			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not cancel terminal run descendants", err)
+		}
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runs SET status = $3::text, updated_at = $4::timestamptz,
@@ -118,7 +124,10 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 		request.Events, defaultEvents...); err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist failure events", err)
 	}
-	if err = releaseTerminalLease(ctx, tx, request.TenantID, request.AttemptID); err != nil {
+	if request.RetryAt != nil {
+		err = releaseTerminalLease(ctx, tx, request.TenantID, request.AttemptID)
+	}
+	if err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release failed lease", err)
 	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.TenantID), request.RunID))

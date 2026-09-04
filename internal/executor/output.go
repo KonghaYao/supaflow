@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 	"github.com/pazhou/supaflow/internal/workflow"
 )
+
+const defaultOutputCleanupTimeout = 5 * time.Second
 
 // ExternalOutput is the safe result of persisting bytes outside the runtime database.
 // ObjectRef is an opaque tenant-scoped ID and must never contain a storage key.
@@ -62,7 +65,9 @@ func (e *PlanExecutor) makeOutput(ctx context.Context, req workflowruntime.Execu
 	}
 	if external.ObjectRef == "" || external.Size != output.Size || external.SHA256 != output.SHA256 {
 		if external.ObjectRef != "" {
-			_ = e.outputs.DiscardOutput(context.WithoutCancel(ctx), req.TenantID, external.ObjectRef)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.cleanupWait)
+			_ = e.outputs.DiscardOutput(cleanupCtx, req.TenantID, external.ObjectRef)
+			cancel()
 		}
 		return nil, executionError("output_storage_invalid", false, errors.New("stored output metadata did not match executor output"))
 	}
@@ -74,7 +79,8 @@ func (e *PlanExecutor) makeOutput(ctx context.Context, req workflowruntime.Execu
 // completion rejects them or atomically resolves a cancellation race.
 type ManagedOutputStore struct {
 	workflowruntime.Store
-	outputs OutputManager
+	outputs     OutputManager
+	cleanupWait time.Duration
 }
 
 // NewManagedOutputStore decorates the durable runtime store with object cleanup.
@@ -82,7 +88,7 @@ func NewManagedOutputStore(store workflowruntime.Store, outputs OutputManager) (
 	if store == nil || outputs == nil {
 		return nil, errors.New("executor: runtime store and output manager are required")
 	}
-	return &ManagedOutputStore{Store: store, outputs: outputs}, nil
+	return &ManagedOutputStore{Store: store, outputs: outputs, cleanupWait: defaultOutputCleanupTimeout}, nil
 }
 
 // CompleteAttempt delegates the atomic runtime commit and removes any object
@@ -98,7 +104,9 @@ func (s *ManagedOutputStore) CompleteAttempt(ctx context.Context, req workflowru
 	if workflowruntime.IsCommitOutcomeUnknown(err) {
 		return run, err
 	}
-	cleanupErr := s.outputs.DiscardOutput(context.WithoutCancel(ctx), req.TenantID, req.Output.ObjectRef)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cleanupWait)
+	defer cancel()
+	cleanupErr := s.outputs.DiscardOutput(cleanupCtx, req.TenantID, req.Output.ObjectRef)
 	if cleanupErr == nil {
 		return run, err
 	}

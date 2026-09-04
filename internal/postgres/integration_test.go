@@ -112,6 +112,12 @@ func TestPostgresPublicationAndRuntimeLifecycle(t *testing.T) {
 	if err != nil || firstWork == nil || firstWork.Lease.FencingToken != 1 || firstWork.Takeover {
 		t.Fatalf("ClaimAttempt() work=%+v error=%v", firstWork, err)
 	}
+	if _, err = pool.Exec(ctx, `UPDATE worker_leases SET
+		acquired_at=clock_timestamp()-interval '2 seconds',
+		expires_at=clock_timestamp()-interval '1 second'
+		WHERE tenant_id=$1 AND attempt_id=$2`, tenantID, firstWork.Attempt.ID); err != nil {
+		t.Fatal(err)
+	}
 	takeoverAt := claimAt.Add(time.Minute)
 	work, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
 		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "worker_2",
@@ -293,7 +299,7 @@ func jsonSemanticallyEqual(left, right []byte) bool {
 	return reflect.DeepEqual(leftValue, rightValue)
 }
 
-// 验证真实 PostgreSQL 中取消 intent 赢得完成竞态，且不会持久化迟到结果或后继。
+// 验证真实 PostgreSQL 中取消 intent 赢得并行完成竞态，并清理所有分支的 live work 与 lease。
 func TestPostgresCancellationWinsSuccessfulCompletion(t *testing.T) {
 	databaseURL := os.Getenv("SUPAFLOW_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -358,6 +364,23 @@ func TestPostgresCancellationWinsSuccessfulCompletion(t *testing.T) {
 	if err != nil || work == nil {
 		t.Fatalf("claim: work=%+v err=%v", work, err)
 	}
+	secondNodeStateID := "parallel_node_" + suffix
+	secondAttemptID := "parallel_attempt_" + suffix
+	if _, err = pool.Exec(ctx, `INSERT INTO node_states(id,tenant_id,run_id,node_id,status,attempt_count,latest_attempt_id)
+		VALUES($1,$2,$3,'parallel','running',1,$4)`,
+		secondNodeStateID, tenantID, started.Run.ID, secondAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO node_attempts(id,tenant_id,run_id,node_state_id,node_id,executor,input,attempt_number,status,worker_id,fencing_token)
+		VALUES($4,$2,$3,$1,'parallel','builtin.transform','{}',1,'running','worker_parallel',1)`,
+		secondNodeStateID, tenantID, started.Run.ID, secondAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO worker_leases(attempt_id,tenant_id,run_id,worker_id,fencing_token,acquired_at,expires_at)
+		VALUES($1,$2,$3,'worker_parallel',1,$4::timestamptz,$4::timestamptz+interval '1 minute')`,
+		secondAttemptID, tenantID, started.Run.ID, now); err != nil {
+		t.Fatal(err)
+	}
 	cancelled, err := store.RequestCancel(ctx, workflowruntime.TenantID(tenantID), started.Run.ID, now.Add(time.Millisecond))
 	if err != nil || cancelled.Run.Status != workflowruntime.RunCancelling {
 		t.Fatalf("cancel intent: result=%+v err=%v", cancelled, err)
@@ -381,7 +404,7 @@ func TestPostgresCancellationWinsSuccessfulCompletion(t *testing.T) {
 	if err != nil || completed.Status != workflowruntime.RunCancelled {
 		t.Fatalf("completion: run=%+v err=%v", completed, err)
 	}
-	var outputCount, snapshotCount, attemptCount int
+	var outputCount, snapshotCount, attemptCount, liveAttemptCount, liveNodeCount, leaseCount int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM node_outputs WHERE tenant_id = $1 AND run_id = $2`, tenantID, started.Run.ID).Scan(&outputCount); err != nil {
 		t.Fatal(err)
 	}
@@ -391,8 +414,20 @@ func TestPostgresCancellationWinsSuccessfulCompletion(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM node_attempts WHERE tenant_id = $1 AND run_id = $2`, tenantID, started.Run.ID).Scan(&attemptCount); err != nil {
 		t.Fatal(err)
 	}
-	if outputCount != 0 || snapshotCount != 0 || attemptCount != 1 {
-		t.Fatalf("late completion artifacts: outputs=%d snapshots=%d attempts=%d", outputCount, snapshotCount, attemptCount)
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM node_attempts WHERE tenant_id=$1 AND run_id=$2
+		AND status IN ('pending','retry_ready','running','suspended')`, tenantID, started.Run.ID).Scan(&liveAttemptCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM node_states WHERE tenant_id=$1 AND run_id=$2
+		AND status IN ('pending','ready','running','suspended')`, tenantID, started.Run.ID).Scan(&liveNodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM worker_leases WHERE tenant_id=$1 AND run_id=$2`, tenantID, started.Run.ID).Scan(&leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if outputCount != 0 || snapshotCount != 0 || attemptCount != 2 || liveAttemptCount != 0 || liveNodeCount != 0 || leaseCount != 0 {
+		t.Fatalf("late completion artifacts: outputs=%d snapshots=%d attempts=%d liveAttempts=%d liveNodes=%d leases=%d",
+			outputCount, snapshotCount, attemptCount, liveAttemptCount, liveNodeCount, leaseCount)
 	}
 	var attemptStatus, nodeStatus string
 	var outputID *string
@@ -404,6 +439,16 @@ func TestPostgresCancellationWinsSuccessfulCompletion(t *testing.T) {
 	}
 	if attemptStatus != "cancelled" || nodeStatus != "cancelled" || outputID != nil {
 		t.Fatalf("cancelled state: attempt=%s node=%s outputID=%v", attemptStatus, nodeStatus, outputID)
+	}
+	var parallelAttemptStatus, parallelNodeStatus string
+	if err = pool.QueryRow(ctx, `SELECT status FROM node_attempts WHERE tenant_id=$1 AND id=$2`, tenantID, secondAttemptID).Scan(&parallelAttemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT status FROM node_states WHERE tenant_id=$1 AND id=$2`, tenantID, secondNodeStateID).Scan(&parallelNodeStatus); err != nil {
+		t.Fatal(err)
+	}
+	if parallelAttemptStatus != "cancelled" || parallelNodeStatus != "cancelled" {
+		t.Fatalf("parallel branch was orphaned: attempt=%s node=%s", parallelAttemptStatus, parallelNodeStatus)
 	}
 	events, err := store.ListEvents(ctx, workflowruntime.TenantID(tenantID), started.Run.ID, 0, 100)
 	if err != nil || len(events) == 0 || events[len(events)-1].Type != "run.cancelled" {

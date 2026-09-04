@@ -11,10 +11,13 @@ import (
 )
 
 type auditResponseWriter struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
+	header   http.Header
+	body     bytes.Buffer
+	status   int
+	tooLarge bool
 }
+
+const maximumMutationResponseBytes = 1 << 20
 
 func (w *auditResponseWriter) Header() http.Header { return w.header }
 func (w *auditResponseWriter) WriteHeader(status int) {
@@ -26,7 +29,20 @@ func (w *auditResponseWriter) Write(value []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	return w.body.Write(value)
+	remaining := maximumMutationResponseBytes - w.body.Len()
+	if remaining > 0 {
+		chunk := value
+		if len(chunk) > remaining {
+			chunk = chunk[:remaining]
+		}
+		_, _ = w.body.Write(chunk)
+	}
+	if len(value) > remaining {
+		w.tooLarge = true
+	}
+	// The downstream handler must not retry or allocate another copy. The
+	// middleware replaces this response with a bounded durable failure.
+	return len(value), nil
 }
 
 func mutationAuditRecord(r *http.Request, status int) *platformops.AuditRecord {
@@ -41,7 +57,7 @@ func mutationAuditRecord(r *http.Request, status int) *platformops.AuditRecord {
 	} else if status >= 400 {
 		outcome = platformops.AuditFailed
 	}
-	if outcome == platformops.AuditAllowed && atomicallyAudited(action) {
+	if outcome == platformops.AuditAllowed && (platformops.MutationCommitted(r.Context()) || atomicallyAudited(action)) {
 		return nil
 	}
 	metadata, _ := json.Marshal(map[string]any{

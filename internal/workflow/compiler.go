@@ -87,7 +87,11 @@ func ParseExecutionPlan(input json.RawMessage) (*ExecutionPlan, error) {
 }
 
 func validateParsedPlan(semantics planSemantics) error {
+	if len(semantics.Nodes) > MaxDefinitionNodes || len(semantics.Edges) > MaxDefinitionEdges {
+		return fmt.Errorf("workflow: execution plan exceeds resource limits")
+	}
 	nodes := make(map[string]struct{}, len(semantics.Nodes))
+	outgoing := make(map[string]int)
 	for index, node := range semantics.Nodes {
 		if node.ID == "" || node.Type == "" || node.Version == "" || node.Executor.Kind == "" {
 			return fmt.Errorf("workflow: execution plan node %d is invalid", index)
@@ -113,6 +117,10 @@ func validateParsedPlan(semantics planSemantics) error {
 		orderIndex[nodeID] = index
 	}
 	for _, edge := range semantics.Edges {
+		outgoing[edge.FromNode]++
+		if outgoing[edge.FromNode] > MaxNodeOutDegree {
+			return fmt.Errorf("workflow: execution plan fanout exceeds resource limit")
+		}
 		if _, exists := nodes[edge.FromNode]; !exists {
 			return fmt.Errorf("workflow: execution plan edge references unknown source %q", edge.FromNode)
 		}
@@ -181,6 +189,7 @@ func Compile(definition WorkflowDefinition, registry *Registry, policy CompilePo
 		incoming[edge.ToNode] = append(incoming[edge.ToNode], edge.FromNode)
 	}
 	order, _ := loopAwareTopologicalOrder(nodeIndex, outgoing, incoming)
+	propagateSensitiveOutputs(nodes, edges)
 	semantics := planSemantics{
 		SchemaVersion: DefinitionSchemaV1, WorkflowID: definition.ID,
 		Nodes: nodes, Edges: edges, TopologicalOrder: order,
@@ -195,6 +204,44 @@ func Compile(definition WorkflowDefinition, registry *Registry, policy CompilePo
 		nodes: clonePlanNodes(nodes), edges: append([]EdgeDefinition(nil), edges...),
 		topologicalOrder: append([]string(nil), order...), hash: hex.EncodeToString(digest[:]),
 	}, nil
+}
+
+// propagateSensitiveOutputs makes confidentiality monotonic in an immutable
+// plan. A permission to resolve credentials is not itself a taint source: most
+// HTTP and model responses do not contain the credential used for transport.
+// Authors mark actual confidential output sources, after which transforms,
+// joins, and terminal nodes are deliberately not declassification boundaries.
+// Subworkflow output additionally inherits the child's durable Sensitive flag
+// at execution time because that classification is unavailable at compilation.
+func propagateSensitiveOutputs(nodes []PlanNode, edges []EdgeDefinition) {
+	indexes := make(map[string]int, len(nodes))
+	for index := range nodes {
+		indexes[nodes[index].ID] = index
+	}
+	changed := true
+	for changed {
+		changed = false
+		for _, edge := range edges {
+			sourceIndex, sourceExists := indexes[edge.FromNode]
+			targetIndex, targetExists := indexes[edge.ToNode]
+			if sourceExists && targetExists && nodes[sourceIndex].SensitiveOutput && !nodes[targetIndex].SensitiveOutput {
+				nodes[targetIndex].SensitiveOutput = true
+				changed = true
+			}
+		}
+		for index := range nodes {
+			for _, binding := range nodes[index].Inputs {
+				if binding.Source == nil {
+					continue
+				}
+				sourceIndex, exists := indexes[binding.Source.NodeID]
+				if exists && nodes[sourceIndex].SensitiveOutput && !nodes[index].SensitiveOutput {
+					nodes[index].SensitiveOutput = true
+					changed = true
+				}
+			}
+		}
+	}
 }
 
 func resolvedNodeCapabilities(nodeType string, config json.RawMessage, base CapabilitySet) CapabilitySet {

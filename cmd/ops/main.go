@@ -53,10 +53,12 @@ func run() error {
 			return backupErr
 		}
 		scratchURL := strings.TrimSpace(os.Getenv("SUPAFLOW_RESTORE_DATABASE_URL"))
-		if scratchURL == "" || scratchURL == databaseURL {
+		if scratchURL == "" {
 			return errors.New("SUPAFLOW_RESTORE_DATABASE_URL must identify a separate scratch database")
 		}
-		return tool.RestoreDrill(ctx, scratchURL, *artifact)
+		return runVerifiedRestore(ctx, databaseURL, scratchURL, readPostgresDatabaseIdentity, func() error {
+			return tool.RestoreDrill(ctx, scratchURL, *artifact)
+		})
 	case "capacity", "alerts":
 		if strings.TrimSpace(*tenantID) == "" {
 			return errors.New("-tenant is required")

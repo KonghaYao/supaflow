@@ -82,7 +82,7 @@ func configureOperations(ctx context.Context, pool *pgxpool.Pool, catalog platfo
 	if err != nil {
 		return operationsRuntime{}, err
 	}
-	delivery, err := platformops.NewTriggerRunDelivery(pool, definitions, catalog, runs)
+	delivery, err := platformops.NewTriggerRunDelivery(pool, catalog, runs)
 	if err != nil {
 		return operationsRuntime{}, err
 	}

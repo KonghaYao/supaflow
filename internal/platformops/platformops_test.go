@@ -67,6 +67,30 @@ func TestWebhookSignatureBindsRequestID(t *testing.T) {
 	}
 }
 
+// 验证未来时钟偏移请求的 replay guard 覆盖其完整可接受窗口，而不是从首次接收时间起算。
+func TestWebhookReplayGuardCoversFutureTimestampWindow(t *testing.T) {
+	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
+	timestamp := now.Add(fiveMinutes)
+	secret := []byte("01234567890123456789012345678901")
+	store := &triggerTestStore{}
+	service, err := NewTriggerService(store, triggerSecrets{secret: secret}, fiveMinutes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"future":true}`)
+	_, _, err = service.ReceiveWebhook(context.Background(), WebhookRequest{
+		TenantID: "tenant_a", TriggerID: "trigger_a", RequestID: "future-request",
+		Timestamp: timestamp, Now: now, Body: body,
+		Signature: SignWebhook(secret, "future-request", timestamp, body),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := timestamp.Add(fiveMinutes); !store.webhookExpiresAt.Equal(want) {
+		t.Fatalf("replay guard expires=%v want=%v", store.webhookExpiresAt, want)
+	}
+}
+
 // 验证触发器 API/manual firing 对幂等 key 和 JSON object 做边界校验。
 func TestTriggerServiceRejectsInvalidFireEnvelope(t *testing.T) {
 	service, err := NewTriggerService(&triggerTestStore{}, nil, fiveMinutes)
@@ -262,6 +286,25 @@ func TestAuditedExecutorFailsClosedAndClassifiesDenial(t *testing.T) {
 	}
 }
 
+// 验证执行失败后的审计即使永久阻塞也会被独立超时收敛，worker 不会因关停信号永久挂起。
+func TestAuditedExecutorBoundsDetachedFailureAudit(t *testing.T) {
+	recorder := &blockingAuditRecorder{blockAfter: 2}
+	executor, err := NewAuditedExecutor(&executorTestDouble{err: errors.New("executor failed")}, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.auditTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	_, executeErr := executor.Execute(ctx, workflowruntime.ExecutionRequest{
+		TenantID: "tenant_a", RunID: "run_a", NodeID: "node_a", AttemptID: "attempt_a", Executor: "http",
+	})
+	if executeErr == nil || time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("detached audit was not bounded: elapsed=%s err=%v", time.Since(started), executeErr)
+	}
+}
+
 const fiveMinutes = 5 * time.Minute
 
 type triggerSecrets struct{ secret []byte }
@@ -271,8 +314,9 @@ func (s triggerSecrets) ResolveTriggerSecret(context.Context, string, string) ([
 }
 
 type triggerTestStore struct {
-	replay       bool
-	webhookCalls int
+	replay           bool
+	webhookCalls     int
+	webhookExpiresAt time.Time
 }
 
 func (s *triggerTestStore) CreateTrigger(context.Context, CreateTriggerRequest) (Trigger, error) {
@@ -290,8 +334,9 @@ func (s *triggerTestStore) SetTriggerEnabled(context.Context, string, string, bo
 func (s *triggerTestStore) Fire(_ context.Context, request FireRequest) (Firing, bool, error) {
 	return Firing{TenantID: request.TenantID, TriggerID: request.TriggerID}, true, nil
 }
-func (s *triggerTestStore) FireWebhook(_ context.Context, request FireRequest, _ string, _ [sha256.Size]byte, _ time.Time) (Firing, bool, error) {
+func (s *triggerTestStore) FireWebhook(_ context.Context, request FireRequest, _ string, _ [sha256.Size]byte, expiresAt time.Time) (Firing, bool, error) {
 	s.webhookCalls++
+	s.webhookExpiresAt = expiresAt
 	if s.replay {
 		return Firing{}, false, ErrReplay
 	}
@@ -370,6 +415,20 @@ func (s *deliveryTestStore) RequeueDeadLetter(context.Context, string, string, t
 type auditTestRecorder struct {
 	failFirst bool
 	records   []AuditRecord
+}
+
+type blockingAuditRecorder struct {
+	calls      int
+	blockAfter int
+}
+
+func (r *blockingAuditRecorder) Record(ctx context.Context, record AuditRecord) (AuditRecord, error) {
+	r.calls++
+	if r.calls >= r.blockAfter {
+		<-ctx.Done()
+		return AuditRecord{}, ctx.Err()
+	}
+	return record, nil
 }
 
 func (r *auditTestRecorder) Record(_ context.Context, record AuditRecord) (AuditRecord, error) {

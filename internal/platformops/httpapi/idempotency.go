@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/platformops"
@@ -64,19 +66,49 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 			_, _ = w.Write(record.Body)
 			return
 		}
-		r = r.WithContext(platformops.ContextWithMutationOperation(r.Context(), record.OperationID))
+		requestContext := r.Context()
+		handlerContext, cancelHandler := context.WithCancel(requestContext)
+		defer cancelHandler()
+		_, resourceType, resourceID := mutationAuditTarget(r)
+		r = r.WithContext(platformops.ContextWithMutation(handlerContext, platformops.MutationOperation{
+			ID: record.OperationID, TenantID: principal.TenantID, ActorID: principal.ActorID,
+			Action: operation, ResourceType: resourceType, ResourceID: resourceID,
+		}))
+		var renewalDone chan error
+		if record.RenewAfter > 0 {
+			renewalDone = make(chan error, 1)
+			go h.renewMutationLease(r.Context(), cancelHandler, principal.TenantID, operation, key, record, renewalDone)
+		}
 		captured := &auditResponseWriter{header: make(http.Header)}
 		next.ServeHTTP(captured, r)
 		status := captured.status
 		if status == 0 {
 			status = http.StatusOK
 		}
+		if captured.tooLarge {
+			status = http.StatusInsufficientStorage
+			captured.header = make(http.Header)
+			captured.header.Set("Content-Type", "application/problem+json")
+			captured.body.Reset()
+			_, _ = captured.body.WriteString(`{"error":"mutation_response_too_large"}`)
+		}
 		contentType := captured.header.Get("Content-Type")
 		completion := platformops.MutationCompletion{
 			Owner: record.Owner, StatusCode: status, ContentType: contentType,
 			Body: captured.body.Bytes(), Audit: mutationAuditRecord(r, status),
 		}
-		if err = h.services.Mutations.Complete(r.Context(), principal.TenantID, operation, key, completion); err != nil {
+		cancelHandler()
+		if renewalDone != nil {
+			if renewalErr := <-renewalDone; renewalErr != nil {
+				respond(w, nil, renewalErr, http.StatusOK)
+				return
+			}
+			if err = h.services.Mutations.Renew(requestContext, principal.TenantID, operation, key, record.Owner); err != nil {
+				respond(w, nil, err, http.StatusOK)
+				return
+			}
+		}
+		if err = h.services.Mutations.Complete(requestContext, principal.TenantID, operation, key, completion); err != nil {
 			respond(w, nil, err, http.StatusOK)
 			return
 		}
@@ -86,6 +118,32 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 		w.WriteHeader(status)
 		_, _ = w.Write(captured.body.Bytes())
 	})
+}
+
+func (h *Handler) renewMutationLease(ctx context.Context, cancel context.CancelFunc, tenantID, operation, key string, record platformops.MutationRecord, done chan<- error) {
+	interval := record.RenewAfter
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			done <- nil
+			return
+		case <-ticker.C:
+			if err := h.services.Mutations.Renew(ctx, tenantID, operation, key, record.Owner); err != nil {
+				if ctx.Err() != nil {
+					done <- nil
+					return
+				}
+				cancel()
+				done <- err
+				return
+			}
+		}
+	}
 }
 
 func mutationRoleAllowed(operation string, role api.Role) bool {

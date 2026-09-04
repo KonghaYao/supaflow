@@ -46,6 +46,15 @@ func (m *MemoryStore) CreateDraft(_ context.Context, req MutationRequest) (Draft
 	if _, exists := m.drafts[key]; exists {
 		return Draft{}, ErrRevisionConflict
 	}
+	count := 0
+	for _, item := range m.drafts {
+		if item.TenantID == req.Draft.TenantID {
+			count++
+		}
+	}
+	if count >= MaxDraftsPerTenant {
+		return Draft{}, ErrTenantDraftLimit
+	}
 	draft := cloneDraft(req.Draft)
 	m.drafts[key] = draft
 	m.record(req, &draft, false)
@@ -63,18 +72,23 @@ func (m *MemoryStore) GetDraft(_ context.Context, tenant, workflowID string) (Dr
 	return cloneDraft(draft), nil
 }
 
-// ListDrafts lists tenant-owned drafts.
-func (m *MemoryStore) ListDrafts(_ context.Context, tenant string) ([]Draft, error) {
+// ListDrafts lists one bounded page of tenant-owned summaries.
+func (m *MemoryStore) ListDrafts(_ context.Context, tenant, cursor string, limit int) (DraftPage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := []Draft{}
+	result := []DraftSummary{}
 	for _, item := range m.drafts {
-		if item.TenantID == tenant {
-			result = append(result, cloneDraft(item))
+		if item.TenantID == tenant && item.WorkflowID > cursor {
+			result = append(result, summarizeDraft(item))
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].WorkflowID < result[j].WorkflowID })
-	return result, nil
+	page := DraftPage{Items: result}
+	if len(page.Items) > limit {
+		page.NextCursor = page.Items[limit-1].WorkflowID
+		page.Items = page.Items[:limit]
+	}
+	return page, nil
 }
 
 // UpdateDraft performs one optimistic mutation.
@@ -139,16 +153,28 @@ func (m *MemoryStore) RecordVersion(_ context.Context, version Version) error {
 	return nil
 }
 
-// ListVersions returns newest versions first.
-func (m *MemoryStore) ListVersions(_ context.Context, tenant, workflowID string) ([]Version, error) {
+// ListVersions returns one bounded page of newest version summaries first.
+func (m *MemoryStore) ListVersions(_ context.Context, tenant, workflowID string, cursor uint64, limit int) (VersionPage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	values := m.versions[scope(tenant, workflowID)]
-	result := make([]Version, len(values))
-	for i, item := range values {
-		result[len(values)-1-i] = cloneVersion(item)
+	result := make([]VersionSummary, 0, min(limit+1, len(values)))
+	for index := len(values) - 1; index >= 0; index-- {
+		item := values[index]
+		if cursor != 0 && item.Version >= cursor {
+			continue
+		}
+		result = append(result, summarizeVersion(item))
+		if len(result) == limit+1 {
+			break
+		}
 	}
-	return result, nil
+	page := VersionPage{Items: result}
+	if len(page.Items) > limit {
+		page.NextCursor = page.Items[limit-1].Version
+		page.Items = page.Items[:limit]
+	}
+	return page, nil
 }
 
 // GetVersion returns one immutable definition version.
@@ -197,6 +223,14 @@ func (m *MemoryStore) record(req MutationRequest, draft *Draft, deleted bool) {
 }
 func cloneDraft(d Draft) Draft       { d.Document = cloneJSON(d.Document); return d }
 func cloneVersion(v Version) Version { v.Definition = cloneDefinition(v.Definition); return v }
+func summarizeDraft(d Draft) DraftSummary {
+	return DraftSummary{ID: d.ID, TenantID: d.TenantID, WorkflowID: d.WorkflowID, Revision: d.Revision,
+		UpdatedBy: d.UpdatedBy, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+}
+func summarizeVersion(v Version) VersionSummary {
+	return VersionSummary{TenantID: v.TenantID, WorkflowID: v.WorkflowID, VersionID: v.VersionID,
+		PlanID: v.PlanID, Version: v.Version, PlanHash: v.PlanHash, PublishedAt: v.PublishedAt}
+}
 func cloneDefinition(value workflow.WorkflowDefinition) workflow.WorkflowDefinition {
 	encoded, _ := json.Marshal(value)
 	var result workflow.WorkflowDefinition

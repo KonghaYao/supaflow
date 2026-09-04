@@ -39,6 +39,13 @@ type Report struct {
 	SourceDatabaseFingerprint      string    `json:"sourceDatabaseFingerprint"`
 	FinalSourceDatabaseFingerprint string    `json:"finalSourceDatabaseFingerprint"`
 	SourceStable                   bool      `json:"sourceStable"`
+	TargetAttestationSchemaVersion int       `json:"targetAttestationSchemaVersion"`
+	TargetInstallationID           string    `json:"targetInstallationId"`
+	TargetContentHash              string    `json:"targetContentHash"`
+	TargetDefinitionCount          int       `json:"targetDefinitionCount"`
+	TargetDraftCount               int       `json:"targetDraftCount"`
+	TargetTriggerCount             int       `json:"targetTriggerCount"`
+	TargetRunCount                 int       `json:"targetRunCount"`
 	PlannedDefinitions             int       `json:"plannedDefinitions"`
 	PlannedDrafts                  int       `json:"plannedDrafts"`
 	PlannedTriggers                int       `json:"plannedTriggers"`
@@ -188,6 +195,26 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 			report.ReplayedRuns++
 		}
 	}
+	attestation, err := target.Attest(ctx)
+	if err != nil {
+		return report, fmt.Errorf("attest migration target: %w", err)
+	}
+	if err := validateTargetAttestation(attestation); err != nil {
+		return report, err
+	}
+	if attestation.DefinitionCount != report.PlannedDefinitions ||
+		attestation.DraftCount != report.PlannedDrafts ||
+		attestation.TriggerCount != report.PlannedTriggers ||
+		attestation.RunCount != report.PlannedRuns {
+		return report, errors.New("migration target attestation does not match the complete source plan")
+	}
+	report.TargetAttestationSchemaVersion = attestation.SchemaVersion
+	report.TargetInstallationID = attestation.InstallationID
+	report.TargetContentHash = attestation.ContentHash
+	report.TargetDefinitionCount = attestation.DefinitionCount
+	report.TargetDraftCount = attestation.DraftCount
+	report.TargetTriggerCount = attestation.TriggerCount
+	report.TargetRunCount = attestation.RunCount
 	report.FinishedAt = time.Now().UTC()
 	return report, nil
 }

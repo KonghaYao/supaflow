@@ -55,6 +55,16 @@ func (s *PostgresTriggerStore) UpdateTrigger(ctx context.Context, request Update
 		return Trigger{}, err
 	}
 	if found {
+		audited, auditErr := recordAllowedMutationTx(ctx, tx, replayed.ID)
+		if auditErr != nil {
+			return Trigger{}, triggerError("audit replayed trigger update", auditErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return Trigger{}, triggerError("commit replayed trigger update", commitErr)
+		}
+		if audited {
+			markMutationCommitted(ctx)
+		}
 		return replayed, nil
 	}
 	var interval any
@@ -79,8 +89,15 @@ func (s *PostgresTriggerStore) UpdateTrigger(ctx context.Context, request Update
 	if err = completeTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, trigger); err != nil {
 		return Trigger{}, err
 	}
+	audited, err := recordAllowedMutationTx(ctx, tx, trigger.ID)
+	if err != nil {
+		return Trigger{}, triggerError("audit trigger update", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Trigger{}, triggerError("commit update trigger", err)
+	}
+	if audited {
+		markMutationCommitted(ctx)
 	}
 	return trigger, nil
 }
@@ -97,6 +114,16 @@ func (s *PostgresTriggerStore) SetTriggerEnabledIdempotently(ctx context.Context
 		return Trigger{}, err
 	}
 	if found {
+		audited, auditErr := recordAllowedMutationTx(ctx, tx, replayed.ID)
+		if auditErr != nil {
+			return Trigger{}, triggerError("audit replayed trigger state change", auditErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return Trigger{}, triggerError("commit replayed trigger state change", commitErr)
+		}
+		if audited {
+			markMutationCommitted(ctx)
+		}
 		return replayed, nil
 	}
 	status := "disabled"
@@ -104,11 +131,11 @@ func (s *PostgresTriggerStore) SetTriggerEnabledIdempotently(ctx context.Context
 		status = "enabled"
 	}
 	trigger, err := scanTrigger(tx.QueryRow(ctx, `
-		UPDATE triggers SET status=$4,updated_at=$5 WHERE tenant_id=$1 AND id=$2 AND updated_at=$3
+		UPDATE triggers SET status=$4,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND updated_at=$3
 		RETURNING tenant_id,id,public_hash,workflow_id,kind,name,status,config,
 		          schedule_interval_seconds,COALESCE(misfire_policy,''),next_fire_at,
 		          COALESCE(signing_credential_id,''),COALESCE(event_type,''),created_by,created_at,updated_at`,
-		request.TenantID, request.TriggerID, request.ExpectedUpdatedAt, status, request.Now))
+		request.TenantID, request.TriggerID, request.ExpectedUpdatedAt, status))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Trigger{}, ErrConflict
 	}
@@ -118,8 +145,15 @@ func (s *PostgresTriggerStore) SetTriggerEnabledIdempotently(ctx context.Context
 	if err = completeTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, trigger); err != nil {
 		return Trigger{}, err
 	}
+	audited, err := recordAllowedMutationTx(ctx, tx, trigger.ID)
+	if err != nil {
+		return Trigger{}, triggerError("audit trigger state change", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Trigger{}, triggerError("commit trigger state", err)
+	}
+	if audited {
+		markMutationCommitted(ctx)
 	}
 	return trigger, nil
 }
@@ -133,7 +167,20 @@ func (s *PostgresTriggerStore) DeleteTrigger(ctx context.Context, request Delete
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	_, found, err := claimTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, "delete", request.RequestHash, request.TriggerID)
 	if err != nil || found {
-		return err
+		if err != nil {
+			return err
+		}
+		audited, auditErr := recordAllowedMutationTx(ctx, tx, request.TriggerID)
+		if auditErr != nil {
+			return triggerError("audit replayed trigger deletion", auditErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return triggerError("commit replayed trigger deletion", commitErr)
+		}
+		if audited {
+			markMutationCommitted(ctx)
+		}
+		return nil
 	}
 	tag, err := tx.Exec(ctx, `DELETE FROM triggers WHERE tenant_id=$1 AND id=$2 AND updated_at=$3`, request.TenantID, request.TriggerID, request.ExpectedUpdatedAt)
 	if err != nil {
@@ -145,8 +192,15 @@ func (s *PostgresTriggerStore) DeleteTrigger(ctx context.Context, request Delete
 	if err = completeTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, Trigger{}); err != nil {
 		return err
 	}
+	audited, err := recordAllowedMutationTx(ctx, tx, request.TriggerID)
+	if err != nil {
+		return triggerError("audit trigger deletion", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return triggerError("commit delete trigger", err)
+	}
+	if audited {
+		markMutationCommitted(ctx)
 	}
 	return nil
 }

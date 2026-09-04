@@ -52,8 +52,15 @@ func (r *Retention) SetPolicy(ctx context.Context, policy RetentionPolicy) error
 		policy.TenantID, policy.OutputDays); err != nil {
 		return fmt.Errorf("tighten node output retention: %w", err)
 	}
+	audited, err := recordAllowedMutationTx(ctx, tx, "")
+	if err != nil {
+		return fmt.Errorf("audit retention policy update: %w", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit retention policy update: %w", err)
+	}
+	if audited {
+		markMutationCommitted(ctx)
 	}
 	return nil
 }
@@ -70,8 +77,22 @@ func (r *Retention) backfillOutputRetention(ctx context.Context, tenantID string
 	if err = lockTenantRetention(ctx, tx, tenantID); err != nil {
 		return RetentionPolicy{}, err
 	}
+	policy, err := r.backfillOutputRetentionTx(ctx, tx, tenantID, limit)
+	if err != nil {
+		return RetentionPolicy{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return RetentionPolicy{}, fmt.Errorf("commit output retention backfill: %w", err)
+	}
+	return policy, nil
+}
+
+// backfillOutputRetentionTx reads the policy and materializes legacy output
+// deadlines inside a caller-owned transaction that already holds the tenant
+// retention lock.
+func (r *Retention) backfillOutputRetentionTx(ctx context.Context, tx pgx.Tx, tenantID string, limit int) (RetentionPolicy, error) {
 	policy := RetentionPolicy{TenantID: tenantID}
-	err = tx.QueryRow(ctx, `SELECT event_days,output_days,archive_before_delete
+	err := tx.QueryRow(ctx, `SELECT event_days,output_days,archive_before_delete
 		FROM retention_policies WHERE tenant_id=$1`, tenantID).Scan(
 		&policy.EventDays, &policy.OutputDays, &policy.ArchiveBeforeDelete)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -105,9 +126,6 @@ func (r *Retention) backfillOutputRetention(ctx context.Context, tenantID string
 			output.created_at + $2 * interval '1 day')
 		FROM targets WHERE output.tenant_id=targets.tenant_id AND output.id=targets.id`, tenantID, policy.OutputDays, limit); err != nil {
 		return RetentionPolicy{}, fmt.Errorf("backfill inline output retention deadline: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return RetentionPolicy{}, fmt.Errorf("commit output retention backfill: %w", err)
 	}
 	return policy, nil
 }

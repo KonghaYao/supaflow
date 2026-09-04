@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -13,6 +14,54 @@ func TestValidateDefinitionAcceptsImportedUUID(t *testing.T) {
 	if err := ValidateDefinition(definition, BuiltinRegistry(), builtinPolicy()); err != nil {
 		t.Fatalf("ValidateDefinition() error = %v", err)
 	}
+}
+
+// 验证编译边界在构建索引前拒绝超过节点和边总量的超大定义。
+func TestValidateDefinitionRejectsCollectionLimits(t *testing.T) {
+	nodes := make([]NodeDefinition, MaxDefinitionNodes+1)
+	assertDefinitionCode(t, WorkflowDefinition{SchemaVersion: DefinitionSchemaV1, ID: "too_many_nodes", Nodes: nodes}, builtinPolicy(), "node_limit_exceeded")
+	edges := make([]EdgeDefinition, MaxDefinitionEdges+1)
+	assertDefinitionCode(t, WorkflowDefinition{SchemaVersion: DefinitionSchemaV1, ID: "too_many_edges", Edges: edges}, builtinPolicy(), "edge_limit_exceeded")
+}
+
+// 验证单节点 fan-out 总数具有独立硬上限，即使每份输出很小也不能制造过多 attempt。
+func TestValidateDefinitionRejectsOutDegreeLimit(t *testing.T) {
+	registry := BuiltinRegistry()
+	if err := registry.Register(NodeTypeVersion{
+		Type: "tiny-source", Version: BuiltinNodeVersion, DefaultTimeoutMS: 1000, MaximumOutputBytes: 1,
+		Executor: ExecutorBinding{Kind: "test.tiny", MinimumRunnerVersion: "1.0.0"},
+		Inputs:   map[string]PortDefinition{"input": {Type: ValueTypeAny}}, Outputs: map[string]PortDefinition{"output": {Type: ValueTypeAny}},
+		ConfigSchema:   json.RawMessage(`{"type":"object"}`),
+		ValidateConfig: func(json.RawMessage) error { return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	definition := WorkflowDefinition{SchemaVersion: DefinitionSchemaV1, ID: "fanout_limit",
+		Nodes: []NodeDefinition{
+			{ID: "start", Type: NodeTypeStart, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+			{ID: "source", Type: "tiny-source", Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+		},
+		Edges: []EdgeDefinition{{ID: "source_input", FromNode: "start", FromPort: "input", ToNode: "source", ToPort: "input"}},
+	}
+	for index := 0; index < MaxNodeOutDegree+1; index++ {
+		id := fmt.Sprintf("end_%02d", index)
+		definition.Nodes = append(definition.Nodes, NodeDefinition{ID: id, Type: NodeTypeEnd, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)})
+		definition.Edges = append(definition.Edges, EdgeDefinition{ID: "to_" + id, FromNode: "source", FromPort: "output", ToNode: id, ToPort: "result"})
+	}
+	assertDefinitionCodeWithRegistry(t, definition, registry, builtinPolicy(), "fanout_limit_exceeded")
+}
+
+// 验证接近 1MiB 的输出不能通过大 fan-out 放大成超过 16MiB 的后继批次。
+func TestValidateDefinitionRejectsPayloadAmplification(t *testing.T) {
+	definition := WorkflowDefinition{SchemaVersion: DefinitionSchemaV1, ID: "payload_amplification",
+		Nodes: []NodeDefinition{{ID: "start", Type: NodeTypeStart, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)}},
+	}
+	for index := 0; index < 17; index++ {
+		id := fmt.Sprintf("end_%02d", index)
+		definition.Nodes = append(definition.Nodes, NodeDefinition{ID: id, Type: NodeTypeEnd, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)})
+		definition.Edges = append(definition.Edges, EdgeDefinition{ID: "to_" + id, FromNode: "start", FromPort: "input", ToNode: id, ToPort: "result"})
+	}
+	assertDefinitionCode(t, definition, builtinPolicy(), "payload_amplification_limit_exceeded")
 }
 
 // 验证 canonical definition 对标识、重复节点、未知类型、边端点及 Start/End 约束执行严格校验。
@@ -118,8 +167,12 @@ func TestCompilePreservesValidTypedBinding(t *testing.T) {
 }
 
 func assertDefinitionCode(t *testing.T, definition WorkflowDefinition, policy CompilePolicy, code string) {
+	assertDefinitionCodeWithRegistry(t, definition, BuiltinRegistry(), policy, code)
+}
+
+func assertDefinitionCodeWithRegistry(t *testing.T, definition WorkflowDefinition, registry *Registry, policy CompilePolicy, code string) {
 	t.Helper()
-	err := ValidateDefinition(definition, BuiltinRegistry(), policy)
+	err := ValidateDefinition(definition, registry, policy)
 	if err == nil {
 		t.Fatalf("ValidateDefinition() error = nil, want %q", code)
 	}

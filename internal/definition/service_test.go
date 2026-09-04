@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -131,8 +132,8 @@ func TestPublishVersionDiffAndRepublish(t *testing.T) {
 	if _, _, err := service.Publish(context.Background(), "tenant-a", "flow", definition, "publish-0002"); err != nil {
 		t.Fatal(err)
 	}
-	versions, err := service.ListVersions(context.Background(), "tenant-a", "flow")
-	if err != nil || len(versions) != 2 || versions[0].Version != 2 {
+	versions, err := service.ListVersions(context.Background(), "tenant-a", "flow", 0, DefaultPageLimit)
+	if err != nil || len(versions.Items) != 2 || versions.Items[0].Version != 2 {
 		t.Fatalf("versions=%+v err=%v", versions, err)
 	}
 	latest, err := service.LatestVersion(context.Background(), "tenant-a", "flow")
@@ -146,6 +147,68 @@ func TestPublishVersionDiffAndRepublish(t *testing.T) {
 	republished, created, err := service.Republish(context.Background(), "tenant-a", "flow", 1, "republish-0001")
 	if err != nil || !created || republished.Version != 3 {
 		t.Fatalf("republish=%+v created=%v err=%v", republished, created, err)
+	}
+}
+
+// 验证 Studio 列表使用稳定 cursor、强制 page limit，并且摘要不携带大 document/definition。
+func TestDefinitionListsAreBoundedSummaryPages(t *testing.T) {
+	service, _ := newTestService(t)
+	for index, workflowID := range []string{"alpha", "beta", "gamma"} {
+		if _, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+			WorkflowID: workflowID, ActorID: "editor", IdempotencyKey: fmt.Sprintf("create-%08d", index), Document: mustJSON(t, definitionFor(workflowID)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := service.ListDrafts(context.Background(), "tenant-a", "", 2)
+	if err != nil || len(first.Items) != 2 || first.Items[0].WorkflowID != "alpha" || first.NextCursor != "beta" {
+		t.Fatalf("first draft page=%+v err=%v", first, err)
+	}
+	second, err := service.ListDrafts(context.Background(), "tenant-a", first.NextCursor, 2)
+	if err != nil || len(second.Items) != 1 || second.Items[0].WorkflowID != "gamma" || second.NextCursor != "" {
+		t.Fatalf("second draft page=%+v err=%v", second, err)
+	}
+	if _, err = service.ListDrafts(context.Background(), "tenant-a", "", MaxPageLimit+1); err == nil {
+		t.Fatal("oversized draft page was accepted")
+	}
+
+	for index := 0; index < 3; index++ {
+		value := definitionFor("flow")
+		value.Metadata = map[string]json.RawMessage{"revision": json.RawMessage(fmt.Sprintf("%d", index))}
+		if _, _, err = service.Publish(context.Background(), "tenant-a", "flow", value, fmt.Sprintf("publish-%08d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	versions, err := service.ListVersions(context.Background(), "tenant-a", "flow", 0, 2)
+	if err != nil || len(versions.Items) != 2 || versions.Items[0].Version != 3 || versions.NextCursor != 2 {
+		t.Fatalf("version page=%+v err=%v", versions, err)
+	}
+	last, err := service.ListVersions(context.Background(), "tenant-a", "flow", versions.NextCursor, 2)
+	if err != nil || len(last.Items) != 1 || last.Items[0].Version != 1 || last.NextCursor != 0 {
+		t.Fatalf("last version page=%+v err=%v", last, err)
+	}
+}
+
+// 验证同租户的草稿硬配额在创建边界拒绝新资源。
+func TestCreateDraftEnforcesTenantHardLimit(t *testing.T) {
+	service, store := newTestService(t)
+	command := CreateDraftCommand{WorkflowID: "existing", ActorID: "editor", IdempotencyKey: "create-existing", Document: mustJSON(t, definitionFor("existing"))}
+	created, err := service.CreateDraft(context.Background(), "tenant-a", command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index < MaxDraftsPerTenant; index++ {
+		workflowID := fmt.Sprintf("flow-%04d", index)
+		store.drafts[scope("tenant-a", workflowID)] = Draft{TenantID: "tenant-a", WorkflowID: workflowID}
+	}
+	if replay, replayErr := service.CreateDraft(context.Background(), "tenant-a", command); replayErr != nil || replay.ID != created.ID {
+		t.Fatalf("replay at capacity=%+v err=%v", replay, replayErr)
+	}
+	_, err = service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+		WorkflowID: "overflow", ActorID: "editor", IdempotencyKey: "create-overflow", Document: mustJSON(t, definitionFor("overflow")),
+	})
+	if !errors.Is(err, ErrTenantDraftLimit) {
+		t.Fatalf("CreateDraft() error=%v, want ErrTenantDraftLimit", err)
 	}
 }
 

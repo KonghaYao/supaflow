@@ -82,7 +82,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		if err != nil {
 			return platform.PublishedPlan{}, false, err
 		}
-		if err = CompleteAPIMutationTx(ctx, tx, workflowID, map[string]any{"planId": resolved.ID}); err != nil {
+		if err = CompleteAPIMutationTx(ctx, tx, workflowID, resolved); err != nil {
 			return platform.PublishedPlan{}, false, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -90,6 +90,9 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		}
 		apimutation.MarkCommitted(ctx)
 		return resolved, false, nil
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "workflow-version-capacity:"+tenantID); err != nil {
+		return platform.PublishedPlan{}, false, fmt.Errorf("lock workflow version capacity: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO workflows (id, tenant_id, slug, name, created_by)
@@ -119,7 +122,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		if resolveErr != nil {
 			return platform.PublishedPlan{}, false, resolveErr
 		}
-		if err = CompleteAPIMutationTx(ctx, tx, workflowID, map[string]any{"planId": resolved.ID}); err != nil {
+		if err = CompleteAPIMutationTx(ctx, tx, workflowID, resolved); err != nil {
 			return platform.PublishedPlan{}, false, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -127,6 +130,18 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		}
 		apimutation.MarkCommitted(ctx)
 		return resolved, false, nil
+	}
+	var tenantVersionCount, workflowVersionCount uint64
+	if err = tx.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE workflow_id = $2)
+		FROM workflow_versions WHERE tenant_id = $1`, tenantID, workflowID).Scan(&tenantVersionCount, &workflowVersionCount); err != nil {
+		return platform.PublishedPlan{}, false, fmt.Errorf("count workflow versions: %w", err)
+	}
+	if tenantVersionCount >= platform.MaxVersionsPerTenant {
+		return platform.PublishedPlan{}, false, platform.ErrTenantVersionLimit
+	}
+	if workflowVersionCount >= platform.MaxVersionsPerWorkflow {
+		return platform.PublishedPlan{}, false, platform.ErrWorkflowVersionLimit
 	}
 	var version uint64
 	if err = tx.QueryRow(ctx, `
@@ -161,17 +176,56 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		plan.SchemaVersion(), publishedAt); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("persist execution plan: %w", err)
 	}
-	if err = CompleteAPIMutationTx(ctx, tx, workflowID, map[string]any{"planId": planID}); err != nil {
+	published := platform.PublishedPlan{
+		ID: planID, WorkflowID: workflowID, Version: version, Hash: plan.Hash(),
+		Plan: plan, PublishedAt: publishedAt,
+	}
+	if err = CompleteAPIMutationTx(ctx, tx, workflowID, published); err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("commit workflow publication: %w", err)
 	}
 	apimutation.MarkCommitted(ctx)
-	return platform.PublishedPlan{
-		ID: planID, WorkflowID: workflowID, Version: version, Hash: plan.Hash(),
-		Plan: plan, PublishedAt: publishedAt,
-	}, true, nil
+	return published, true, nil
+}
+
+// ReplayPublication returns the immutable publication previously accepted for
+// this key without reading or compiling the mutable current draft.
+func (c *PlanCatalog) ReplayPublication(ctx context.Context, tenantID, workflowID, key string) (platform.PublishedPlan, bool, error) {
+	if c == nil || c.pool == nil || tenantID == "" || workflowID == "" || key == "" {
+		return platform.PublishedPlan{}, false, errors.New("tenant, workflow, and idempotency key are required")
+	}
+	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return platform.PublishedPlan{}, false, fmt.Errorf("begin publication replay: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err = LockAPIMutationTx(ctx, tx); err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
+		}
+		return platform.PublishedPlan{}, false, err
+	}
+	existing, found, err := resolvePublicationKey(ctx, tx, tenantID, key)
+	if err != nil || !found {
+		return platform.PublishedPlan{}, found, err
+	}
+	published, err := c.resolveTx(ctx, tx, tenantID, existing.ID, existing.Hash)
+	if err != nil {
+		return platform.PublishedPlan{}, false, err
+	}
+	if published.WorkflowID != workflowID {
+		return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
+	}
+	if err = CompleteAPIMutationTx(ctx, tx, workflowID, published); err != nil {
+		return platform.PublishedPlan{}, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return platform.PublishedPlan{}, false, fmt.Errorf("commit publication replay: %w", err)
+	}
+	apimutation.MarkCommitted(ctx)
+	return published, true, nil
 }
 
 // Resolve reads an immutable plan with both tenant and hash predicates.

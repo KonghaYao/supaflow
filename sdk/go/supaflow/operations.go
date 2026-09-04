@@ -10,15 +10,20 @@ import (
 
 // CapacitySnapshot reports tenant-owned runtime pressure and delivery backlog.
 type CapacitySnapshot struct {
-	ActiveRuns, QueuedRuns, ActiveWorkers, OutboxBacklog, DLQDepth int
-	OldestOutboxAge                                                time.Duration
+	ActiveRuns, QueuedRuns, ActiveWorkers, TriggerCount, PendingTriggerFirings int
+	OutboxBacklog, MaxTriggers, MaxPendingTriggerFirings                       int
+	MaxPendingOutboxMessages, DLQDepth                                         int
+	OldestOutboxAge                                                            time.Duration
 }
 
-// Quota configures hard tenant concurrency and queue bounds.
+// Quota configures hard tenant execution and trigger-ingress bounds.
 type Quota struct {
-	MaxActiveRuns    int `json:"maxActiveRuns"`
-	MaxActiveWorkers int `json:"maxActiveWorkers"`
-	MaxQueueDepth    int `json:"maxQueueDepth"`
+	MaxActiveRuns            int `json:"maxActiveRuns"`
+	MaxActiveWorkers         int `json:"maxActiveWorkers"`
+	MaxQueueDepth            int `json:"maxQueueDepth"`
+	MaxTriggers              int `json:"maxTriggers,omitempty"`
+	MaxPendingTriggerFirings int `json:"maxPendingTriggerFirings,omitempty"`
+	MaxPendingOutboxMessages int `json:"maxPendingOutboxMessages,omitempty"`
 }
 
 // Credential is secret-free tenant credential metadata.

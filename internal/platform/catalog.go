@@ -18,6 +18,17 @@ var (
 	ErrPlanNotFound = errors.New("published execution plan not found")
 	// ErrPublicationConflict reports idempotency-key reuse with different content.
 	ErrPublicationConflict = errors.New("publication idempotency conflict")
+	// ErrTenantVersionLimit rejects publication after a tenant reaches its durable history quota.
+	ErrTenantVersionLimit = errors.New("tenant workflow version limit exceeded")
+	// ErrWorkflowVersionLimit rejects publication after one workflow reaches its history quota.
+	ErrWorkflowVersionLimit = errors.New("workflow version limit exceeded")
+)
+
+const (
+	// MaxVersionsPerTenant bounds immutable publication history owned by one tenant.
+	MaxVersionsPerTenant = 10000
+	// MaxVersionsPerWorkflow bounds immutable publication history for one workflow.
+	MaxVersionsPerWorkflow = 1000
 )
 
 // PublishedPlan is the immutable publication projection exposed to application adapters.
@@ -57,6 +68,7 @@ type MemoryCatalog struct {
 	policy       workflow.CompilePolicy
 	plans        map[string]PublishedPlan
 	versions     map[string]uint64
+	tenantCounts map[string]uint64
 	publications map[string]publicationRecord
 	now          func() time.Time
 }
@@ -65,7 +77,7 @@ type MemoryCatalog struct {
 func NewMemoryCatalog(registry *workflow.Registry, policy workflow.CompilePolicy) *MemoryCatalog {
 	return &MemoryCatalog{
 		registry: registry, policy: policy, plans: make(map[string]PublishedPlan),
-		versions: make(map[string]uint64), publications: make(map[string]publicationRecord),
+		versions: make(map[string]uint64), tenantCounts: make(map[string]uint64), publications: make(map[string]publicationRecord),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -102,12 +114,19 @@ func (c *MemoryCatalog) Publish(ctx context.Context, tenantID, workflowID string
 		return PublishedPlan{}, false, err
 	}
 	workflowScope := tenantID + "\x00" + workflowID
+	if c.tenantCounts[tenantID] >= MaxVersionsPerTenant {
+		return PublishedPlan{}, false, ErrTenantVersionLimit
+	}
+	if c.versions[workflowScope] >= MaxVersionsPerWorkflow {
+		return PublishedPlan{}, false, ErrWorkflowVersionLimit
+	}
 	version := c.versions[workflowScope] + 1
 	published := PublishedPlan{
 		ID: planID, WorkflowID: workflowID, Version: version, Hash: plan.Hash(),
 		Plan: plan, PublishedAt: c.now(),
 	}
 	c.versions[workflowScope] = version
+	c.tenantCounts[tenantID]++
 	c.plans[tenantID+"\x00"+planID] = published
 	c.publications[idempotencyScope] = publicationRecord{planID: planID, hash: plan.Hash()}
 	return published, true, nil

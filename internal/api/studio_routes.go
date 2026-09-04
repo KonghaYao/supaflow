@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -54,15 +56,25 @@ func (h *Handler) createWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	items, err := h.definitions.ListDrafts(r.Context(), principal.TenantID)
+	limit, ok := parseStudioPageLimit(w, r)
+	if !ok {
+		return
+	}
+	cursor := r.URL.Query().Get("cursor")
+	if len(cursor) > 128 {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_pagination", "cursor is invalid")
+		return
+	}
+	page, err := h.definitions.ListDrafts(r.Context(), principal.TenantID, cursor, limit)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	result := make([]draftResponse, len(items))
-	for index, item := range items {
-		result[index] = draftDTO(item)
+	result := make([]draftSummaryResponse, len(page.Items))
+	for index, item := range page.Items {
+		result[index] = draftSummaryDTO(item)
 	}
+	writeStudioPageHeaders(w, r, limit, page.NextCursor)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -153,16 +165,66 @@ func (h *Handler) publishDraft(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listVersions(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	items, err := h.definitions.ListVersions(r.Context(), principal.TenantID, r.PathValue("workflowID"))
+	limit, ok := parseStudioPageLimit(w, r)
+	if !ok {
+		return
+	}
+	cursor, err := parseVersionCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_pagination", "cursor is invalid")
+		return
+	}
+	page, err := h.definitions.ListVersions(r.Context(), principal.TenantID, r.PathValue("workflowID"), cursor, limit)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	result := make([]versionSummaryResponse, len(items))
-	for index, item := range items {
-		result[index] = versionSummaryDTO(item)
+	result := make([]versionSummaryResponse, len(page.Items))
+	for index, item := range page.Items {
+		result[index] = storedVersionSummaryDTO(item)
 	}
+	next := ""
+	if page.NextCursor != 0 {
+		next = strconv.FormatUint(page.NextCursor, 10)
+	}
+	writeStudioPageHeaders(w, r, limit, next)
 	writeJSON(w, http.StatusOK, result)
+}
+
+func parseStudioPageLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return definition.DefaultPageLimit, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > definition.MaxPageLimit {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_pagination", "limit must be between 1 and 100")
+		return 0, false
+	}
+	return limit, true
+}
+
+func parseVersionCursor(raw string) (uint64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || value == 0 || value > math.MaxInt64 {
+		return 0, errors.New("invalid version cursor")
+	}
+	return value, nil
+}
+
+func writeStudioPageHeaders(w http.ResponseWriter, r *http.Request, limit int, cursor string) {
+	w.Header().Set("X-Page-Limit", strconv.Itoa(limit))
+	if cursor == "" {
+		return
+	}
+	w.Header().Set("X-Next-Cursor", cursor)
+	query := r.URL.Query()
+	query.Set("limit", strconv.Itoa(limit))
+	query.Set("cursor", cursor)
+	w.Header().Set("Link", "<"+r.URL.Path+"?"+query.Encode()+">; rel=\"next\"")
 }
 
 func (h *Handler) latestVersion(w http.ResponseWriter, r *http.Request) {

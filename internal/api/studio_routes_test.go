@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pazhou/supaflow/internal/definition"
@@ -15,6 +19,61 @@ import (
 )
 
 const viewerKey = "tenant-a-viewer-api-key-at-least-24-bytes"
+
+// 验证 Studio 列表保留数组响应，同时用 cursor/header 分页且不返回完整草稿文档。
+func TestStudioListsUseBoundedCompatiblePagination(t *testing.T) {
+	handler := studioHandler(t)
+	for index, workflowID := range []string{"alpha", "beta", "gamma"} {
+		response := requestJSON(t, handler, http.MethodPost, "/v1/workflows", tenantAKey, fmt.Sprintf("create-page-%02d", index),
+			map[string]any{"workflowId": workflowID, "document": flowgramDocument(workflowID)})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %s status=%d body=%s", workflowID, response.Code, response.Body.String())
+		}
+	}
+	first := requestJSON(t, handler, http.MethodGet, "/v1/workflows?limit=2", viewerKey, "", nil)
+	if first.Code != http.StatusOK || first.Header().Get("X-Next-Cursor") != "beta" || !strings.Contains(first.Header().Get("Link"), "cursor=beta") {
+		t.Fatalf("first status=%d cursor=%q link=%q body=%s", first.Code, first.Header().Get("X-Next-Cursor"), first.Header().Get("Link"), first.Body.String())
+	}
+	if bytes.Contains(first.Body.Bytes(), []byte(`"document"`)) {
+		t.Fatalf("draft list loaded document: %s", first.Body.String())
+	}
+	second := requestJSON(t, handler, http.MethodGet, "/v1/workflows?limit=2&cursor=beta", viewerKey, "", nil)
+	var items []draftSummaryResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &items); err != nil || len(items) != 1 || items[0].WorkflowID != "gamma" {
+		t.Fatalf("second items=%+v err=%v body=%s", items, err, second.Body.String())
+	}
+	invalid := requestJSON(t, handler, http.MethodGet, "/v1/workflows?limit=101", viewerKey, "", nil)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid page status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	for index := 0; index < 3; index++ {
+		published := requestJSON(t, handler, http.MethodPost, "/v1/workflows/alpha/publish-draft", tenantAKey, fmt.Sprintf("publish-page-%02d", index), nil)
+		if published.Code != http.StatusCreated {
+			t.Fatalf("publish status=%d body=%s", published.Code, published.Body.String())
+		}
+	}
+	versions := requestJSON(t, handler, http.MethodGet, "/v1/workflows/alpha/versions?limit=2", viewerKey, "", nil)
+	if versions.Code != http.StatusOK || versions.Header().Get("X-Next-Cursor") != "2" || bytes.Contains(versions.Body.Bytes(), []byte(`"definition"`)) {
+		t.Fatalf("versions status=%d cursor=%q body=%s", versions.Code, versions.Header().Get("X-Next-Cursor"), versions.Body.String())
+	}
+	versionTail := requestJSON(t, handler, http.MethodGet, "/v1/workflows/alpha/versions?limit=2&cursor=2", viewerKey, "", nil)
+	var versionItems []versionSummaryResponse
+	if err := json.Unmarshal(versionTail.Body.Bytes(), &versionItems); err != nil || len(versionItems) != 1 || versionItems[0].Version != 1 {
+		t.Fatalf("version tail=%+v err=%v body=%s", versionItems, err, versionTail.Body.String())
+	}
+}
+
+// 验证不可重试的 Studio 持久资源硬配额统一返回稳定 429 problem code。
+func TestStudioResourceLimitsReturnTooManyRequests(t *testing.T) {
+	for _, limitErr := range []error{definition.ErrTenantDraftLimit, platform.ErrTenantVersionLimit, platform.ErrWorkflowVersionLimit} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+		response := httptest.NewRecorder()
+		new(Handler).writeError(response, request, limitErr)
+		if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), `"code":"resource_limit_exceeded"`) {
+			t.Fatalf("error=%v status=%d body=%s", limitErr, response.Code, response.Body.String())
+		}
+	}
+}
 
 func studioHandler(t *testing.T) http.Handler {
 	t.Helper()

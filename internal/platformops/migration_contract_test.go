@@ -40,7 +40,7 @@ func TestPlatformOpsSQLCoordinationContracts(t *testing.T) {
 		source.Write(contents)
 	}
 	text := source.String()
-	for _, fragment := range []string{"tenant_id=$1", "FOR UPDATE SKIP LOCKED", "topic = ANY($5::text[])", "ON CONFLICT", "insertAuditTx"} {
+	for _, fragment := range []string{"tenant_id=$1", "FOR UPDATE SKIP LOCKED", "topic = ANY($4::text[])", "ON CONFLICT", "insertAuditTx"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("platform SQL coordination missing %q", fragment)
 		}
@@ -80,6 +80,24 @@ func TestTriggerLifecycleMigrationContracts(t *testing.T) {
 	} {
 		if !strings.Contains(sql, fragment) {
 			t.Fatalf("trigger lifecycle migration missing %q", fragment)
+		}
+	}
+}
+
+// 验证已接受 firing 固化不可变执行目标，且删除 trigger 不级联删除历史命令。
+func TestImmutableFiringTargetMigrationContract(t *testing.T) {
+	contents, err := os.ReadFile("../../migrations/000022_firing_immutable_plan.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, fragment := range []string{
+		"DROP CONSTRAINT trigger_firings_tenant_id_trigger_id_fkey",
+		"ADD COLUMN workflow_version_id", "ADD COLUMN execution_plan_id", "ADD COLUMN plan_hash",
+		"trigger_firings_workflow_version_fkey", "ON DELETE RESTRICT", "trigger_firings_bound_plan_check",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("immutable firing migration missing %q", fragment)
 		}
 	}
 }
@@ -133,6 +151,26 @@ func TestDefaultRetentionPolicyMigrationCoversFutureTenants(t *testing.T) {
 	} {
 		if !strings.Contains(sql, required) {
 			t.Fatalf("default retention migration missing %q", required)
+		}
+	}
+}
+
+// 验证 trigger capacity 迁移在数据库边界提供租户硬上限、公平游标、失败释放与保留索引。
+func TestTriggerCapacityMigrationDefinesHardGuardsAndRetention(t *testing.T) {
+	contents, err := os.ReadFile("../../migrations/000023_trigger_capacity_retention.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"max_triggers", "max_pending_trigger_firings", "max_pending_outbox_messages",
+		"CREATE TABLE trigger_schedule_tenant_state",
+		"triggers_capacity_guard", "trigger_firings_capacity_guard", "outbox_messages_capacity_guard",
+		"USING ERRCODE = '53400'", "outbox_terminal_trigger_firing",
+		"trigger_firings_completed_retention_idx", "outbox_messages_delivered_retention_idx",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("trigger capacity migration missing %q", required)
 		}
 	}
 }

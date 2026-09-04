@@ -142,7 +142,7 @@ func (s *Supervisor) ScheduleOnce(ctx context.Context, now time.Time) error {
 	tenants, tenantErr := s.tenantPage(ctx, "schedule", s.config.ScheduleBatch)
 	failures := []error{tickErr, purgeErr, tenantErr}
 	for _, tenantID := range tenants {
-		_, reapErr := s.workers.ReapStale(ctx, tenantID, now.Add(-30*time.Second), s.config.ScheduleBatch)
+		_, reapErr := s.workers.ReapStale(ctx, tenantID, 30*time.Second, s.config.ScheduleBatch)
 		failures = append(failures, reapErr)
 	}
 	return errors.Join(failures...)
@@ -230,6 +230,9 @@ func (s *Supervisor) RetentionOnce(ctx context.Context, now time.Time) error {
 	for _, tenantID := range tenants {
 		if _, sweepErr := s.retention.SweepTenant(ctx, tenantID, now, s.config.RetentionBatch); sweepErr != nil && !errors.Is(sweepErr, ErrNotFound) {
 			failures = append(failures, fmt.Errorf("tenant retention: %w", sweepErr))
+		}
+		if _, purgeErr := s.triggerStore.PurgeCompletedTriggerHistory(ctx, tenantID, s.config.RetentionBatch); purgeErr != nil {
+			failures = append(failures, fmt.Errorf("tenant trigger history retention: %w", purgeErr))
 		}
 	}
 	return errors.Join(failures...)

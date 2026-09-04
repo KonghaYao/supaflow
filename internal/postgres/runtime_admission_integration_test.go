@@ -142,6 +142,58 @@ func TestPostgresRunAdmissionConcurrentBoundAndReplay(t *testing.T) {
 	assertAdmissionCounters(t, ctx, pool, tenantID, 1, 2)
 }
 
+// 验证 runtime 终态释放在动态下调配额后先自然收敛，低于新上限前不晋升排队 run。
+func TestRuntimeAdmissionReleaseHonorsDownscaledQuota(t *testing.T) {
+	ctx, pool := admissionTestPool(t)
+	tenantID, service, plan := admissionTestTenant(t, ctx, pool, "downscale")
+	controller, _ := platformops.NewAdmission(pool, 5*time.Second)
+	if err := controller.ConfigureQuota(ctx, platformops.Quota{
+		TenantID: tenantID, MaxActiveRuns: 10, MaxActiveWorkers: 1, MaxQueueDepth: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	activeIDs := make([]string, 0, 10)
+	for index := 0; index < 15; index++ {
+		run := startAdmissionRun(t, ctx, service, tenantID, plan, fmt.Sprintf("downscale-run-%02d", index), index)
+		if index < 10 {
+			activeIDs = append(activeIDs, run.ID)
+		}
+	}
+	if err := controller.ConfigureQuota(ctx, platformops.Quota{
+		TenantID: tenantID, MaxActiveRuns: 5, MaxActiveWorkers: 1, MaxQueueDepth: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range activeIDs[:5] {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		promoted, releaseErr := releaseRunAdmissionTx(ctx, tx, workflowruntime.TenantID(tenantID), runID, time.Now().UTC())
+		if releaseErr != nil || promoted != "" {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("release run=%s promoted=%s err=%v", runID, promoted, releaseErr)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertAdmissionCounters(t, ctx, pool, tenantID, 5, 5)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := releaseRunAdmissionTx(ctx, tx, workflowruntime.TenantID(tenantID), activeIDs[5], time.Now().UTC())
+	if err != nil || promoted == "" {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("release at quota promoted=%s err=%v", promoted, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertAdmissionCounters(t, ctx, pool, tenantID, 5, 4)
+}
+
 func admissionTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
 	databaseURL := os.Getenv("SUPAFLOW_TEST_DATABASE_URL")

@@ -104,6 +104,23 @@ func TestMigratorRejectsDeletedAppliedMigration(t *testing.T) {
 	if err = migrator.Up(ctx, migrations); err != nil {
 		t.Fatal(err)
 	}
+	var schemaVersion int
+	var installationID, contentHash string
+	var definitionCount, draftCount, triggerCount, runCount int
+	if err = pool.QueryRow(ctx, `SELECT schema_version,installation_id,content_hash,
+		definition_count,draft_count,trigger_count,run_count
+		FROM fenix_target_attestation_v1()`).Scan(
+		&schemaVersion, &installationID, &contentHash,
+		&definitionCount, &draftCount, &triggerCount, &runCount,
+	); err != nil {
+		t.Fatalf("query Fenix target attestation after full migration: %v", err)
+	}
+	if schemaVersion != 1 || installationID == "" || len(contentHash) != 64 ||
+		definitionCount != 0 || draftCount != 0 || triggerCount != 0 || runCount != 0 {
+		t.Fatalf("unexpected empty target attestation: %d %q %q %d %d %d %d",
+			schemaVersion, installationID, contentHash,
+			definitionCount, draftCount, triggerCount, runCount)
+	}
 	if len(migrations) < 2 {
 		t.Fatal("test requires at least two migrations")
 	}
@@ -136,6 +153,7 @@ func TestProductionMigrationsContainDurabilityConstraints(t *testing.T) {
 		"definition_mutations", "run_rerun_lineage",
 		"outbound_webhook_subscriptions", "outbound_webhook_receipts",
 		"webhook_resumptions", "attempt_stream_state", "attempt_stream_chunks",
+		"platform_installations",
 	} {
 		if !strings.Contains(sql, "CREATE TABLE "+table) {
 			t.Errorf("missing table %s", table)
@@ -154,6 +172,8 @@ func TestProductionMigrationsContainDurabilityConstraints(t *testing.T) {
 		"ADD CONSTRAINT runs_output_fk",
 		"FOREIGN KEY (tenant_id, output_id)",
 		"ADD COLUMN deadline_at timestamptz", "runs_deadline_due_idx",
+		"fenix_target_attestation_v1", "platform_installations_immutable",
+		"JOIN node_states output_state", "'planHash', run.plan_hash",
 	} {
 		if !strings.Contains(sql, contract) {
 			t.Errorf("missing SQL contract %q", contract)

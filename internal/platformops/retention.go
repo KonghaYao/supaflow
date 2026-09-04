@@ -1,12 +1,12 @@
 package platformops
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -56,9 +56,11 @@ func NewRetention(pool *pgxpool.Pool, objects ObjectStore, maxExportBytes int64)
 	return &Retention{pool: pool, objects: objects, maxExport: maxExportBytes}, nil
 }
 
-// ArchiveExpired marks expired active objects archived under a row lock.
-func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, now time.Time, limit int) (int, error) {
-	if tenantID == "" || now.IsZero() || limit <= 0 || limit > 1000 {
+// ArchiveExpired marks expired active objects archived under a row lock. The
+// database clock is authoritative so a skewed control-plane replica cannot
+// archive data before its retention horizon.
+func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, limit int) (int, error) {
+	if tenantID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -66,6 +68,10 @@ func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, now tim
 		return 0, fmt.Errorf("begin managed object archive: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var now time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return 0, fmt.Errorf("read database clock for managed object archive: %w", err)
+	}
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
 		    SELECT tenant_id,id FROM managed_objects
@@ -92,15 +98,17 @@ func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, now tim
 	return count, nil
 }
 
-// DeleteArchived idempotently removes archived bytes then tombstones metadata.
-func (r *Retention) DeleteArchived(ctx context.Context, tenantID string, archivedBefore time.Time, limit int) (int, error) {
-	if tenantID == "" || archivedBefore.IsZero() || limit <= 0 || limit > 1000 {
+// DeleteArchived idempotently removes archived bytes after the requested grace
+// period, measured from the database clock.
+func (r *Retention) DeleteArchived(ctx context.Context, tenantID string, grace time.Duration, limit int) (int, error) {
+	if tenantID == "" || grace < 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id,kind FROM managed_objects
-		WHERE tenant_id=$1 AND status='archived' AND archived_at <= $2
-		ORDER BY archived_at,id LIMIT $3`, tenantID, archivedBefore, limit)
+		WHERE tenant_id=$1 AND status='archived'
+		  AND archived_at <= clock_timestamp() - make_interval(secs => $2)
+		ORDER BY archived_at,id LIMIT $3`, tenantID, grace.Seconds(), limit)
 	if err != nil {
 		return 0, fmt.Errorf("select archived objects: %w", err)
 	}
@@ -136,37 +144,25 @@ func (r *Retention) SweepTenant(ctx context.Context, tenantID string, now time.T
 	if tenantID == "" || now.IsZero() || limit <= 0 || limit > 1000 {
 		return RetentionSweep{}, ErrInvalidArgument
 	}
-	policy, err := r.backfillOutputRetention(ctx, tenantID, limit)
-	if err != nil {
-		return RetentionSweep{}, err
-	}
 	result := RetentionSweep{}
-	if policy.ArchiveBeforeDelete {
-		_, result.EventsRemoved, err = r.ArchiveEvents(ctx, tenantID, "system:retention", now.AddDate(0, 0, -policy.EventDays), limit)
-	} else {
-		tag, deleteErr := r.pool.Exec(ctx, `DELETE FROM run_events WHERE (tenant_id,id) IN (
-			SELECT e.tenant_id,e.id FROM run_events e JOIN runs run ON run.tenant_id=e.tenant_id AND run.id=e.run_id
-			WHERE e.tenant_id=$1 AND e.created_at < $2 AND run.status IN ('success','failed','error','cancelled')
-			ORDER BY e.created_at,e.id LIMIT $3)`, tenantID, now.AddDate(0, 0, -policy.EventDays), limit)
-		err = deleteErr
-		result.EventsRemoved = int(tag.RowsAffected())
-	}
+	var err error
+	result.EventsRemoved, err = r.sweepEventsAndBackfill(ctx, tenantID, limit)
 	if err != nil {
 		return result, err
 	}
-	result.ObjectsArchived, err = r.ArchiveExpired(ctx, tenantID, now, limit)
+	result.ObjectsArchived, err = r.ArchiveExpired(ctx, tenantID, limit)
 	if err != nil {
 		return result, err
 	}
-	result.InlineOutputsArchived, err = r.ArchiveNodeOutputs(ctx, tenantID, "system:retention", now, limit)
+	result.InlineOutputsArchived, err = r.ArchiveNodeOutputs(ctx, tenantID, "system:retention", limit)
 	if err != nil {
 		return result, err
 	}
-	result.ObjectsDeleted, err = r.DeleteArchived(ctx, tenantID, now.Add(-24*time.Hour), limit)
+	result.ObjectsDeleted, err = r.DeleteArchived(ctx, tenantID, 24*time.Hour, limit)
 	if err != nil {
 		return result, err
 	}
-	result.InlineOutputsDeleted, err = r.DeleteArchivedNodeOutputs(ctx, tenantID, "system:retention", now.Add(-24*time.Hour), limit)
+	result.InlineOutputsDeleted, err = r.DeleteArchivedNodeOutputs(ctx, tenantID, "system:retention", 24*time.Hour, limit)
 	return result, err
 }
 
@@ -207,8 +203,22 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return ManagedObject{}, 0, fmt.Errorf("select event archive: %w", err)
 	}
+	archiveFile, err := os.CreateTemp("", "supaflow-event-archive-*.json")
+	if err != nil {
+		rows.Close()
+		return ManagedObject{}, 0, fmt.Errorf("create bounded event archive spool: %w", err)
+	}
+	archivePath := archiveFile.Name()
+	defer func() {
+		_ = archiveFile.Close()
+		_ = os.Remove(archivePath)
+	}()
+	bounded := &boundedJSONWriter{writer: archiveFile, remaining: r.maxExport}
+	if _, err = bounded.Write([]byte(`{"schemaVersion":1,"events":[`)); err != nil {
+		rows.Close()
+		return ManagedObject{}, 0, err
+	}
 	ids := make([]string, 0, limit)
-	records := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var id, runID, eventType string
 		var sequence int64
@@ -223,8 +233,29 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 			rows.Close()
 			return ManagedObject{}, 0, ErrInvalidArgument
 		}
+		record, encodeErr := json.Marshal(map[string]any{
+			"id": id, "runId": runID, "sequence": sequence, "type": eventType,
+			"payload": json.RawMessage(redacted), "createdAt": createdAt,
+		})
+		if encodeErr != nil {
+			rows.Close()
+			return ManagedObject{}, 0, fmt.Errorf("encode event archive row: %w", encodeErr)
+		}
+		if len(ids) > 0 {
+			if _, err = bounded.Write([]byte{','}); err != nil {
+				rows.Close()
+				return ManagedObject{}, 0, err
+			}
+		}
+		if _, err = bounded.Write(record); err != nil {
+			rows.Close()
+			return ManagedObject{}, 0, err
+		}
 		ids = append(ids, id)
-		records = append(records, map[string]any{"id": id, "runId": runID, "sequence": sequence, "type": eventType, "payload": redacted, "createdAt": createdAt})
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return ManagedObject{}, 0, fmt.Errorf("iterate event archive: %w", err)
 	}
 	rows.Close()
 	if len(ids) == 0 {
@@ -233,11 +264,13 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 		}
 		return ManagedObject{}, 0, nil
 	}
-	contents, err := json.Marshal(map[string]any{"schemaVersion": 1, "events": records})
-	if err != nil || int64(len(contents)) > r.maxExport {
-		return ManagedObject{}, 0, ErrRateLimited
+	if _, err = bounded.Write([]byte(`]}`)); err != nil {
+		return ManagedObject{}, 0, err
 	}
-	stored, err := upload.put(ctx, bytes.NewReader(contents), r.maxExport)
+	if _, err = archiveFile.Seek(0, 0); err != nil {
+		return ManagedObject{}, 0, fmt.Errorf("rewind event archive spool: %w", err)
+	}
+	stored, err := upload.put(ctx, archiveFile, r.maxExport)
 	if err != nil {
 		return ManagedObject{}, 0, err
 	}
@@ -285,6 +318,21 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 			return TenantExport{}, err
 		}
 		if found {
+			replayTx, beginErr := r.pool.BeginTx(ctx, pgx.TxOptions{})
+			if beginErr != nil {
+				return TenantExport{}, fmt.Errorf("begin tenant export replay: %w", beginErr)
+			}
+			defer func() { _ = replayTx.Rollback(context.WithoutCancel(ctx)) }()
+			audited, auditErr := recordAllowedMutationTx(ctx, replayTx, exportID)
+			if auditErr != nil {
+				return TenantExport{}, fmt.Errorf("audit tenant export replay: %w", auditErr)
+			}
+			if commitErr := replayTx.Commit(ctx); commitErr != nil {
+				return TenantExport{}, fmt.Errorf("commit tenant export replay: %w", commitErr)
+			}
+			if audited {
+				markMutationCommitted(ctx)
+			}
 			return existing, nil
 		}
 	}
@@ -319,29 +367,29 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 		return TenantExport{}, fmt.Errorf("begin tenant export snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	exportData := map[string]any{"schemaVersion": 1, "tenantId": tenantID, "exportedAt": time.Now().UTC()}
-	for name, query := range exportQueries() {
-		records, queryErr := exportRows(ctx, tx, query, tenantID)
-		if queryErr != nil {
-			return TenantExport{}, queryErr
-		}
-		exportData[name] = records
+	var exportedAt time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&exportedAt); err != nil {
+		return TenantExport{}, fmt.Errorf("read database clock for tenant export: %w", err)
+	}
+	exportFile, err := os.CreateTemp("", "supaflow-tenant-export-*.json")
+	if err != nil {
+		return TenantExport{}, fmt.Errorf("create bounded tenant export spool: %w", err)
+	}
+	exportPath := exportFile.Name()
+	defer func() {
+		_ = exportFile.Close()
+		_ = os.Remove(exportPath)
+	}()
+	if err = streamTenantExport(ctx, tx, exportFile, r.maxExport, tenantID, exportedAt); err != nil {
+		return TenantExport{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return TenantExport{}, fmt.Errorf("commit tenant export snapshot: %w", err)
 	}
-	contents, err := json.Marshal(exportData)
-	if err != nil {
-		return TenantExport{}, fmt.Errorf("encode tenant export: %w", err)
+	if _, err = exportFile.Seek(0, 0); err != nil {
+		return TenantExport{}, fmt.Errorf("rewind tenant export spool: %w", err)
 	}
-	contents, err = redactJSON(contents)
-	if err != nil {
-		return TenantExport{}, fmt.Errorf("redact tenant export: %w", err)
-	}
-	if int64(len(contents)) > r.maxExport {
-		return TenantExport{}, ErrRateLimited
-	}
-	stored, err := upload.put(ctx, bytes.NewReader(contents), r.maxExport)
+	stored, err := upload.put(ctx, exportFile, r.maxExport)
 	if err != nil {
 		return TenantExport{}, err
 	}
@@ -368,17 +416,26 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 	if err != nil {
 		return TenantExport{}, fmt.Errorf("record tenant export: %w", err)
 	}
-	if _, err = insertAuditTx(ctx, writeTx, AuditRecord{
-		TenantID: tenantID, ActorID: actorID, Action: "tenant.export",
-		ResourceType: "tenant_export", ResourceID: exportID, Outcome: AuditAllowed,
-	}); err != nil {
-		return TenantExport{}, err
+	audited, err := recordAllowedMutationTx(ctx, writeTx, exportID)
+	if err != nil {
+		return TenantExport{}, fmt.Errorf("audit tenant export mutation: %w", err)
+	}
+	if !audited {
+		if _, err = insertAuditTx(ctx, writeTx, AuditRecord{
+			TenantID: tenantID, ActorID: actorID, Action: "tenant.export",
+			ResourceType: "tenant_export", ResourceID: exportID, Outcome: AuditAllowed,
+		}); err != nil {
+			return TenantExport{}, err
+		}
 	}
 	if err = upload.completeTx(ctx, writeTx); err != nil {
 		return TenantExport{}, err
 	}
 	if err = writeTx.Commit(ctx); err != nil {
 		return TenantExport{}, fmt.Errorf("commit tenant export: %w", err)
+	}
+	if audited {
+		markMutationCommitted(ctx)
 	}
 	committed = true
 	return result, nil
@@ -398,40 +455,4 @@ func (r *Retention) findTenantExport(ctx context.Context, tenantID, exportID str
 		return TenantExport{}, false, fmt.Errorf("recover tenant export: %w", err)
 	}
 	return result, true, nil
-}
-
-func exportQueries() map[string]string {
-	return map[string]string{
-		"workflows":   `SELECT id,slug,name,description,status,created_by,created_at,updated_at FROM workflows WHERE tenant_id=$1 ORDER BY id`,
-		"versions":    `SELECT id,workflow_id,version,definition,encode(definition_hash,'hex'),published_by,published_at FROM workflow_versions WHERE tenant_id=$1 ORDER BY workflow_id,version`,
-		"runs":        `SELECT id,workflow_id,workflow_version_id,execution_plan_id,status,created_at,updated_at,finished_at FROM runs WHERE tenant_id=$1 ORDER BY created_at,id`,
-		"events":      `SELECT id,run_id,sequence,event_type,payload,created_at FROM run_events WHERE tenant_id=$1 ORDER BY run_id,sequence`,
-		"credentials": `SELECT id,name,provider,purpose,status,current_version,created_by,created_at,updated_at,revoked_at FROM credential_refs WHERE tenant_id=$1 ORDER BY id`,
-		"audit":       `SELECT id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at FROM audit_records WHERE tenant_id=$1 ORDER BY created_at,id`,
-	}
-}
-
-func exportRows(ctx context.Context, tx pgx.Tx, query, tenantID string) ([]map[string]any, error) {
-	rows, err := tx.Query(ctx, query, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("query tenant export: %w", err)
-	}
-	defer rows.Close()
-	fields := rows.FieldDescriptions()
-	result := make([]map[string]any, 0)
-	for rows.Next() {
-		values, valuesErr := rows.Values()
-		if valuesErr != nil {
-			return nil, fmt.Errorf("read tenant export row: %w", valuesErr)
-		}
-		record := make(map[string]any, len(values))
-		for index, value := range values {
-			record[fields[index].Name] = value
-		}
-		result = append(result, record)
-	}
-	if err = rows.Err(); err != nil && !errors.Is(err, context.Canceled) {
-		return nil, fmt.Errorf("iterate tenant export: %w", err)
-	}
-	return result, err
 }

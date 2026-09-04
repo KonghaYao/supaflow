@@ -56,6 +56,29 @@ func TestCompilePinsSensitiveOutputPolicy(t *testing.T) {
 	}
 }
 
+// 验证显式敏感源的所有下游输出强制携带不可逆标记，且 credential 能力本身不会误伤普通流程。
+func TestCompilePropagatesSensitiveOutputToTerminalWithoutOvertainting(t *testing.T) {
+	definition := validDefinition()
+	for index := range definition.Nodes {
+		definition.Nodes[index].Metadata = map[string]json.RawMessage{"sensitiveOutput": json.RawMessage(`false`)}
+	}
+	definition.Nodes[1].Metadata["sensitiveOutput"] = json.RawMessage(`true`)
+	plan, err := Compile(definition, BuiltinRegistry(), builtinPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nodeID := range []string{"request", "approval", "finish"} {
+		node, exists := plan.Node(nodeID)
+		if !exists || !node.SensitiveOutput {
+			t.Fatalf("node %s lost credential-derived confidentiality: %+v", nodeID, node)
+		}
+	}
+	start, exists := plan.Node("begin")
+	if !exists || start.SensitiveOutput {
+		t.Fatalf("unrelated upstream node was overtainted: %+v", start)
+	}
+}
+
 // 验证保留的敏感输出元数据必须是严格布尔值，避免拼写错误静默降级为内联。
 func TestCompileRejectsInvalidSensitiveOutputPolicy(t *testing.T) {
 	definition := validDefinition()

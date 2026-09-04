@@ -99,6 +99,10 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err = pool.Exec(ctx, `UPDATE interrupts SET expires_at=clock_timestamp()-interval '1 second'
+		WHERE tenant_id=$1 AND id=$2`, tenantID, "wait_"+suffix); err != nil {
+		t.Fatal(err)
+	}
 	resumed, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
 		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "worker-2", Now: now.Add(time.Second), LeaseDuration: time.Minute,
 	})

@@ -59,19 +59,27 @@ type validationState struct {
 func ValidateDefinition(definition WorkflowDefinition, registry *Registry, policy CompilePolicy) error {
 	state := newValidationState(definition, registry, policy)
 	state.validateIdentity()
+	if state.validateCollectionLimits() {
+		return state.result()
+	}
 	state.validateNodes()
 	state.validateEdges()
+	state.validateFanoutLimits()
 	state.validateGraph()
-	if len(state.issues) == 0 {
+	return state.result()
+}
+
+func (s *validationState) result() error {
+	if len(s.issues) == 0 {
 		return nil
 	}
-	sort.SliceStable(state.issues, func(i, j int) bool {
-		if state.issues[i].Path != state.issues[j].Path {
-			return state.issues[i].Path < state.issues[j].Path
+	sort.SliceStable(s.issues, func(i, j int) bool {
+		if s.issues[i].Path != s.issues[j].Path {
+			return s.issues[i].Path < s.issues[j].Path
 		}
-		return state.issues[i].Code < state.issues[j].Code
+		return s.issues[i].Code < s.issues[j].Code
 	})
-	return &ValidationError{Issues: state.issues}
+	return &ValidationError{Issues: s.issues}
 }
 
 func newValidationState(definition WorkflowDefinition, registry *Registry, policy CompilePolicy) *validationState {

@@ -163,16 +163,16 @@ func (s *PostgresCredentialStore) GrantCredential(ctx context.Context, request G
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO attempt_credential_grants (tenant_id,attempt_id,credential_id,granted_by,expires_at)
-		SELECT $1,$2,$3,$2,$8 FROM credential_refs c
+		SELECT $1,$2,$3,$2,$7 FROM credential_refs c
 		JOIN node_attempts a ON a.tenant_id=c.tenant_id AND a.id=$2 AND a.run_id=$4
 		JOIN worker_leases l ON l.tenant_id=a.tenant_id AND l.run_id=a.run_id AND l.attempt_id=a.id
 		WHERE c.tenant_id=$1 AND c.id=$3 AND c.status='active' AND c.purpose=$5
 		  AND a.status='running' AND a.fencing_token=$6
-		  AND l.fencing_token=$6 AND l.expires_at>$7
+		  AND l.fencing_token=$6 AND l.expires_at>clock_timestamp()
 		ON CONFLICT (tenant_id,attempt_id,credential_id) DO UPDATE
 		SET granted_by=EXCLUDED.granted_by,expires_at=EXCLUDED.expires_at,created_at=now()`,
 		request.TenantID, request.AttemptID, request.CredentialID, request.RunID, request.Purpose,
-		request.FencingToken, request.Now, request.ExpiresAt)
+		request.FencingToken, request.ExpiresAt)
 	if err != nil {
 		return credentialError("grant credential", err)
 	}
@@ -205,10 +205,10 @@ func (s *PostgresCredentialStore) EncryptedForAttempt(ctx context.Context, reque
 		JOIN worker_leases l ON l.tenant_id=a.tenant_id AND l.run_id=a.run_id AND l.attempt_id=a.id
 		WHERE c.tenant_id=$1 AND c.id=$2 AND g.attempt_id=$3 AND a.run_id=$4
 		  AND c.status='active' AND c.purpose=$5 AND a.status='running'
-		  AND a.fencing_token=$6 AND l.fencing_token=$6 AND l.expires_at>$7
-		  AND (g.expires_at IS NULL OR g.expires_at > $7)`,
+		  AND a.fencing_token=$6 AND l.fencing_token=$6 AND l.expires_at>clock_timestamp()
+		  AND (g.expires_at IS NULL OR g.expires_at > clock_timestamp())`,
 		request.TenantID, request.CredentialID, request.AttemptID, request.RunID,
-		request.Purpose, request.FencingToken, request.Now))
+		request.Purpose, request.FencingToken))
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _ = insertAuditTx(ctx, tx, AuditRecord{
 			TenantID: request.TenantID, ActorID: request.AttemptID, Action: "credential.resolve",

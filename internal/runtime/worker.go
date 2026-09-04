@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const detachedWorkerCleanupTimeout = 5 * time.Second
+
 // CryptoIDGenerator generates opaque IDs using cryptographic randomness.
 type CryptoIDGenerator struct{}
 
@@ -144,6 +146,7 @@ type Orchestrator struct {
 	ids           IDGenerator
 	workerID      string
 	leaseDuration time.Duration
+	cancelTimeout time.Duration
 	retry         RetryPolicy
 	resumeTokens  *ResumeTokenIssuer
 	telemetry     Telemetry
@@ -153,6 +156,7 @@ type Orchestrator struct {
 type OrchestratorConfig struct {
 	WorkerID      string
 	LeaseDuration time.Duration
+	CancelTimeout time.Duration
 	RetryPolicy   RetryPolicy
 	ResumeTokens  *ResumeTokenIssuer
 	Telemetry     Telemetry
@@ -169,6 +173,12 @@ func NewOrchestrator(store Store, executor Executor, clock Clock, ids IDGenerato
 	if cfg.WorkerID == "" || cfg.LeaseDuration <= 0 {
 		return nil, errorf(CodeInvalidArgument, "worker id and positive lease duration are required")
 	}
+	if cfg.CancelTimeout == 0 {
+		cfg.CancelTimeout = detachedWorkerCleanupTimeout
+	}
+	if cfg.CancelTimeout < 0 {
+		return nil, errorf(CodeInvalidArgument, "cancel timeout must be positive")
+	}
 	if err := cfg.RetryPolicy.Validate(); err != nil {
 		return nil, err
 	}
@@ -180,7 +190,7 @@ func NewOrchestrator(store Store, executor Executor, clock Clock, ids IDGenerato
 	}
 	return &Orchestrator{
 		store: store, executor: executor, clock: clock, ids: ids,
-		workerID: cfg.WorkerID, leaseDuration: cfg.LeaseDuration, retry: cfg.RetryPolicy,
+		workerID: cfg.WorkerID, leaseDuration: cfg.LeaseDuration, cancelTimeout: cfg.CancelTimeout, retry: cfg.RetryPolicy,
 		resumeTokens: cfg.ResumeTokens,
 		telemetry:    cfg.Telemetry,
 	}, nil
@@ -240,12 +250,12 @@ func (o *Orchestrator) advance(ctx context.Context, tenantID TenantID) (AdvanceR
 		// Cancel is a best-effort remote-runner signal. The durable cancellation
 		// transition must not be held hostage by an adapter that already lost the
 		// process or returns an error while cleaning it up.
-		_ = o.executor.Cancel(ctx, req)
 		run, completeErr := o.store.CompleteAttempt(ctx, CompleteAttemptRequest{
 			TenantID: tenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 			WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 			Now: o.clock.Now(), RunStatus: RunCancelled,
 		})
+		o.cancelExecutorBounded(ctx, req)
 		return AdvanceResult{Worked: true, Run: &run}, completeErr
 	}
 	result, executeErr, leaseErr := o.executeWithLease(ctx, work, req)
@@ -316,8 +326,10 @@ func (o *Orchestrator) executeWithLease(ctx context.Context, work *WorkItem, req
 	stopRenewal()
 	renewalErr := <-renewalResult
 	if work.Run.DeadlineAt != nil && !time.Now().UTC().Before(*work.Run.DeadlineAt) {
-		_, _ = o.store.ExpireRun(context.WithoutCancel(ctx), work.Run.TenantID, work.Run.ID, time.Now().UTC())
-		_ = o.executor.Cancel(context.WithoutCancel(ctx), req)
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), detachedWorkerCleanupTimeout)
+		_, _ = o.store.ExpireRun(cleanupCtx, work.Run.TenantID, work.Run.ID, time.Now().UTC())
+		o.cancelExecutorBounded(cleanupCtx, req)
+		cancelCleanup()
 		renewalErr = errRunDeadlineElapsed
 	}
 	cancelExecution()
@@ -337,9 +349,11 @@ func (o *Orchestrator) renewLeaseUntilDone(ctx context.Context, cancelExecution 
 			return nil
 		case <-ticker.C:
 			if work.Run.DeadlineAt != nil && !o.clock.Now().Before(*work.Run.DeadlineAt) {
-				_, _ = o.store.ExpireRun(context.WithoutCancel(ctx), work.Run.TenantID, work.Run.ID, o.clock.Now())
-				_ = o.executor.Cancel(context.WithoutCancel(ctx), req)
 				cancelExecution()
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), detachedWorkerCleanupTimeout)
+				_, _ = o.store.ExpireRun(cleanupCtx, work.Run.TenantID, work.Run.ID, o.clock.Now())
+				o.cancelExecutorBounded(cleanupCtx, req)
+				cancelCleanup()
 				return errRunDeadlineElapsed
 			}
 			_, err := o.store.RenewLease(ctx, RenewLeaseRequest{
@@ -359,11 +373,28 @@ func (o *Orchestrator) renewLeaseUntilDone(ctx context.Context, cancelExecution 
 			if run.Status == RunCancelling || run.CancelRequestedAt != nil {
 				// Keep the explicit cancellation SPI even for in-process executors:
 				// remote runners need this signal in addition to context cancellation.
-				_ = o.executor.Cancel(ctx, req)
 				cancelExecution()
+				o.cancelExecutorBounded(ctx, req)
 				return errRunCancellationRequested
 			}
 		}
+	}
+}
+
+// cancelExecutorBounded prevents a broken adapter from blocking the durable
+// worker loop. Implementations are still required to honor context; the
+// goroutine boundary contains a non-compliant adapter to this one signal.
+func (o *Orchestrator) cancelExecutorBounded(ctx context.Context, req ExecutionRequest) {
+	cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.cancelTimeout)
+	defer cancel()
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = o.executor.Cancel(cancelCtx, req)
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+	case <-cancelCtx.Done():
 	}
 }
 

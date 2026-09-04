@@ -139,7 +139,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer operations.close()
+	defer func() {
+		if closeErr := operations.close(); closeErr != nil {
+			slog.Error("worker quota release failed", "error", platformops.RedactDiagnostic(closeErr.Error()))
+		}
+	}()
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	heartbeatDone := make(chan struct{})
 	go func() {

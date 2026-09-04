@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
@@ -16,16 +17,19 @@ type AuditRecorder interface {
 
 // AuditedExecutor fails closed when execution authorization evidence cannot be persisted.
 type AuditedExecutor struct {
-	next  workflowruntime.Executor
-	audit AuditRecorder
+	next         workflowruntime.Executor
+	audit        AuditRecorder
+	auditTimeout time.Duration
 }
+
+const defaultExecutionAuditTimeout = 5 * time.Second
 
 // NewAuditedExecutor wraps an executor with allow, deny, fail, and cancel evidence.
 func NewAuditedExecutor(next workflowruntime.Executor, audit AuditRecorder) (*AuditedExecutor, error) {
 	if next == nil || audit == nil {
 		return nil, ErrInvalidArgument
 	}
-	return &AuditedExecutor{next: next, audit: audit}, nil
+	return &AuditedExecutor{next: next, audit: audit, auditTimeout: defaultExecutionAuditTimeout}, nil
 }
 
 // Execute records an allow before the side effect and its eventual outcome afterward.
@@ -56,7 +60,9 @@ func (e *AuditedExecutor) execute(ctx context.Context, request workflowruntime.E
 		return result, nil
 	}
 	base.Outcome = executionFailureOutcome(err)
-	_, auditErr := e.audit.Record(context.WithoutCancel(ctx), base)
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.auditTimeout)
+	defer cancel()
+	_, auditErr := e.audit.Record(auditCtx, base)
 	return result, errors.Join(err, auditErr)
 }
 
@@ -67,7 +73,9 @@ func (e *AuditedExecutor) Cancel(ctx context.Context, request workflowruntime.Ex
 	if err != nil {
 		outcome = AuditFailed
 	}
-	_, auditErr := e.audit.Record(context.WithoutCancel(ctx), AuditRecord{
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.auditTimeout)
+	defer cancel()
+	_, auditErr := e.audit.Record(auditCtx, AuditRecord{
 		TenantID: string(request.TenantID), ActorID: request.AttemptID, Action: "execution.cancel",
 		ResourceType: "attempt", ResourceID: request.AttemptID, Outcome: outcome,
 	})

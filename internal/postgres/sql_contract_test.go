@@ -45,7 +45,7 @@ func TestLeaseQueriesEnforceClaimAndFencingContracts(t *testing.T) {
 	}
 	for _, contract := range []string{
 		"a.worker_id = $4", "a.fencing_token = $5", "l.worker_id = $4",
-		"l.fencing_token = $5", "l.expires_at > $6", "FOR UPDATE OF a, l",
+		"l.fencing_token = $5", "l.expires_at > clock_timestamp()", "FOR UPDATE OF a, l",
 	} {
 		if !strings.Contains(readSource(t, "runtime_claim.go"), contract) {
 			t.Errorf("runtime lease validation lacks %q", contract)

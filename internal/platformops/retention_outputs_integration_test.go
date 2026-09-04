@@ -59,10 +59,10 @@ func TestPostgresInlineOutputRetentionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count, archiveErr := retention.ArchiveNodeOutputs(ctx, tenantID, "retention-worker", now, 10); archiveErr != nil || count != 1 {
+	if count, archiveErr := retention.ArchiveNodeOutputs(ctx, tenantID, "retention-worker", 10); archiveErr != nil || count != 1 {
 		t.Fatalf("archive count=%d err=%v", count, archiveErr)
 	}
-	if count, deleteErr := retention.DeleteArchivedNodeOutputs(ctx, tenantID, "retention-worker", now.Add(time.Hour), 10); deleteErr != nil || count != 1 {
+	if count, deleteErr := retention.DeleteArchivedNodeOutputs(ctx, tenantID, "retention-worker", 0, 10); deleteErr != nil || count != 1 {
 		t.Fatalf("delete count=%d err=%v", count, deleteErr)
 	}
 	var status string

@@ -8,13 +8,16 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
+	"github.com/pazhou/supaflow/internal/workflow"
 )
 
 type recordingOutputManager struct {
-	stored    []byte
-	discarded []string
+	stored       []byte
+	discarded    []string
+	blockDiscard bool
 }
 
 func (m *recordingOutputManager) StoreOutput(_ context.Context, _ workflowruntime.TenantID, _, _ string, value []byte) (ExternalOutput, error) {
@@ -23,7 +26,11 @@ func (m *recordingOutputManager) StoreOutput(_ context.Context, _ workflowruntim
 	return ExternalOutput{ObjectRef: "obj_safe_reference", Size: int64(len(value)), SHA256: hex.EncodeToString(digest[:])}, nil
 }
 
-func (m *recordingOutputManager) DiscardOutput(_ context.Context, _ workflowruntime.TenantID, objectRef string) error {
+func (m *recordingOutputManager) DiscardOutput(ctx context.Context, _ workflowruntime.TenantID, objectRef string) error {
+	if m.blockDiscard {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	m.discarded = append(m.discarded, objectRef)
 	return nil
 }
@@ -94,6 +101,57 @@ func TestPlanExecutorFailsClosedWithoutExternalOutputStorage(t *testing.T) {
 	assertExecutionError(t, err, "sensitive_output_unavailable", false)
 }
 
+type sensitiveStreamingModel struct{}
+
+func (sensitiveStreamingModel) Generate(context.Context, AttemptScope, string, string, json.RawMessage) (json.RawMessage, error) {
+	return json.RawMessage(`{"secret":"provider-output"}`), nil
+}
+
+func (sensitiveStreamingModel) GenerateStream(_ context.Context, _ AttemptScope, _, _ string, _ json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
+	chunk := json.RawMessage(`{"secret":"stream-chunk"}`)
+	if err := emit(chunk); err != nil {
+		return nil, err
+	}
+	return chunk, nil
+}
+
+// 验证显式敏感的 streaming 节点降级为受保护的最终输出，不向普通 SSE/outbox emit 明文 delta。
+func TestPlanExecutorSuppressesSensitiveStreamChunks(t *testing.T) {
+	definition := workflow.WorkflowDefinition{
+		SchemaVersion: workflow.DefinitionSchemaV1,
+		ID:            "sensitive_stream",
+		Nodes: []workflow.NodeDefinition{
+			{ID: "begin", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+			{ID: "model", Type: workflow.NodeTypeLLM, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{"name":"primary"}`), Metadata: map[string]json.RawMessage{"sensitiveOutput": json.RawMessage(`true`)}},
+			{ID: "finish", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+		},
+		Edges: []workflow.EdgeDefinition{
+			{ID: "begin_to_model", FromNode: "begin", FromPort: "input", ToNode: "model", ToPort: "input"},
+			{ID: "model_to_end", FromNode: "model", FromPort: "output", ToNode: "finish", ToPort: "result"},
+		},
+	}
+	published := publishPlan(t, definition)
+	manager := &recordingOutputManager{}
+	executor, err := NewPlanExecutor(published.catalog, Config{Models: sensitiveStreamingModel{}, Outputs: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted := 0
+	result, err := executor.ExecuteStream(context.Background(), workflowruntime.ExecutionRequest{
+		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		NodeID: "model", AttemptID: "attempt_1", Executor: "eino.llm", Input: json.RawMessage(`{"prompt":"hello"}`), FencingToken: 1,
+	}, func(json.RawMessage) error {
+		emitted++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emitted != 0 || result.Output == nil || !result.Output.Sensitive || result.Output.ObjectRef == "" {
+		t.Fatalf("sensitive stream leaked or was not protected: emitted=%d output=%+v", emitted, result.Output)
+	}
+}
+
 type failingCompletionStore struct {
 	workflowruntime.Store
 	err    error
@@ -147,6 +205,23 @@ func TestManagedOutputStoreDiscardsCancelledCompletion(t *testing.T) {
 	})
 	if err != nil || len(manager.discarded) != 1 {
 		t.Fatalf("error=%v discarded=%v", err, manager.discarded)
+	}
+}
+
+// 验证 runtime 拒绝输出后的对象补偿有独立超时，存储故障不能永久阻塞 worker 退出。
+func TestManagedOutputStoreBoundsCompensation(t *testing.T) {
+	manager := &recordingOutputManager{blockDiscard: true}
+	store, err := NewManagedOutputStore(failingCompletionStore{err: errors.New("commit failed")}, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.cleanupWait = 20 * time.Millisecond
+	started := time.Now()
+	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
+		TenantID: "tenant_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
+	})
+	if err == nil || time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("output compensation was not bounded: elapsed=%s err=%v", time.Since(started), err)
 	}
 }
 

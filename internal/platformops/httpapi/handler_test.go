@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pazhou/supaflow/internal/api"
+	"github.com/pazhou/supaflow/internal/identity"
 	"github.com/pazhou/supaflow/internal/platformops"
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -157,6 +158,30 @@ func TestCredentialMutationReplayRechecksCurrentRole(t *testing.T) {
 	}
 }
 
+// 验证 mutation 响应快照严格有界，超限响应转换成可重放的失败而不在内存和 ledger 中放大。
+func TestMutationResponseSnapshotIsBoundedAndReplayable(t *testing.T) {
+	ledger := newHTTPMutationLedger()
+	handler := (&Handler{services: Services{Mutations: ledger}}).idempotentMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), maximumMutationResponseBytes+4096))
+	}))
+	serve := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(`{}`))
+		request.Header.Set("Idempotency-Key", "bounded-response-key")
+		request = request.WithContext(identity.ContextWithPrincipal(request.Context(), api.Principal{
+			TenantID: "tenant", ActorID: "operator", Role: api.RoleOperator,
+		}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	first, replay := serve(), serve()
+	if first.Code != http.StatusInsufficientStorage || replay.Code != http.StatusInsufficientStorage ||
+		replay.Header().Get("Idempotency-Replayed") != "true" || first.Body.Len() > 256 || replay.Body.Len() > 256 {
+		t.Fatalf("first=%d/%d replay=%d/%d replayed=%q", first.Code, first.Body.Len(), replay.Code, replay.Body.Len(), replay.Header().Get("Idempotency-Replayed"))
+	}
+}
+
 // 验证 quota 拒绝映射为 429 并携带秒级 Retry-After。
 func TestRateLimitResponseIncludesRetryAfter(t *testing.T) {
 	response := httptest.NewRecorder()
@@ -280,6 +305,8 @@ func (l *httpMutationLedger) Complete(_ context.Context, tenant, operation, key 
 	l.records[tenant+"/"+operation+"/"+key] = platformops.MutationRecord{Replay: true, StatusCode: completion.StatusCode, ContentType: completion.ContentType, Body: append([]byte(nil), completion.Body...)}
 	return nil
 }
+
+func (l *httpMutationLedger) Renew(context.Context, string, string, string, string) error { return nil }
 
 func (s httpSecrets) ResolveTriggerSecret(context.Context, string, string) ([]byte, error) {
 	return append([]byte(nil), s.secret...), nil

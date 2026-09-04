@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,25 @@ import (
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 	"github.com/pazhou/supaflow/internal/workflow"
 )
+
+// 验证执行期按真实 NewAttempt 序列化大小再次限制近 1MiB 输出的 fan-out 放大。
+func TestSuccessorsRejectAggregateSerializedPayload(t *testing.T) {
+	definition := workflow.WorkflowDefinition{SchemaVersion: workflow.DefinitionSchemaV1, ID: "runtime_payload_limit",
+		Nodes: []workflow.NodeDefinition{{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)}},
+	}
+	for index := 0; index < 16; index++ {
+		id := fmt.Sprintf("end_%02d", index)
+		definition.Nodes = append(definition.Nodes, workflow.NodeDefinition{ID: id, Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)})
+		definition.Edges = append(definition.Edges, workflow.EdgeDefinition{ID: "to_" + id, FromNode: "start", FromPort: "input", ToNode: id, ToPort: "result"})
+	}
+	plan, err := workflow.Compile(definition, workflow.BuiltinRegistry(), workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`"` + strings.Repeat("a", (1<<20)-2) + `"`)
+	_, err = successors(plan, "start", payload)
+	assertExecutionError(t, err, "successor_payload_limit_exceeded", false)
+}
 
 // 验证四节点切片按不可变 plan 逐步执行，并在审批恢复后完成。
 func TestPlanExecutorStartHTTPApprovalEnd(t *testing.T) {

@@ -40,8 +40,6 @@ func TestPostgresMutationLedgerLeaseTakeoverAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
-	ledger.now = func() time.Time { return now }
 	hash := bytes.Repeat([]byte{4}, 32)
 	first, err := ledger.Claim(ctx, tenantID, "credential.create", "stable-key", hash)
 	if err != nil || first.Owner == "" || first.OperationID == "" {
@@ -50,7 +48,10 @@ func TestPostgresMutationLedgerLeaseTakeoverAndReplay(t *testing.T) {
 	if _, err = ledger.Claim(ctx, tenantID, "credential.create", "stable-key", hash); !errors.Is(err, ErrConflict) {
 		t.Fatalf("active lease error=%v", err)
 	}
-	ledger.now = func() time.Time { return now.Add(31 * time.Second) }
+	if _, err = pool.Exec(ctx, `UPDATE ops_mutation_ledger SET lease_expires_at=clock_timestamp()-interval '1 second'
+		WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3`, tenantID, "credential.create", "stable-key"); err != nil {
+		t.Fatalf("expire first owner lease: %v", err)
+	}
 	second, err := ledger.Claim(ctx, tenantID, "credential.create", "stable-key", hash)
 	if err != nil || second.Owner == first.Owner || second.OperationID != first.OperationID {
 		t.Fatalf("takeover first=%+v second=%+v err=%v", first, second, err)

@@ -16,6 +16,7 @@ type MutationRecord struct {
 	Replay      bool
 	Owner       string
 	OperationID string
+	RenewAfter  time.Duration
 	StatusCode  int
 	ContentType string
 	Body        []byte
@@ -35,13 +36,13 @@ type MutationCompletion struct {
 // MutationLedger claims and completes operator mutations before a response is returned.
 type MutationLedger interface {
 	Claim(context.Context, string, string, string, []byte) (MutationRecord, error)
+	Renew(context.Context, string, string, string, string) error
 	Complete(context.Context, string, string, string, MutationCompletion) error
 }
 
 // PostgresMutationLedger persists operator idempotency across replicas and restarts.
 type PostgresMutationLedger struct {
 	pool          *pgxpool.Pool
-	now           func() time.Time
 	leaseDuration time.Duration
 }
 
@@ -50,7 +51,17 @@ func NewPostgresMutationLedger(pool *pgxpool.Pool) (*PostgresMutationLedger, err
 	if pool == nil {
 		return nil, ErrInvalidArgument
 	}
-	return &PostgresMutationLedger{pool: pool, now: func() time.Time { return time.Now().UTC() }, leaseDuration: 30 * time.Second}, nil
+	return NewPostgresMutationLedgerWithLease(pool, 30*time.Second)
+}
+
+// NewPostgresMutationLedgerWithLease creates a durable ledger with an explicit
+// lease duration. Production callers should use NewPostgresMutationLedger;
+// the explicit form supports deterministic short-lease integration tests.
+func NewPostgresMutationLedgerWithLease(pool *pgxpool.Pool, leaseDuration time.Duration) (*PostgresMutationLedger, error) {
+	if pool == nil || leaseDuration <= 0 {
+		return nil, ErrInvalidArgument
+	}
+	return &PostgresMutationLedger{pool: pool, leaseDuration: leaseDuration}, nil
 }
 
 // Claim reserves a key or returns the completed response for an identical request.
@@ -62,7 +73,6 @@ func (l *PostgresMutationLedger) Claim(ctx context.Context, tenantID, operation,
 	if err != nil {
 		return MutationRecord{}, err
 	}
-	now := l.now()
 	operationID, err := newID("operation")
 	if err != nil {
 		return MutationRecord{}, err
@@ -71,21 +81,22 @@ func (l *PostgresMutationLedger) Claim(ctx context.Context, tenantID, operation,
 	var statusCode *int
 	var contentType *string
 	var body []byte
+	var leaseExpiresAt *time.Time
 	err = l.pool.QueryRow(ctx, `
 		INSERT INTO ops_mutation_ledger
 		(tenant_id,operation,idempotency_key,request_hash,status,operation_id,lease_owner,lease_expires_at,attempt_count,updated_at)
-		VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,1,$8)
+		VALUES ($1,$2,$3,$4,'pending',$5,$6,clock_timestamp()+make_interval(secs => $7),1,clock_timestamp())
 		ON CONFLICT (tenant_id,operation,idempotency_key) DO UPDATE SET
 		  lease_owner=EXCLUDED.lease_owner,lease_expires_at=EXCLUDED.lease_expires_at,
-		  attempt_count=ops_mutation_ledger.attempt_count+1,updated_at=EXCLUDED.updated_at
+		  attempt_count=ops_mutation_ledger.attempt_count+1,updated_at=clock_timestamp()
 		WHERE ops_mutation_ledger.status='pending'
 		  AND ops_mutation_ledger.request_hash=EXCLUDED.request_hash
-		  AND ops_mutation_ledger.lease_expires_at <= EXCLUDED.updated_at
-		RETURNING status,operation_id,response_status,response_content_type,response_body`,
-		tenantID, operation, key, requestHash, operationID, owner, now.Add(l.leaseDuration), now).
-		Scan(&status, &operationID, &statusCode, &contentType, &body)
+		  AND ops_mutation_ledger.lease_expires_at <= clock_timestamp()
+		RETURNING status,operation_id,response_status,response_content_type,response_body,lease_expires_at`,
+		tenantID, operation, key, requestHash, operationID, owner, l.leaseDuration.Seconds()).
+		Scan(&status, &operationID, &statusCode, &contentType, &body, &leaseExpiresAt)
 	if err == nil {
-		return MutationRecord{Owner: owner, OperationID: operationID}, nil
+		return MutationRecord{Owner: owner, OperationID: operationID, RenewAfter: l.leaseDuration / 3}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return MutationRecord{}, fmt.Errorf("claim operation mutation: %w", err)
@@ -111,6 +122,26 @@ func (l *PostgresMutationLedger) Claim(ctx context.Context, tenantID, operation,
 	return record, nil
 }
 
+// Renew extends only the live lease owned by the caller, using the database
+// clock so application-host skew cannot resurrect an expired owner.
+func (l *PostgresMutationLedger) Renew(ctx context.Context, tenantID, operation, key, owner string) error {
+	if tenantID == "" || operation == "" || !validMutationKey(key) || owner == "" {
+		return ErrInvalidArgument
+	}
+	tag, err := l.pool.Exec(ctx, `UPDATE ops_mutation_ledger
+		SET lease_expires_at=clock_timestamp()+make_interval(secs => $5),updated_at=clock_timestamp()
+		WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3 AND status='pending'
+		  AND lease_owner=$4 AND lease_expires_at > clock_timestamp()`,
+		tenantID, operation, key, owner, l.leaseDuration.Seconds())
+	if err != nil {
+		return fmt.Errorf("renew operation mutation: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
 // Complete stores the exact bounded HTTP result for deterministic replay.
 func (l *PostgresMutationLedger) Complete(ctx context.Context, tenantID, operation, key string, completion MutationCompletion) error {
 	if tenantID == "" || operation == "" || !validMutationKey(key) || completion.Owner == "" || completion.StatusCode < 100 || completion.StatusCode > 599 || len(completion.Body) > 2<<20 {
@@ -128,8 +159,9 @@ func (l *PostgresMutationLedger) Complete(ctx context.Context, tenantID, operati
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE ops_mutation_ledger SET status='completed',response_status=$4,response_content_type=$5,
-		response_body=$6,completed_at=now(),updated_at=now(),lease_expires_at=NULL
-		WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3 AND status='pending' AND lease_owner=$7`,
+		response_body=$6,completed_at=clock_timestamp(),updated_at=clock_timestamp(),lease_expires_at=NULL
+		WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3 AND status='pending' AND lease_owner=$7
+		  AND lease_expires_at > clock_timestamp()`,
 		tenantID, operation, key, completion.StatusCode, completion.ContentType, completion.Body, completion.Owner)
 	if err != nil {
 		return fmt.Errorf("complete operation mutation: %w", err)

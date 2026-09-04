@@ -18,6 +18,20 @@ func seedPlatformTenant(ctx context.Context, pool *pgxpool.Pool, tenantID, workf
 	return err
 }
 
+func seedTriggerPublication(ctx context.Context, pool *pgxpool.Pool, tenantID, workflowID, suffix string) error {
+	hash := sha256.Sum256([]byte("trigger-publication-" + suffix))
+	versionID, planID := "trigger_version_"+suffix, "trigger_plan_"+suffix
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow_versions
+		(id,tenant_id,workflow_id,version,publication_key,definition,definition_hash,published_by)
+		VALUES ($1,$2,$3,1,$4,'{}',$5,'integration')`, versionID, tenantID, workflowID, "trigger-publication-"+suffix, hash[:]); err != nil {
+		return err
+	}
+	_, err := pool.Exec(ctx, `INSERT INTO execution_plans
+		(id,tenant_id,workflow_id,workflow_version_id,plan,plan_hash,compiler_version)
+		VALUES ($1,$2,$3,$4,'{}',$5,'integration')`, planID, tenantID, workflowID, versionID, hash[:])
+	return err
+}
+
 func seedRunningAttempt(ctx context.Context, pool *pgxpool.Pool, tenantID, workflowID, suffix string) (string, string, error) {
 	hash := sha256.Sum256([]byte("seed-" + suffix))
 	versionID, planID, runID := "version_"+suffix, "plan_"+suffix, "run_"+suffix
@@ -31,7 +45,8 @@ func seedRunningAttempt(ctx context.Context, pool *pgxpool.Pool, tenantID, workf
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO workflow_versions (id,tenant_id,workflow_id,version,publication_key,definition,definition_hash,published_by) VALUES ($1,$2,$3,1,$4,'{}',$5,'integration')`, []any{versionID, tenantID, workflowID, "publication_" + suffix, hash[:]}},
+		{`INSERT INTO workflow_versions (id,tenant_id,workflow_id,version,publication_key,definition,definition_hash,published_by)
+			VALUES ($1,$2,$3,(SELECT COALESCE(MAX(version),0)+1 FROM workflow_versions WHERE tenant_id=$2 AND workflow_id=$3),$4,'{}',$5,'integration')`, []any{versionID, tenantID, workflowID, "publication_" + suffix, hash[:]}},
 		{`INSERT INTO execution_plans (id,tenant_id,workflow_id,workflow_version_id,plan,plan_hash,compiler_version) VALUES ($1,$2,$3,$4,'{}',$5,'integration')`, []any{planID, tenantID, workflowID, versionID, hash[:]}},
 		{`INSERT INTO runs (id,tenant_id,workflow_id,workflow_version_id,execution_plan_id,idempotency_key,request_hash,input,plan_hash,status) VALUES ($1,$2,$3,$4,$5,$6,$7,'{}',$8,'running')`, []any{runID, tenantID, workflowID, versionID, planID, "run-key-" + suffix, hash[:], fmt.Sprintf("%x", hash)}},
 		{`INSERT INTO node_states (id,tenant_id,run_id,node_id,status,attempt_count,latest_attempt_id) VALUES ($1,$2,$3,'node','running',1,$4)`, []any{nodeStateID, tenantID, runID, attemptID}},

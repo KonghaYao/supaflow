@@ -33,6 +33,9 @@ func (s *RuntimeStore) ExpireRuns(ctx context.Context, tenantID workflowruntime.
 		return 0, runtimeError(workflowruntime.CodeConflict, "could not start run expiry", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return 0, runtimeError(workflowruntime.CodeConflict, "could not read deadline clock", err)
+	}
 	rows, err := tx.Query(ctx, `SELECT id FROM runs
 		WHERE tenant_id=$1 AND deadline_at IS NOT NULL AND deadline_at <= $2
 		  AND status IN ('pending','running','suspended','cancelling')
@@ -90,7 +93,7 @@ func expireApprovalInterruptsTx(ctx context.Context, tx pgx.Tx, tenantID workflo
 		FROM interrupts i
 		JOIN node_attempts a ON a.tenant_id=i.tenant_id AND a.id=i.attempt_id
 		JOIN runs r ON r.tenant_id=i.tenant_id AND r.id=i.run_id
-		WHERE i.tenant_id=$1 AND i.kind IN ('approval','human_approval')
+		WHERE i.tenant_id=$1 AND i.kind IN ('approval','human_approval','webhook')
 		  AND i.status='pending' AND i.expires_at <= $2
 		  AND r.status IN ('pending','running','suspended','cancelling')
 		ORDER BY i.expires_at,i.id FOR UPDATE OF i,r SKIP LOCKED LIMIT $3`, tenantID, now, limit)
@@ -159,6 +162,9 @@ func expireApprovalTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.T
 	if _, err = releaseRunAdmissionTx(ctx, tx, tenantID, approval.runID, now); err != nil {
 		return false, runtimeError(workflowruntime.CodeConflict, "could not release expired approval capacity", err)
 	}
+	if err = cancelSubworkflowDescendantsWithReasonTx(ctx, tx, tenantID, approval.runID, now, "parent_terminal"); err != nil {
+		return false, err
+	}
 	if _, err = appendRuntimeEvents(ctx, tx, tenantID, approval.runID, []workflowruntime.Event{
 		{Type: "node.timed_out", Data: payload}, {Type: "run.error", Data: payload},
 	}); err != nil {
@@ -181,6 +187,9 @@ func (s *RuntimeStore) ExpireRun(ctx context.Context, tenantID workflowruntime.T
 		return false, runtimeError(workflowruntime.CodeConflict, "could not start targeted run expiry", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return false, runtimeError(workflowruntime.CodeConflict, "could not read deadline clock", err)
+	}
 	var found string
 	err = tx.QueryRow(ctx, `SELECT id FROM runs
 		WHERE tenant_id=$1 AND id=$2 AND deadline_at IS NOT NULL AND deadline_at <= $3

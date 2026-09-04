@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TriggerKind identifies the external source that can create a firing.
@@ -54,13 +57,17 @@ type Trigger struct {
 
 // Firing is one idempotent trigger occurrence queued through the outbox.
 type Firing struct {
-	TenantID         string          `json:"-"`
-	ID               string          `json:"id"`
-	TriggerID        string          `json:"triggerId"`
-	DeduplicationKey string          `json:"deduplicationKey"`
-	SourceTime       *time.Time      `json:"sourceTime,omitempty"`
-	Payload          json.RawMessage `json:"payload"`
-	CreatedAt        time.Time       `json:"createdAt"`
+	TenantID          string          `json:"-"`
+	ID                string          `json:"id"`
+	TriggerID         string          `json:"triggerId"`
+	WorkflowID        string          `json:"workflowId"`
+	WorkflowVersionID string          `json:"workflowVersionId"`
+	ExecutionPlanID   string          `json:"executionPlanId"`
+	PlanHash          string          `json:"planHash"`
+	DeduplicationKey  string          `json:"deduplicationKey"`
+	SourceTime        *time.Time      `json:"sourceTime,omitempty"`
+	Payload           json.RawMessage `json:"payload"`
+	CreatedAt         time.Time       `json:"createdAt"`
 }
 
 // CreateTriggerRequest contains validated trigger configuration.
@@ -88,6 +95,9 @@ type FireRequest struct {
 	DeduplicationKey string
 	SourceTime       *time.Time
 	Payload          json.RawMessage
+	// StableReplaySourceTime permits a server-assigned effective timestamp to
+	// differ on retry while preserving the timestamp stored by the first commit.
+	StableReplaySourceTime bool
 }
 
 // WebhookRequest is the untrusted signed webhook envelope.
@@ -233,12 +243,13 @@ func (s *TriggerService) ReceiveWebhook(ctx context.Context, request WebhookRequ
 	return s.store.FireWebhook(ctx, FireRequest{
 		TenantID: request.TenantID, TriggerID: request.TriggerID, ExpectedKind: TriggerWebhook,
 		DeduplicationKey: request.RequestID, SourceTime: &request.Timestamp, Payload: payload,
-	}, request.RequestID, digest, request.Now.Add(s.webhookWindow))
+	}, request.RequestID, digest, request.Timestamp.Add(s.webhookWindow))
 }
 
 // Tick atomically claims due schedules and creates bounded idempotent firings.
 func (s *TriggerService) Tick(ctx context.Context, options ScheduleOptions) ([]Firing, error) {
-	if options.Now.IsZero() || options.Limit <= 0 || options.MaxCatchUp <= 0 || options.MisfireGrace < 0 {
+	if options.Now.IsZero() || options.Limit <= 0 || options.Limit > 1000 ||
+		options.MaxCatchUp <= 0 || options.MaxCatchUp > 100 || options.MisfireGrace < 0 {
 		return nil, ErrInvalidArgument
 	}
 	return s.store.FireDueSchedules(ctx, options)
@@ -315,5 +326,9 @@ func clearBytes(value []byte) {
 }
 
 func triggerError(operation string, err error) error {
+	var databaseError *pgconn.PgError
+	if errors.As(err, &databaseError) && databaseError.Code == "53400" {
+		return &RateLimitError{RetryAfter: 5 * time.Second, Reason: "trigger ingress capacity exhausted"}
+	}
 	return fmt.Errorf("%s: %w", operation, err)
 }

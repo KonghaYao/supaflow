@@ -185,7 +185,7 @@ func (h *Handler) drainWorker(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
 		return
 	}
-	err := h.services.Workers.BeginDrain(r.Context(), p.TenantID, r.PathValue("id"), time.Now().UTC())
+	err := h.services.Workers.BeginDrain(r.Context(), p.TenantID, r.PathValue("id"))
 	respond(w, map[string]bool{"draining": err == nil}, err, http.StatusOK)
 }
 
@@ -195,9 +195,12 @@ func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		MaxActiveRuns    int `json:"maxActiveRuns"`
-		MaxActiveWorkers int `json:"maxActiveWorkers"`
-		MaxQueueDepth    int `json:"maxQueueDepth"`
+		MaxActiveRuns            int `json:"maxActiveRuns"`
+		MaxActiveWorkers         int `json:"maxActiveWorkers"`
+		MaxQueueDepth            int `json:"maxQueueDepth"`
+		MaxTriggers              int `json:"maxTriggers"`
+		MaxPendingTriggerFirings int `json:"maxPendingTriggerFirings"`
+		MaxPendingOutboxMessages int `json:"maxPendingOutboxMessages"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -205,6 +208,8 @@ func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 	err := h.services.Admission.ConfigureQuota(r.Context(), platformops.Quota{
 		TenantID: p.TenantID, MaxActiveRuns: body.MaxActiveRuns,
 		MaxActiveWorkers: body.MaxActiveWorkers, MaxQueueDepth: body.MaxQueueDepth,
+		MaxTriggers: body.MaxTriggers, MaxPendingTriggerFirings: body.MaxPendingTriggerFirings,
+		MaxPendingOutboxMessages: body.MaxPendingOutboxMessages,
 	})
 	respond(w, map[string]bool{"configured": err == nil}, err, http.StatusOK)
 }

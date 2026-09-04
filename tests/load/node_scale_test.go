@@ -13,9 +13,9 @@ import (
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
-// 验证 100/500/1000 节点的编译、发布和完整执行基线，防止大图出现非线性退化或调度遗漏。
+// 验证 100/500/512 节点（含生产硬上限）的编译、发布和完整执行基线，防止大图出现非线性退化或调度遗漏。
 func TestNodeScaleBaseline(t *testing.T) {
-	for _, size := range []int{100, 500, 1000} {
+	for _, size := range []int{100, 500, workflow.MaxDefinitionNodes} {
 		t.Run(fmt.Sprintf("nodes_%d", size), func(t *testing.T) {
 			startedAt := time.Now()
 			definition := linearDefinition(size)
@@ -89,7 +89,7 @@ func TestNodeScaleBaseline(t *testing.T) {
 
 // BenchmarkPlanScale records canonical compile/publication allocation baselines for production-sized DAGs.
 func BenchmarkPlanScale(b *testing.B) {
-	for _, size := range []int{100, 500, 1000} {
+	for _, size := range []int{100, 500, workflow.MaxDefinitionNodes} {
 		definition := linearDefinition(size)
 		b.Run(fmt.Sprintf("nodes_%d", size), func(b *testing.B) {
 			b.ReportAllocs()

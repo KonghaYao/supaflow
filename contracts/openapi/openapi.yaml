@@ -12,10 +12,18 @@ paths:
     get:
       operationId: listWorkflowDrafts
       summary: List tenant workflow drafts.
+      parameters:
+        - $ref: '#/components/parameters/PaginationLimit'
+        - $ref: '#/components/parameters/PaginationCursor'
       responses:
         '200':
-          description: Drafts ordered by workflow ID
-          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+          description: Bounded draft summaries ordered by workflow ID. Follow Link or X-Next-Cursor without changing the array response shape.
+          headers:
+            X-Page-Limit: { schema: { type: integer, minimum: 1, maximum: 100 } }
+            X-Next-Cursor: { schema: { type: string } }
+            Link: { schema: { type: string } }
+          content: { application/json: { schema: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/WorkflowDraftSummary' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
     post:
       operationId: createWorkflowDraft
       summary: Idempotently create a FlowGram workflow draft.
@@ -34,6 +42,7 @@ paths:
       responses:
         '201': { description: Created or idempotently replayed draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
         '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
   /workflows/{workflowId}:
     get:
       operationId: getWorkflowDraft
@@ -98,11 +107,19 @@ paths:
   /workflows/{workflowId}/versions:
     get:
       operationId: listWorkflowVersions
-      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/PaginationLimit'
+        - $ref: '#/components/parameters/PaginationCursor'
       responses:
         '200':
-          description: Newest immutable versions first
-          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/VersionSummary' } } } }
+          description: Bounded immutable summaries, newest first. Follow Link or X-Next-Cursor without changing the array response shape.
+          headers:
+            X-Page-Limit: { schema: { type: integer, minimum: 1, maximum: 100 } }
+            X-Next-Cursor: { schema: { type: string } }
+            Link: { schema: { type: string } }
+          content: { application/json: { schema: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/VersionSummary' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
   /workflows/{workflowId}/versions/latest:
     get:
       operationId: resolveLatestWorkflowVersion
@@ -568,7 +585,7 @@ paths:
                 idempotencyKey: { type: string, minLength: 1, maxLength: 255 }
                 payload: { type: object }
       responses:
-        '200': { description: Idempotent trigger firing }
+        '200': { description: Idempotent trigger firing within the seven-day firing history window }
   /hooks/{publicHash}:
     servers: [{ url: / }]
     post:
@@ -591,7 +608,7 @@ paths:
     servers: [{ url: / }]
     post:
       operationId: receivePlatformEvent
-      summary: Fan out an idempotent event to matching tenant triggers.
+      summary: Fan out an event idempotently within the seven-day firing history window.
       parameters:
         - { name: eventType, in: path, required: true, schema: { type: string } }
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -767,6 +784,14 @@ components:
       in: path
       required: true
       schema: { type: string }
+    PaginationLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    PaginationCursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 128 }
     RunId:
       name: runId
       in: path
@@ -821,6 +846,17 @@ components:
         id: { type: string }
         workflowId: { type: string }
         document: { $ref: '#/components/schemas/FlowGramDocument' }
+        revision: { type: integer, format: int64, minimum: 1 }
+        updatedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    WorkflowDraftSummary:
+      type: object
+      additionalProperties: false
+      required: [id, workflowId, revision, updatedBy, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        workflowId: { type: string }
         revision: { type: integer, format: int64, minimum: 1 }
         updatedBy: { type: string }
         createdAt: { type: string, format: date-time }
@@ -1125,6 +1161,9 @@ components:
         maxActiveRuns: { type: integer, minimum: 1 }
         maxActiveWorkers: { type: integer, minimum: 1 }
         maxQueueDepth: { type: integer, minimum: 0 }
+        maxTriggers: { type: integer, minimum: 1, maximum: 10000, default: 1000 }
+        maxPendingTriggerFirings: { type: integer, minimum: 1, maximum: 100000, default: 5000 }
+        maxPendingOutboxMessages: { type: integer, minimum: 1, maximum: 500000, default: 20000 }
     AuditRecord:
       type: object
       required: [id, actorId, action, resourceType, resourceId, outcome, metadata, createdAt]
@@ -1157,12 +1196,17 @@ components:
         completedAt: { type: string, format: date-time }
     CapacitySnapshot:
       type: object
-      required: [activeRuns, queuedRuns, activeWorkers, outboxBacklog, oldestOutboxAge, dlqDepth]
+      required: [activeRuns, queuedRuns, activeWorkers, triggerCount, pendingTriggerFirings, outboxBacklog, maxTriggers, maxPendingTriggerFirings, maxPendingOutboxMessages, oldestOutboxAge, dlqDepth]
       properties:
         activeRuns: { type: integer, minimum: 0 }
         queuedRuns: { type: integer, minimum: 0 }
         activeWorkers: { type: integer, minimum: 0 }
+        triggerCount: { type: integer, minimum: 0 }
+        pendingTriggerFirings: { type: integer, minimum: 0 }
         outboxBacklog: { type: integer, minimum: 0 }
+        maxTriggers: { type: integer, minimum: 1 }
+        maxPendingTriggerFirings: { type: integer, minimum: 1 }
+        maxPendingOutboxMessages: { type: integer, minimum: 1 }
         oldestOutboxAge: { type: integer, format: int64, description: Nanoseconds }
         dlqDepth: { type: integer, minimum: 0 }
     DeadLetter:

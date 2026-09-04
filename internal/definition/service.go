@@ -23,6 +23,10 @@ type Publisher interface {
 	Publish(context.Context, string, string, workflow.WorkflowDefinition, string) (platform.PublishedPlan, bool, error)
 }
 
+type publicationReplayer interface {
+	ReplayPublication(context.Context, string, string, string) (platform.PublishedPlan, bool, error)
+}
+
 // Service coordinates draft revisions, compilation, and publication history.
 type Service struct {
 	store     Store
@@ -86,12 +90,12 @@ func (s *Service) GetDraft(ctx context.Context, tenantID, workflowID string) (Dr
 	return s.store.GetDraft(ctx, tenantID, workflowID)
 }
 
-// ListDrafts returns tenant drafts in stable workflow order.
-func (s *Service) ListDrafts(ctx context.Context, tenantID string) ([]Draft, error) {
-	if tenantID == "" {
-		return nil, errors.New("tenant is required")
+// ListDrafts returns one bounded page in stable workflow order.
+func (s *Service) ListDrafts(ctx context.Context, tenantID, cursor string, limit int) (DraftPage, error) {
+	if tenantID == "" || limit < 1 || limit > MaxPageLimit || len(cursor) > 128 {
+		return DraftPage{}, errors.New("tenant, valid cursor, and page limit are required")
 	}
-	return s.store.ListDrafts(ctx, tenantID)
+	return s.store.ListDrafts(ctx, tenantID, cursor, limit)
 }
 
 // UpdateDraft performs an optimistic autosave mutation.
@@ -151,6 +155,15 @@ func (s *Service) Publish(ctx context.Context, tenantID, workflowID string, defi
 
 // PublishDraft publishes the current editor document.
 func (s *Service) PublishDraft(ctx context.Context, tenantID, workflowID, key string) (platform.PublishedPlan, bool, error) {
+	if tenantID == "" || workflowID == "" || len(key) < 8 || len(key) > 128 {
+		return platform.PublishedPlan{}, false, errors.New("tenant, workflow, and valid idempotency key are required")
+	}
+	if replayer, ok := s.publisher.(publicationReplayer); ok {
+		published, found, err := replayer.ReplayPublication(ctx, tenantID, workflowID, key)
+		if err != nil || found {
+			return published, false, err
+		}
+	}
 	draft, err := s.GetDraft(ctx, tenantID, workflowID)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
@@ -162,9 +175,12 @@ func (s *Service) PublishDraft(ctx context.Context, tenantID, workflowID, key st
 	return s.Publish(ctx, tenantID, workflowID, definition, key)
 }
 
-// ListVersions returns newest immutable versions first.
-func (s *Service) ListVersions(ctx context.Context, tenantID, workflowID string) ([]Version, error) {
-	return s.store.ListVersions(ctx, tenantID, workflowID)
+// ListVersions returns one bounded page of newest immutable summaries first.
+func (s *Service) ListVersions(ctx context.Context, tenantID, workflowID string, cursor uint64, limit int) (VersionPage, error) {
+	if tenantID == "" || workflowID == "" || limit < 1 || limit > MaxPageLimit {
+		return VersionPage{}, errors.New("tenant, workflow, and page limit are required")
+	}
+	return s.store.ListVersions(ctx, tenantID, workflowID, cursor, limit)
 }
 
 // GetVersion returns one immutable published definition.

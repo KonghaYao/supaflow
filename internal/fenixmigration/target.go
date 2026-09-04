@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,6 +27,18 @@ type ImportedVersion struct {
 	Version   uint64
 }
 
+// TargetAttestation binds a migration report to one concrete Supaflow
+// installation and the canonical set of Fenix-imported records it contains.
+type TargetAttestation struct {
+	SchemaVersion   int
+	InstallationID  string
+	ContentHash     string
+	DefinitionCount int
+	DraftCount      int
+	TriggerCount    int
+	RunCount        int
+}
+
 // Target is the privileged write boundary used by the one-time migration runner.
 type Target interface {
 	EnsureTenant(context.Context, string, string) error
@@ -33,6 +46,7 @@ type Target interface {
 	ImportDraft(context.Context, string, string, string, workflow.WorkflowDefinition, string) (bool, error)
 	ImportTrigger(context.Context, platformops.ImportTriggerRequest) (bool, error)
 	ImportRun(context.Context, platformops.ImportRunProjectionRequest) (bool, error)
+	Attest(context.Context) (TargetAttestation, error)
 }
 
 // PostgresTarget wires domain import seams to a migrated Supaflow database.
@@ -122,6 +136,46 @@ func (t *PostgresTarget) ImportTrigger(ctx context.Context, request platformops.
 // ImportRun delegates to the terminal-history administrative importer.
 func (t *PostgresTarget) ImportRun(ctx context.Context, request platformops.ImportRunProjectionRequest) (bool, error) {
 	return t.admin.ImportRunProjection(ctx, request)
+}
+
+var (
+	uuidPattern   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// Attest reads Supaflow's versioned, read-only database attestation. The
+// function returns only identity, counts, and a digest; workflow data and
+// secrets remain inside PostgreSQL.
+func (t *PostgresTarget) Attest(ctx context.Context) (TargetAttestation, error) {
+	var value TargetAttestation
+	err := t.pool.QueryRow(ctx, `SELECT schema_version,installation_id,content_hash,
+		definition_count,draft_count,trigger_count,run_count
+		FROM fenix_target_attestation_v1()`).Scan(
+		&value.SchemaVersion,
+		&value.InstallationID,
+		&value.ContentHash,
+		&value.DefinitionCount,
+		&value.DraftCount,
+		&value.TriggerCount,
+		&value.RunCount,
+	)
+	if err != nil {
+		return TargetAttestation{}, fmt.Errorf("read target attestation: %w", err)
+	}
+	if err := validateTargetAttestation(value); err != nil {
+		return TargetAttestation{}, err
+	}
+	return value, nil
+}
+
+func validateTargetAttestation(value TargetAttestation) error {
+	if value.SchemaVersion != 1 || !uuidPattern.MatchString(value.InstallationID) || !sha256Pattern.MatchString(value.ContentHash) {
+		return errors.New("target attestation is malformed or unsupported")
+	}
+	if value.DefinitionCount < 0 || value.DraftCount < 0 || value.TriggerCount < 0 || value.RunCount < 0 {
+		return errors.New("target attestation contains a negative count")
+	}
+	return nil
 }
 
 func flowgramDocument(value workflow.WorkflowDefinition) (json.RawMessage, error) {

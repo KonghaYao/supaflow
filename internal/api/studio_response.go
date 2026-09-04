@@ -23,6 +23,20 @@ func draftDTO(value definition.Draft) draftResponse {
 		Revision: value.Revision, UpdatedBy: value.UpdatedBy, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 
+type draftSummaryResponse struct {
+	ID         string    `json:"id"`
+	WorkflowID string    `json:"workflowId"`
+	Revision   uint64    `json:"revision"`
+	UpdatedBy  string    `json:"updatedBy"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func draftSummaryDTO(value definition.DraftSummary) draftSummaryResponse {
+	return draftSummaryResponse{ID: value.ID, WorkflowID: value.WorkflowID, Revision: value.Revision,
+		UpdatedBy: value.UpdatedBy, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+}
+
 type versionSummaryResponse struct {
 	WorkflowID  string    `json:"workflowId"`
 	Version     uint64    `json:"version"`
@@ -33,6 +47,11 @@ type versionSummaryResponse struct {
 }
 
 func versionSummaryDTO(value definition.Version) versionSummaryResponse {
+	return versionSummaryResponse{WorkflowID: value.WorkflowID, Version: value.Version, VersionID: value.VersionID,
+		PlanID: value.PlanID, PlanHash: value.PlanHash, PublishedAt: value.PublishedAt}
+}
+
+func storedVersionSummaryDTO(value definition.VersionSummary) versionSummaryResponse {
 	return versionSummaryResponse{WorkflowID: value.WorkflowID, Version: value.Version, VersionID: value.VersionID,
 		PlanID: value.PlanID, PlanHash: value.PlanHash, PublishedAt: value.PublishedAt}
 }

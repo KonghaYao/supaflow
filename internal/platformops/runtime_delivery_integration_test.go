@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pazhou/supaflow/internal/definition"
-	definitionpostgres "github.com/pazhou/supaflow/internal/definition/postgres"
 	"github.com/pazhou/supaflow/internal/postgres"
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 	"github.com/pazhou/supaflow/internal/workflow"
@@ -43,15 +41,12 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 		},
 		Edges: []workflow.EdgeDefinition{{ID: "edge", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}},
 	}
-	if _, _, err = catalog.Publish(ctx, tenantID, workflowID, definitionValue, "delivery-publication"); err != nil {
-		t.Fatal(err)
-	}
-	definitions, err := definition.NewService(definitionpostgres.NewStore(pool), definition.CanonicalAdapter{}, catalog, registry, policy)
+	versionOne, _, err := catalog.Publish(ctx, tenantID, workflowID, definitionValue, "delivery-publication")
 	if err != nil {
 		t.Fatal(err)
 	}
 	runs := workflowruntime.NewService(postgres.NewRuntimeStore(pool), nil, nil)
-	delivery, err := NewTriggerRunDelivery(pool, definitions, catalog, runs)
+	delivery, err := NewTriggerRunDelivery(pool, catalog, runs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +63,15 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("firing=%+v created=%v err=%v", firing, created, err)
 	}
+	definitionValue.Metadata = map[string]json.RawMessage{"revision": json.RawMessage(`2`)}
+	versionTwo, _, err := catalog.Publish(ctx, tenantID, workflowID, definitionValue, "delivery-publication-v2")
+	if err != nil || versionTwo.ID == versionOne.ID {
+		t.Fatalf("publish v2=%+v err=%v", versionTwo, err)
+	}
+	if err = triggers.Delete(ctx, DeleteTriggerRequest{TenantID: tenantID, ActorID: "operator", TriggerID: trigger.ID,
+		ExpectedUpdatedAt: trigger.UpdatedAt, IdempotencyKey: "delete-accepted-trigger"}); err != nil {
+		t.Fatalf("delete accepted trigger: %v", err)
+	}
 	if _, err = pool.Exec(ctx, `INSERT INTO outbox_messages (id,tenant_id,aggregate_type,aggregate_id,topic,payload) VALUES ($1,$2,'run','unrelated','run.created','{}')`, "unrelated_"+suffix, tenantID); err != nil {
 		t.Fatal(err)
 	}
@@ -83,13 +87,15 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 		t.Fatalf("replay delivery=%+v err=%v", replay, replayErr)
 	}
 	var runCount, unrelatedPending int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE tenant_id=$1 AND idempotency_key=$2`, tenantID, "trigger:"+firing.ID).Scan(&runCount); err != nil {
+	var deliveredPlanID string
+	if err = pool.QueryRow(ctx, `SELECT count(*),max(execution_plan_id) FROM runs
+		WHERE tenant_id=$1 AND idempotency_key=$2`, tenantID, "trigger:"+firing.ID).Scan(&runCount, &deliveredPlanID); err != nil {
 		t.Fatal(err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM outbox_messages WHERE tenant_id=$1 AND id=$2 AND topic='run.created' AND delivered_at IS NULL`, tenantID, "unrelated_"+suffix).Scan(&unrelatedPending); err != nil {
 		t.Fatal(err)
 	}
-	if runCount != 1 || unrelatedPending != 1 {
-		t.Fatalf("run count=%d unrelated pending=%d", runCount, unrelatedPending)
+	if runCount != 1 || unrelatedPending != 1 || deliveredPlanID != versionOne.ID || deliveredPlanID == versionTwo.ID {
+		t.Fatalf("run count=%d plan=%s v1=%s v2=%s unrelated pending=%d", runCount, deliveredPlanID, versionOne.ID, versionTwo.ID, unrelatedPending)
 	}
 }

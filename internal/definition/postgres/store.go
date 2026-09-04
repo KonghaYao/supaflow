@@ -28,6 +28,16 @@ var _ definition.Store = (*Store)(nil)
 // CreateDraft atomically creates a draft and its idempotency result.
 func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequest) (definition.Draft, error) {
 	return s.mutateDraft(ctx, "create", request, func(tx pgx.Tx) (definition.Draft, error) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "definition-draft-capacity:"+request.Draft.TenantID); err != nil {
+			return definition.Draft{}, fmt.Errorf("lock workflow draft capacity: %w", err)
+		}
+		var draftCount int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow_drafts WHERE tenant_id = $1`, request.Draft.TenantID).Scan(&draftCount); err != nil {
+			return definition.Draft{}, fmt.Errorf("count workflow drafts: %w", err)
+		}
+		if draftCount >= definition.MaxDraftsPerTenant {
+			return definition.Draft{}, definition.ErrTenantDraftLimit
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO workflows (id, tenant_id, slug, name, created_by)
 			VALUES ($1, $2, $1, $1, $3) ON CONFLICT (tenant_id, id) DO NOTHING`,
@@ -58,27 +68,33 @@ func (s *Store) GetDraft(ctx context.Context, tenant, workflowID string) (defini
 	return readDraft(ctx, s.pool, tenant, workflowID)
 }
 
-// ListDrafts lists tenant drafts in workflow order.
-func (s *Store) ListDrafts(ctx context.Context, tenant string) ([]definition.Draft, error) {
+// ListDrafts lists a bounded page of tenant draft summaries in workflow order.
+func (s *Store) ListDrafts(ctx context.Context, tenant, cursor string, limit int) (definition.DraftPage, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, workflow_id, document, revision, updated_by, created_at, updated_at
-		FROM workflow_drafts WHERE tenant_id = $1 ORDER BY workflow_id`, tenant)
+		SELECT id, tenant_id, workflow_id, revision, updated_by, created_at, updated_at
+		FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id > $2
+		ORDER BY workflow_id LIMIT $3`, tenant, cursor, limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("list workflow drafts: %w", err)
+		return definition.DraftPage{}, fmt.Errorf("list workflow drafts: %w", err)
 	}
 	defer rows.Close()
-	result := []definition.Draft{}
+	result := []definition.DraftSummary{}
 	for rows.Next() {
-		var item definition.Draft
-		if err := rows.Scan(draftScan(&item)...); err != nil {
-			return nil, fmt.Errorf("scan workflow draft: %w", err)
+		var item definition.DraftSummary
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.WorkflowID, &item.Revision, &item.UpdatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return definition.DraftPage{}, fmt.Errorf("scan workflow draft summary: %w", err)
 		}
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow drafts: %w", err)
+		return definition.DraftPage{}, fmt.Errorf("iterate workflow drafts: %w", err)
 	}
-	return result, nil
+	page := definition.DraftPage{Items: result}
+	if len(page.Items) > limit {
+		page.NextCursor = page.Items[limit-1].WorkflowID
+		page.Items = page.Items[:limit]
+	}
+	return page, nil
 }
 
 // UpdateDraft conditionally replaces a draft and records the immutable response.
@@ -273,25 +289,32 @@ func (s *Store) RecordVersion(ctx context.Context, expected definition.Version) 
 	return nil
 }
 
-// ListVersions returns newest versions first.
-func (s *Store) ListVersions(ctx context.Context, tenant, workflowID string) ([]definition.Version, error) {
-	rows, err := s.pool.Query(ctx, versionSelect+` WHERE v.tenant_id = $1 AND v.workflow_id = $2 ORDER BY v.version DESC`, tenant, workflowID)
+// ListVersions returns one bounded page of newest version summaries first.
+func (s *Store) ListVersions(ctx context.Context, tenant, workflowID string, cursor uint64, limit int) (definition.VersionPage, error) {
+	rows, err := s.pool.Query(ctx, versionSummarySelect+`
+		WHERE v.tenant_id = $1 AND v.workflow_id = $2 AND ($3::bigint = 0 OR v.version < $3)
+		ORDER BY v.version DESC LIMIT $4`, tenant, workflowID, cursor, limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("list workflow versions: %w", err)
+		return definition.VersionPage{}, fmt.Errorf("list workflow versions: %w", err)
 	}
 	defer rows.Close()
-	result := []definition.Version{}
+	result := []definition.VersionSummary{}
 	for rows.Next() {
-		item, err := scanVersion(rows)
-		if err != nil {
-			return nil, err
+		var item definition.VersionSummary
+		if err := rows.Scan(&item.TenantID, &item.WorkflowID, &item.VersionID, &item.PlanID, &item.Version, &item.PlanHash, &item.PublishedAt); err != nil {
+			return definition.VersionPage{}, fmt.Errorf("scan workflow version summary: %w", err)
 		}
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow versions: %w", err)
+		return definition.VersionPage{}, fmt.Errorf("iterate workflow versions: %w", err)
 	}
-	return result, nil
+	page := definition.VersionPage{Items: result}
+	if len(page.Items) > limit {
+		page.NextCursor = page.Items[limit-1].Version
+		page.Items = page.Items[:limit]
+	}
+	return page, nil
 }
 
 // GetVersion returns one tenant workflow version.
@@ -306,6 +329,11 @@ func (s *Store) GetLatestVersion(ctx context.Context, tenant, workflowID string)
 
 const versionSelect = `
 	SELECT v.tenant_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.definition, v.published_at
+	FROM workflow_versions v JOIN execution_plans p
+	  ON p.tenant_id = v.tenant_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
+
+const versionSummarySelect = `
+	SELECT v.tenant_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.published_at
 	FROM workflow_versions v JOIN execution_plans p
 	  ON p.tenant_id = v.tenant_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
 

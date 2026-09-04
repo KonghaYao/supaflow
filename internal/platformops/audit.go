@@ -146,6 +146,39 @@ func insertAuditTx(ctx context.Context, tx pgx.Tx, record AuditRecord) (AuditRec
 	return record, nil
 }
 
+func insertAuditOnceTx(ctx context.Context, tx pgx.Tx, record AuditRecord) error {
+	if err := validateAuditRecord(record); err != nil || record.ID == "" {
+		return ErrInvalidArgument
+	}
+	metadata, err := redactJSON(record.Metadata)
+	if err != nil {
+		return ErrInvalidArgument
+	}
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO audit_records (id,tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`, record.ID,
+		record.TenantID, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.Outcome, metadata)
+	if err != nil {
+		return fmt.Errorf("append idempotent audit record: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	var existing AuditRecord
+	var metadataMatches bool
+	if err = tx.QueryRow(ctx, `SELECT tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata=$2::jsonb
+		FROM audit_records WHERE id=$1`, record.ID, metadata).Scan(&existing.TenantID, &existing.ActorID,
+		&existing.Action, &existing.ResourceType, &existing.ResourceID, &existing.Outcome, &metadataMatches); err != nil {
+		return fmt.Errorf("read idempotent audit record: %w", err)
+	}
+	if existing.TenantID != record.TenantID || existing.ActorID != record.ActorID ||
+		existing.Action != record.Action || existing.ResourceType != record.ResourceType ||
+		existing.ResourceID != record.ResourceID || existing.Outcome != record.Outcome || !metadataMatches {
+		return ErrConflict
+	}
+	return nil
+}
+
 func validateAuditRecord(record AuditRecord) error {
 	if record.TenantID == "" || record.ActorID == "" || record.Action == "" || record.ResourceType == "" || record.ResourceID == "" {
 		return ErrInvalidArgument

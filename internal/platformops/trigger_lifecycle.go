@@ -112,7 +112,14 @@ func (s *TriggerService) ChangeState(ctx context.Context, request ChangeTriggerS
 		request.Now.IsZero() || !validMutationKey(request.IdempotencyKey) {
 		return Trigger{}, ErrInvalidArgument
 	}
-	request.RequestHash = triggerMutationHash("state", request)
+	request.RequestHash = triggerMutationHash("state", struct {
+		TenantID          string
+		ActorID           string
+		TriggerID         string
+		Enabled           bool
+		ExpectedUpdatedAt time.Time
+		IdempotencyKey    string
+	}{request.TenantID, request.ActorID, request.TriggerID, request.Enabled, request.ExpectedUpdatedAt, request.IdempotencyKey})
 	store, ok := s.store.(TriggerLifecycleStore)
 	if !ok {
 		return Trigger{}, ErrConflict

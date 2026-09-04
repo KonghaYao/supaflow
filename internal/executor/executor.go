@@ -79,6 +79,7 @@ type PlanExecutor struct {
 	subflow     SubworkflowRunner
 	isolate     IsolationRunner
 	outputs     OutputManager
+	cleanupWait time.Duration
 
 	mu     sync.Mutex
 	active map[string]*activeAttempt
@@ -116,7 +117,7 @@ func NewPlanExecutor(catalog platform.PlanCatalog, cfg Config) (*PlanExecutor, e
 	return &PlanExecutor{
 		catalog: catalog, http: httpExecutor, credentials: cfg.CredentialAuthorizer, models: cfg.Models, agents: cfg.Agents,
 		tools: cfg.Tools, subflow: cfg.Subworkflows, isolate: cfg.Isolation, outputs: cfg.Outputs,
-		active: make(map[string]*activeAttempt),
+		cleanupWait: defaultOutputCleanupTimeout, active: make(map[string]*activeAttempt),
 	}, nil
 }
 
@@ -162,6 +163,12 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 	}
 	if req.Takeover && !node.Capabilities.RecoverySafe {
 		return workflowruntime.ExecutionResult{}, executionError("unsafe_lease_takeover", false, errors.New("node cannot be re-executed after an ambiguous lease loss"))
+	}
+	// Sensitive nodes never emit ordinary stream events. Their immutable plan
+	// classification forces the final value into protected object storage, and
+	// disabling deltas prevents plaintext from leaking through SSE/outbox first.
+	if node.SensitiveOutput {
+		emit = nil
 	}
 	if e.credentials != nil {
 		if err := e.credentials.AuthorizeCredentials(ctx, req, node); err != nil {
@@ -343,69 +350,6 @@ type approvalSnapshot struct {
 	Request json.RawMessage `json:"request"`
 }
 
-func successors(plan *workflow.ExecutionPlan, nodeID string, input json.RawMessage) ([]workflowruntime.NewAttempt, error) {
-	return successorsForPort(plan, nodeID, "", input)
-}
-
-func successorsForPort(plan *workflow.ExecutionPlan, nodeID, selectedPort string, input json.RawMessage) ([]workflowruntime.NewAttempt, error) {
-	edges := plan.Edges()
-	next := make([]workflowruntime.NewAttempt, 0, 2)
-	for _, edge := range edges {
-		if edge.FromNode != nodeID || (selectedPort != "" && edge.FromPort != selectedPort) {
-			continue
-		}
-		node, ok := plan.Node(edge.ToNode)
-		if !ok || node.Executor.Kind == "" {
-			return nil, executionError("invalid_plan", false, errors.New("successor has no executable binding"))
-		}
-		resolved, err := resolveSuccessorInput(node, edge, nodeID, input)
-		if err != nil {
-			return nil, err
-		}
-		required := make([]string, 0)
-		seenRequired := make(map[string]struct{})
-		for _, candidate := range edges {
-			if candidate.ToNode == node.ID && node.Type != workflow.NodeTypeLoop {
-				key := joinEdgeKey(plan, candidate)
-				if _, seen := seenRequired[key]; !seen {
-					required = append(required, key)
-					seenRequired[key] = struct{}{}
-				}
-			}
-		}
-		if node.Type == workflow.NodeTypeLoop {
-			required = append(required, joinEdgeKey(plan, edge))
-		}
-		staticInputs := make(map[string]json.RawMessage)
-		for port, binding := range node.Inputs {
-			if len(binding.Literal) > 0 {
-				staticInputs[port] = cloneJSON(binding.Literal)
-			}
-		}
-		next = append(next, workflowruntime.NewAttempt{
-			NodeID: node.ID, Executor: node.Executor.Kind, Input: resolved,
-			EdgeID: joinEdgeKey(plan, edge), SourceNodeID: nodeID, SourcePort: edge.FromPort,
-			TargetPort: edge.ToPort, RequiredEdges: required,
-			StaticInputs: staticInputs, AggregateInput: len(node.Inputs) > 1 || len(staticInputs) > 0,
-		})
-	}
-	if len(next) == 0 {
-		return nil, executionError("invalid_plan", false, errors.New("non-terminal node has no successor"))
-	}
-	return next, nil
-}
-
-// joinEdgeKey collapses direct Condition/Switch alternatives into one durable
-// barrier slot. Exactly one port is active, so waiting for every alternative
-// would leave a valid branch merge permanently unschedulable.
-func joinEdgeKey(plan *workflow.ExecutionPlan, edge workflow.EdgeDefinition) string {
-	source, ok := plan.Node(edge.FromNode)
-	if ok && (source.Type == workflow.NodeTypeCondition || source.Type == workflow.NodeTypeSwitch) {
-		return "choice:" + edge.FromNode + ":" + edge.ToNode
-	}
-	return edge.ID
-}
-
 // validateExecutablePlan keeps the Phase 1 execution contract honest. Durable
 // fan-in needs persisted edge contributions and an atomic join-ready CAS in the
 // runtime store; accepting those plans here would duplicate joins after restart.
@@ -417,20 +361,6 @@ func validateExecutablePlan(plan *workflow.ExecutionPlan) error {
 		return executionError("invalid_plan", false, errors.New("execution plan has no nodes"))
 	}
 	return nil
-}
-
-func resolveSuccessorInput(node workflow.PlanNode, edge workflow.EdgeDefinition, predecessorID string, output json.RawMessage) (json.RawMessage, error) {
-	binding, exists := node.Inputs[edge.ToPort]
-	if !exists {
-		return cloneJSON(output), nil
-	}
-	if len(binding.Literal) > 0 && binding.Source == nil {
-		return cloneJSON(binding.Literal), nil
-	}
-	if len(binding.Literal) == 0 && binding.Source != nil && binding.Source.NodeID == predecessorID && binding.Source.Port == edge.FromPort {
-		return cloneJSON(output), nil
-	}
-	return nil, executionError("invalid_input_binding", false, errors.New("successor input binding does not match its control-flow edge"))
 }
 
 func executionError(code string, retryable bool, cause error) *workflowruntime.ExecutionError {

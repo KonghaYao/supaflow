@@ -361,6 +361,8 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		writeProblem(w, r, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, platform.ErrPublicationConflict):
 		writeProblem(w, r, http.StatusConflict, "idempotency_conflict", "idempotency key conflicts with an earlier request")
+	case errors.Is(err, definition.ErrTenantDraftLimit), errors.Is(err, platform.ErrTenantVersionLimit), errors.Is(err, platform.ErrWorkflowVersionLimit):
+		writeProblem(w, r, http.StatusTooManyRequests, "resource_limit_exceeded", "tenant workflow resource limit is exhausted")
 	case errors.As(err, &runtimeError):
 		status := http.StatusConflict
 		if runtimeError.Code == runtime.CodeInvalidArgument {

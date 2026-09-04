@@ -363,6 +363,27 @@ func TestOrchestratorCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	}
 }
 
+// 验证不遵守 context 的 Cancel adapter 也不能永久占住单线程 worker。
+func TestOrchestratorBoundsNonCompliantCancelAdapter(t *testing.T) {
+	executor := executorFunc{
+		execute: func(context.Context, ExecutionRequest) (ExecutionResult, error) { return ExecutionResult{}, nil },
+		cancel:  func(context.Context, ExecutionRequest) error { select {} },
+	}
+	orchestrator, err := NewOrchestrator(NewMemoryStore(), executor, nil, &sequenceIDs{}, OrchestratorConfig{
+		WorkerID: "worker_cancel_bound", LeaseDuration: time.Minute, CancelTimeout: 20 * time.Millisecond,
+		RetryPolicy:  RetryPolicy{MaxAttempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+		ResumeTokens: testResumeTokens(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	orchestrator.cancelExecutorBounded(context.Background(), ExecutionRequest{TenantID: "tenant_a", AttemptID: "attempt_a"})
+	if time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("cancel adapter blocked worker for %s", time.Since(started))
+	}
+}
+
 // 验证运行中收到取消意图后 heartbeat 会显式通知 executor、终止执行并原子落为 CANCELLED。
 func TestOrchestratorPropagatesActiveCancellationWithoutRetry(t *testing.T) {
 	store := NewMemoryStore()

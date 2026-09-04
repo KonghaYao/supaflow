@@ -18,6 +18,17 @@ var (
 	ErrIdempotencyConflict = errors.New("definition idempotency conflict")
 	// ErrVersionSequenceConflict rejects migration that would renumber source history.
 	ErrVersionSequenceConflict = errors.New("workflow version sequence conflict")
+	// ErrTenantDraftLimit rejects creation after a tenant reaches its durable draft quota.
+	ErrTenantDraftLimit = errors.New("tenant workflow draft limit exceeded")
+)
+
+const (
+	// DefaultPageLimit bounds Studio list responses when callers omit a limit.
+	DefaultPageLimit = 50
+	// MaxPageLimit is the hard upper bound for one Studio list response.
+	MaxPageLimit = 100
+	// MaxDraftsPerTenant bounds durable editable definitions owned by one tenant.
+	MaxDraftsPerTenant = 1000
 )
 
 // Draft is the tenant-scoped editable document and optimistic revision.
@@ -32,6 +43,23 @@ type Draft struct {
 	UpdatedAt  time.Time
 }
 
+// DraftSummary is the bounded list projection; it deliberately excludes Document.
+type DraftSummary struct {
+	ID         string
+	TenantID   string
+	WorkflowID string
+	Revision   uint64
+	UpdatedBy  string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// DraftPage is one cursor-bounded page of draft summaries.
+type DraftPage struct {
+	Items      []DraftSummary
+	NextCursor string
+}
+
 // Version is one immutable published workflow definition.
 type Version struct {
 	TenantID    string
@@ -42,6 +70,23 @@ type Version struct {
 	PlanHash    string
 	Definition  workflow.WorkflowDefinition
 	PublishedAt time.Time
+}
+
+// VersionSummary is the immutable list projection; it excludes Definition.
+type VersionSummary struct {
+	TenantID    string
+	WorkflowID  string
+	VersionID   string
+	PlanID      string
+	Version     uint64
+	PlanHash    string
+	PublishedAt time.Time
+}
+
+// VersionPage is one cursor-bounded page of immutable version summaries.
+type VersionPage struct {
+	Items      []VersionSummary
+	NextCursor uint64
 }
 
 // VersionChange is one deterministic JSON-path change between definitions.

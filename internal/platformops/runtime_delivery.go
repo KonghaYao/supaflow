@@ -7,15 +7,9 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pazhou/supaflow/internal/definition"
 	"github.com/pazhou/supaflow/internal/platform"
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
-
-// LatestVersionResolver resolves the immutable publication selected by a workflow trigger.
-type LatestVersionResolver interface {
-	LatestVersion(context.Context, string, string) (definition.Version, error)
-}
 
 // RunStarter is the narrow durable-runtime seam used by trigger delivery.
 type RunStarter interface {
@@ -24,44 +18,45 @@ type RunStarter interface {
 
 // TriggerRunDelivery turns a committed trigger.fired outbox message into one idempotent run.
 type TriggerRunDelivery struct {
-	pool     *pgxpool.Pool
-	versions LatestVersionResolver
-	catalog  platform.PlanCatalog
-	runs     RunStarter
+	pool    *pgxpool.Pool
+	catalog platform.PlanCatalog
+	runs    RunStarter
 }
 
 // NewTriggerRunDelivery validates the production trigger delivery dependencies.
-func NewTriggerRunDelivery(pool *pgxpool.Pool, versions LatestVersionResolver, catalog platform.PlanCatalog, runs RunStarter) (*TriggerRunDelivery, error) {
-	if pool == nil || versions == nil || catalog == nil || runs == nil {
+func NewTriggerRunDelivery(pool *pgxpool.Pool, catalog platform.PlanCatalog, runs RunStarter) (*TriggerRunDelivery, error) {
+	if pool == nil || catalog == nil || runs == nil {
 		return nil, ErrInvalidArgument
 	}
-	return &TriggerRunDelivery{pool: pool, versions: versions, catalog: catalog, runs: runs}, nil
+	return &TriggerRunDelivery{pool: pool, catalog: catalog, runs: runs}, nil
 }
 
-// Deliver resolves the latest immutable plan and creates a run keyed by firing ID.
+// Deliver resolves the immutable plan bound by the acceptance transaction and
+// creates a run keyed by firing ID. It never consults mutable trigger state.
 func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessage) error {
 	if message.Topic != "trigger.fired" || message.TenantID == "" {
 		return ErrInvalidArgument
 	}
 	var envelope struct {
-		FiringID  string          `json:"firingId"`
-		TriggerID string          `json:"triggerId"`
-		Payload   json.RawMessage `json:"payload"`
+		FiringID          string          `json:"firingId"`
+		TriggerID         string          `json:"triggerId"`
+		WorkflowID        string          `json:"workflowId"`
+		WorkflowVersionID string          `json:"workflowVersionId"`
+		ExecutionPlanID   string          `json:"executionPlanId"`
+		PlanHash          string          `json:"planHash"`
+		Payload           json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal(message.Payload, &envelope); err != nil || envelope.FiringID == "" || envelope.TriggerID == "" || !json.Valid(envelope.Payload) {
+	if err := json.Unmarshal(message.Payload, &envelope); err != nil || envelope.FiringID == "" || envelope.TriggerID == "" ||
+		envelope.WorkflowID == "" || envelope.WorkflowVersionID == "" || envelope.ExecutionPlanID == "" ||
+		envelope.PlanHash == "" || !json.Valid(envelope.Payload) {
 		return ErrInvalidArgument
 	}
-	var workflowID string
-	if err := d.pool.QueryRow(ctx, `SELECT workflow_id FROM triggers WHERE tenant_id=$1 AND id=$2`, message.TenantID, envelope.TriggerID).Scan(&workflowID); err != nil {
-		return fmt.Errorf("resolve trigger workflow: %w", err)
-	}
-	version, err := d.versions.LatestVersion(ctx, message.TenantID, workflowID)
-	if err != nil {
-		return fmt.Errorf("resolve trigger workflow version: %w", err)
-	}
-	published, err := d.catalog.Resolve(ctx, message.TenantID, version.PlanID, version.PlanHash)
+	published, err := d.catalog.Resolve(ctx, message.TenantID, envelope.ExecutionPlanID, envelope.PlanHash)
 	if err != nil {
 		return fmt.Errorf("resolve trigger execution plan: %w", err)
+	}
+	if published.WorkflowID != envelope.WorkflowID || published.Version == 0 {
+		return errors.New("trigger execution target failed immutable identity verification")
 	}
 	order := published.Plan.TopologicalOrder()
 	if len(order) == 0 {
@@ -78,7 +73,9 @@ func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessag
 	if err != nil {
 		return fmt.Errorf("start trigger run: %w", err)
 	}
-	_, err = d.pool.Exec(ctx, `UPDATE trigger_firings SET status='dispatched' WHERE tenant_id=$1 AND id=$2 AND trigger_id=$3`, message.TenantID, envelope.FiringID, envelope.TriggerID)
+	_, err = d.pool.Exec(ctx, `UPDATE trigger_firings SET status='dispatched'
+		WHERE tenant_id=$1 AND id=$2 AND trigger_id=$3 AND workflow_version_id=$4 AND execution_plan_id=$5 AND plan_hash=$6`,
+		message.TenantID, envelope.FiringID, envelope.TriggerID, envelope.WorkflowVersionID, envelope.ExecutionPlanID, envelope.PlanHash)
 	if err != nil {
 		return fmt.Errorf("mark trigger firing dispatched: %w", err)
 	}

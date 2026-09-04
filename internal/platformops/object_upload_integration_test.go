@@ -309,7 +309,7 @@ func TestManagedObjectDeletionRecoveryIsTenantScoped(t *testing.T) {
 		tenantA, digest[:]); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := retention.DeleteArchived(ctx, tenantA, time.Now(), 10); err != nil || count != 1 {
+	if count, err := retention.DeleteArchived(ctx, tenantA, 0, 10); err != nil || count != 1 {
 		t.Fatalf("delete archived kind count=%d err=%v", count, err)
 	}
 	if _, err := objects.Open(ctx, tenantA, "expired_archive"); !errors.Is(err, ErrNotFound) {

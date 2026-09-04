@@ -81,10 +81,11 @@ func admitRunTx(ctx context.Context, tx pgx.Tx, run workflowruntime.Run) (runAdm
 // releaseRunAdmissionTx releases capacity and promotes exactly one queued run
 // under the tenant counter lock. Replays are no-ops and cannot double-decrement.
 func releaseRunAdmissionTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, runID string, now time.Time) (string, error) {
-	var active, queued int
+	var maxActive, active, queued int
 	if err := tx.QueryRow(ctx, `
-		SELECT active_runs, queued_runs FROM tenant_quota_counters
-		WHERE tenant_id = $1 FOR UPDATE`, tenantID).Scan(&active, &queued); err != nil {
+		SELECT q.max_active_runs,c.active_runs,c.queued_runs
+		FROM tenant_quotas q JOIN tenant_quota_counters c ON c.tenant_id=q.tenant_id
+		WHERE q.tenant_id = $1 FOR UPDATE OF q,c`, tenantID).Scan(&maxActive, &active, &queued); err != nil {
 		return "", fmt.Errorf("lock run quota counters: %w", err)
 	}
 	var entryID, status string
@@ -115,7 +116,7 @@ func releaseRunAdmissionTx(ctx context.Context, tx pgx.Tx, tenantID workflowrunt
 		queued--
 	}
 	promotedRunID := ""
-	if status == "active" && queued > 0 {
+	if status == "active" && queued > 0 && active < maxActive {
 		err = tx.QueryRow(ctx, `
 			UPDATE admission_entries SET status = 'active', admitted_at = $2
 			WHERE (tenant_id, id) = (

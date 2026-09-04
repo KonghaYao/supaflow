@@ -50,6 +50,12 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 	if err = seedPlatformTenant(ctx, pool, tenantB, workflowB); err != nil {
 		t.Fatal(err)
 	}
+	if err = seedTriggerPublication(ctx, pool, tenantA, workflowA, "a_"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	if err = seedTriggerPublication(ctx, pool, tenantB, workflowB, "b_"+suffix); err != nil {
+		t.Fatal(err)
+	}
 
 	provider, err := NewLocalAESProvider("integration-key", bytes.Repeat([]byte{3}, 32))
 	if err != nil {
@@ -97,9 +103,7 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 	}); !errors.Is(receiveErr, ErrCredentialForbidden) {
 		t.Fatalf("cross-tenant webhook error=%v", receiveErr)
 	}
-	if purged, purgeErr := triggerStore.PurgeExpiredWebhookReplays(ctx, now.Add(10*time.Minute), 100); purgeErr != nil || purged != 1 {
-		t.Fatalf("purged webhook replay guards=%d err=%v", purged, purgeErr)
-	}
+	verifyFutureWebhookReplayWindow(t, ctx, triggers, triggerStore, tenantA, webhook.ID, body, []byte(secretValue), now)
 	for _, kind := range []TriggerKind{TriggerAPI, TriggerManual} {
 		trigger, createErr := triggers.Create(ctx, CreateTriggerRequest{
 			TenantID: tenantA, ActorID: "admin_a", WorkflowID: workflowA,
@@ -134,8 +138,8 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 	if err != nil || len(eventFirings) != 1 || eventFirings[0].TriggerID != eventTrigger.ID {
 		t.Fatalf("event firings=%+v err=%v", eventFirings, err)
 	}
-	eventFirings, err = triggers.ReceiveEvent(ctx, tenantA, "document.ready", "event-1", json.RawMessage(`{"documentId":"doc-1"}`), now)
-	if err != nil || len(eventFirings) != 0 {
+	eventFirings, err = triggers.ReceiveEvent(ctx, tenantA, "document.ready", "event-1", json.RawMessage(`{"documentId":"doc-1"}`), now.Add(time.Minute))
+	if err != nil || len(eventFirings) != 1 || !eventFirings[0].SourceTime.Equal(now) {
 		t.Fatalf("event replay firings=%+v err=%v", eventFirings, err)
 	}
 	if _, err = triggers.ReceiveEvent(ctx, tenantA, "document.ready", "event-1", json.RawMessage(`{"documentId":"doc-2"}`), now); !errors.Is(err, ErrConflict) {
@@ -228,13 +232,17 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 		t.Fatalf("worker quota error=%v", err)
 	}
 	workers := NewWorkerRegistry(pool)
-	if err = workers.Heartbeat(ctx, tenantA, "worker-0", 1, 0, now.Add(-time.Minute)); err != nil {
+	if err = workers.Heartbeat(ctx, tenantA, "worker-0", 1, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err = workers.Heartbeat(ctx, tenantA, "worker-1", 1, 0, now); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE worker_registrations SET heartbeat_at=clock_timestamp()-interval '1 minute'
+		WHERE tenant_id=$1 AND worker_id='worker-0'`, tenantA); err != nil {
 		t.Fatal(err)
 	}
-	if reaped, reapErr := workers.ReapStale(ctx, tenantA, now.Add(-30*time.Second), 10); reapErr != nil || reaped != 1 {
+	if err = workers.Heartbeat(ctx, tenantA, "worker-1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if reaped, reapErr := workers.ReapStale(ctx, tenantA, 30*time.Second, 10); reapErr != nil || reaped != 1 {
 		t.Fatalf("reaped workers=%d err=%v", reaped, reapErr)
 	}
 	var activeWorkers int
@@ -352,6 +360,10 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 	if err != nil || firstFailure.RetryAt == nil {
 		t.Fatalf("first delivery failure=%+v err=%v", firstFailure, err)
 	}
+	if _, err = pool.Exec(ctx, `UPDATE outbox_messages SET available_at=clock_timestamp()-interval '1 microsecond'
+		WHERE tenant_id=$1 AND id=$2`, tenantA, firstFailure.MessageID); err != nil {
+		t.Fatal(err)
+	}
 	secondFailure, err := dispatcher.DispatchOne(ctx, tenantA, *firstFailure.RetryAt)
 	if err != nil || !secondFailure.DeadLetter || secondFailure.MessageID != firstFailure.MessageID {
 		t.Fatalf("second delivery failure=%+v err=%v", secondFailure, err)
@@ -441,10 +453,10 @@ func TestPostgresPlatformOperationsLifecycle(t *testing.T) {
 	if err != nil || bytes.Contains(archiveBytes, []byte("must-redact")) {
 		t.Fatalf("event archive leaked secret or failed: err=%v", err)
 	}
-	if count, archiveErr := retention.ArchiveExpired(ctx, tenantA, now, 10); archiveErr != nil || count != 1 {
+	if count, archiveErr := retention.ArchiveExpired(ctx, tenantA, 10); archiveErr != nil || count != 1 {
 		t.Fatalf("archive count=%d err=%v", count, archiveErr)
 	}
-	if count, deleteErr := retention.DeleteArchived(ctx, tenantA, now, 10); deleteErr != nil || count != 1 {
+	if count, deleteErr := retention.DeleteArchived(ctx, tenantA, 0, 10); deleteErr != nil || count != 2 {
 		t.Fatalf("delete count=%d err=%v", count, deleteErr)
 	}
 	if _, _, err = outputs.Open(ctx, tenantA, managed.ID); !errors.Is(err, ErrNotFound) {

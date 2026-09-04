@@ -98,7 +98,9 @@ func runDetailsDTO(details runtime.RunDetails) runDetailsResponse {
 		for attemptIndex, item := range diagnostic.Attempts {
 			attempt := item.Attempt
 			node.Attempts[attemptIndex] = attemptDiagnosticResponse{ID: attempt.ID, Number: attempt.Number,
-				Executor: attempt.Executor, Status: attempt.Status, Input: bytes.Clone(attempt.Input), ErrorCode: attempt.ErrorCode,
+				// Attempt input can contain an upstream credential-derived value under
+				// arbitrary field names. It is never a safe monitor projection.
+				Executor: attempt.Executor, Status: attempt.Status, Input: json.RawMessage(`null`), ErrorCode: attempt.ErrorCode,
 				NextAttemptAt: attempt.NextAttemptAt, StartedAt: attempt.StartedAt, FinishedAt: attempt.FinishedAt,
 				CreatedAt: attempt.CreatedAt, UpdatedAt: attempt.UpdatedAt}
 		}

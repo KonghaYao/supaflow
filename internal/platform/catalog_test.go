@@ -50,3 +50,24 @@ func TestMemoryCatalogResolveIsTenantScoped(t *testing.T) {
 		t.Fatalf("expected plan not found, got %v", err)
 	}
 }
+
+// 验证版本硬配额在编译后、分配版本前拒绝新发布，且使用稳定资源错误。
+func TestMemoryCatalogEnforcesVersionHardLimits(t *testing.T) {
+	catalog := NewMemoryCatalog(workflow.BuiltinRegistry(), workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}})
+	first, _, err := catalog.Publish(context.Background(), "tenant-a", "existing", minimalDefinition("existing"), "existing-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.tenantCounts["tenant-a"] = MaxVersionsPerTenant
+	if replay, created, replayErr := catalog.Publish(context.Background(), "tenant-a", "existing", minimalDefinition("existing"), "existing-key"); replayErr != nil || created || replay.ID != first.ID {
+		t.Fatalf("replay at capacity=%+v created=%v err=%v", replay, created, replayErr)
+	}
+	if _, _, err := catalog.Publish(context.Background(), "tenant-a", "flow", minimalDefinition("flow"), "tenant-limit"); !errors.Is(err, ErrTenantVersionLimit) {
+		t.Fatalf("tenant limit error=%v", err)
+	}
+	catalog.tenantCounts["tenant-a"] = 0
+	catalog.versions["tenant-a\x00flow"] = MaxVersionsPerWorkflow
+	if _, _, err := catalog.Publish(context.Background(), "tenant-a", "flow", minimalDefinition("flow"), "workflow-limit"); !errors.Is(err, ErrWorkflowVersionLimit) {
+		t.Fatalf("workflow limit error=%v", err)
+	}
+}
