@@ -1,0 +1,1150 @@
+{
+  "schemaVersion": "v1",
+  "nodes": [
+    {
+      "type": "agent",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": true,
+        "cancellable": true,
+        "interruptible": true,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": true,
+        "credentials": true,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "eino.agent",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "system": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "condition",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.condition",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operator": {
+            "enum": [
+              "exists",
+              "eq",
+              "ne",
+              "gt",
+              "gte",
+              "lt",
+              "lte"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "value": {}
+        },
+        "required": [
+          "path",
+          "operator"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "delay",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": true,
+        "idempotent": false,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.delay",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "durationMs": {
+            "maximum": 2592000000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "durationMs"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "end",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 1000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.end",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "result": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {},
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "http",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 4194304,
+      "permissions": {
+        "network": true,
+        "credentials": true,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "http.request",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "response": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "credentialRef": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD"
+            ],
+            "type": "string"
+          },
+          "retrySafe": {
+            "description": "Explicitly permits transport-level replay for non-idempotent methods when the destination enforces Idempotency-Key.",
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "maximum": 300000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "url"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [
+        "/config/credentialRef"
+      ],
+      "migrations": []
+    },
+    {
+      "type": "human-approval",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": true,
+        "idempotent": false,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 86400000,
+      "maximumOutputBytes": 65536,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.human-approval",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "request": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "decision": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "timeoutMs": {
+            "maximum": 2592000000,
+            "minimum": 1000,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "llm",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": true,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": true,
+        "credentials": true,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "eino.llm",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "system": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "loop",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.loop",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "maxIterations": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxIterations"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "python",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": true,
+        "filesystem": false,
+        "compute": true
+      },
+      "executor": {
+        "kind": "isolated.python",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "network": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "shell",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": true,
+        "filesystem": false,
+        "compute": true
+      },
+      "executor": {
+        "kind": "isolated.shell",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "network": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "start",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 1000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.start",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {},
+      "outputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "subworkflow",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": true,
+        "retrySafeErrors": [
+          "adapter_failed"
+        ]
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.subworkflow",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "planHash": {
+            "type": "string"
+          },
+          "planId": {
+            "type": "string"
+          },
+          "workflowId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflowId",
+          "planId",
+          "planHash"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "switch",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.switch",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "cases": {
+            "minProperties": 1,
+            "type": "object"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "cases"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "tool",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": false,
+        "idempotent": false,
+        "recoverySafe": false
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": true,
+        "credentials": true,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "eino.tool",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "transform",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": false,
+        "interruptible": false,
+        "idempotent": true,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.transform",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "select": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "select"
+        ],
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "wait",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": true,
+        "idempotent": false,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.wait",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "timeoutMs": {
+            "maximum": 2592000000,
+            "minimum": 1000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    },
+    {
+      "type": "webhook-resume",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "cancellable": true,
+        "interruptible": true,
+        "idempotent": false,
+        "recoverySafe": true
+      },
+      "defaultTimeoutMs": 30000,
+      "maximumOutputBytes": 1048576,
+      "permissions": {
+        "network": false,
+        "credentials": false,
+        "filesystem": false,
+        "compute": false
+      },
+      "executor": {
+        "kind": "builtin.webhook-resume",
+        "minimumRunnerVersion": "1.0.0"
+      },
+      "inputs": {
+        "input": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "outputs": {
+        "body": {
+          "type": "any",
+          "required": false
+        },
+        "done": {
+          "type": "any",
+          "required": false
+        },
+        "false": {
+          "type": "any",
+          "required": false
+        },
+        "output": {
+          "type": "any",
+          "required": false
+        },
+        "true": {
+          "type": "any",
+          "required": false
+        }
+      },
+      "configSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "timeoutMs": {
+            "maximum": 2592000000,
+            "minimum": 1000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "sensitiveFields": [],
+      "migrations": []
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+/bin/
+/coverage/
+/isolation
+/.env
+*.log
+/web/node_modules/
+/web/dist/*
+!/web/dist/placeholder.txt

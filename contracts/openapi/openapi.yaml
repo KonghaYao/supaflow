@@ -1,0 +1,1222 @@
+openapi: 3.1.0
+info:
+  title: Supaflow API
+  version: 1.0.0
+  description: Stable tenant-scoped API for workflow publication and durable execution.
+servers:
+  - url: /v1
+security:
+  - apiKey: []
+paths:
+  /workflows:
+    get:
+      operationId: listWorkflowDrafts
+      summary: List tenant workflow drafts.
+      responses:
+        '200':
+          description: Drafts ordered by workflow ID
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+    post:
+      operationId: createWorkflowDraft
+      summary: Idempotently create a FlowGram workflow draft.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [workflowId, document]
+              properties:
+                workflowId: { type: string, minLength: 1 }
+                document: { $ref: '#/components/schemas/FlowGramDocument' }
+      responses:
+        '201': { description: Created or idempotently replayed draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}:
+    get:
+      operationId: getWorkflowDraft
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      responses:
+        '200': { description: Tenant workflow draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: updateWorkflowDraft
+      summary: Idempotently save a draft at an optimistic revision.
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [document, expectedRevision]
+              properties:
+                document: { $ref: '#/components/schemas/FlowGramDocument' }
+                expectedRevision: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200': { description: Saved draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteWorkflowDraft
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedRevision]
+              properties: { expectedRevision: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '204': { description: Deleted or idempotently replayed }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/compile:
+    post:
+      operationId: compileWorkflowDraft
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      responses:
+        '200': { description: Compiled current draft, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionPlan' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/publish-draft:
+    post:
+      operationId: publishWorkflowDraft
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Idempotent publication replay, content: { application/json: { schema: { $ref: '#/components/schemas/PublishedPlan' } } } }
+        '201': { description: Published current draft, content: { application/json: { schema: { $ref: '#/components/schemas/PublishedPlan' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/versions:
+    get:
+      operationId: listWorkflowVersions
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      responses:
+        '200':
+          description: Newest immutable versions first
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/VersionSummary' } } } }
+  /workflows/{workflowId}/versions/latest:
+    get:
+      operationId: resolveLatestWorkflowVersion
+      summary: Resolve the immutable plan identity used to start a run.
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      responses:
+        '200': { description: Latest immutable version, content: { application/json: { schema: { $ref: '#/components/schemas/VersionSummary' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/versions/diff:
+    get:
+      operationId: diffWorkflowVersions
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - { name: from, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: to, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '200': { description: Deterministic canonical definition diff, content: { application/json: { schema: { $ref: '#/components/schemas/VersionDiff' } } } }
+  /workflows/{workflowId}/versions/{version}:
+    get:
+      operationId: getWorkflowVersion
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/Version'
+      responses:
+        '200': { description: Immutable version and canonical definition, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowVersion' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/versions/{version}/republish:
+    post:
+      operationId: republishWorkflowVersion
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/Version'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Idempotent republish replay, content: { application/json: { schema: { $ref: '#/components/schemas/PublishedPlan' } } } }
+        '201': { description: New version created from historical definition, content: { application/json: { schema: { $ref: '#/components/schemas/PublishedPlan' } } } }
+  /workflows/{workflowId}/dry-run:
+    post:
+      operationId: dryRunWorkflowDraft
+      summary: Compile and simulate the draft without executing external side effects.
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, additionalProperties: false, required: [sampleInput], properties: { sampleInput: {} } } } }
+      responses:
+        '200': { description: Side-effect-free topological simulation, content: { application/json: { schema: { $ref: '#/components/schemas/DryRun' } } } }
+  /workflows/{workflowId}/node-test:
+    post:
+      operationId: testWorkflowNode
+      summary: Simulate a resolved node and sample input without external side effects.
+      parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [nodeId, sampleInput]
+              properties: { nodeId: { type: string }, sampleInput: {} }
+      responses:
+        '200': { description: Side-effect-free node simulation, content: { application/json: { schema: { $ref: '#/components/schemas/NodeTest' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /node-types:
+    get:
+      operationId: listNodeTypes
+      summary: Discover the backend registry and typed port/config schemas.
+      responses:
+        '200': { description: Registered node type versions, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/NodeType' } } } } }
+  /workflows/compile:
+    post:
+      operationId: compileWorkflow
+      summary: Validate a canonical definition and produce an immutable plan preview.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowDefinition'
+      responses:
+        '200':
+          description: Compiled plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionPlan'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /workflows/{workflowId}/publish:
+    post:
+      operationId: publishWorkflow
+      summary: Atomically publish an immutable workflow version and execution plan.
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowDefinition'
+      responses:
+        '200':
+          description: Idempotent replay of the previously published plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishedPlan'
+        '201':
+          description: Published plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishedPlan'
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /runs:
+    get:
+      operationId: listRuns
+      summary: List recent tenant-owned runs for the Studio monitor.
+      parameters:
+        - { name: workflowId, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, RUNNING, SUSPENDED, CANCELLING, SUCCESS, FAILED, ERROR, CANCELLED] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200': { description: Recent runs ordered newest first, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/RunSummary' } } } } }
+    post:
+      operationId: startRun
+      summary: Idempotently start a run bound to an immutable plan.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [planId, planHash, input]
+              properties:
+                planId: { type: string, minLength: 1, maxLength: 128 }
+                planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+                input: {}
+                priority: { type: integer, minimum: -1000, maximum: 1000, default: 0 }
+                timeoutMs:
+                  description: Optional durable run deadline duration; omit or zero for no run-level deadline.
+                  oneOf:
+                    - { type: integer, format: int64, const: 0 }
+                    - { type: integer, format: int64, minimum: 1000, maximum: 2592000000 }
+      responses:
+        '200':
+          description: Idempotent replay of an existing run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '202':
+          description: Run accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}:
+    get:
+      operationId: getRun
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Current run projection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '404': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}/output:
+    get:
+      operationId: downloadRunOutput
+      summary: Stream a retained object-backed final output through a tenant-authorized boundary.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Bounded output bytes. Internal object keys and paths are never exposed.
+          headers:
+            Content-Length: { schema: { type: integer, format: int64, minimum: 0, maximum: 1073741824 } }
+            X-Content-SHA256: { schema: { type: string, pattern: '^[a-f0-9]{64}$' } }
+            ETag: { schema: { type: string } }
+          content:
+            application/json: { schema: { type: string, format: binary } }
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}/rerun:
+    post:
+      operationId: rerunRun
+      summary: Create a new run from a terminal run using its immutable plan.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                fromNodeId: { type: string, minLength: 1 }
+                priority: { type: integer, minimum: -1000, maximum: 1000, default: 0 }
+                timeoutMs:
+                  description: Optional fresh deadline for the rerun; source deadlines are never inherited.
+                  oneOf:
+                    - { type: integer, format: int64, const: 0 }
+                    - { type: integer, format: int64, minimum: 1000, maximum: 2592000000 }
+      responses:
+        '200': { description: Idempotent rerun replay, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '202': { description: New rerun accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}/details:
+    get:
+      operationId: getRunDetails
+      summary: Read safe node attempts, redacted inputs, output metadata, and failure codes.
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200': { description: Tenant-scoped run diagnostics, content: { application/json: { schema: { $ref: '#/components/schemas/RunDetails' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}/cancel:
+    post:
+      operationId: cancelRun
+      summary: Persist cancellation intent before notifying an executor.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '409': { $ref: '#/components/responses/Problem' }
+  /runs/{runId}/events:
+    get:
+      operationId: streamRunEvents
+      summary: Stream ordered run events and resume after a monotonic cursor.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: afterCursor
+          in: query
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        '200':
+          description: Server-sent events; each event id is the run-local sequence. Durable `stream.chunk` events can be replayed using either cursor input.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '429':
+          description: Process-wide or tenant stream capacity is exhausted. Retry after the response `Retry-After` delay.
+          headers:
+            Retry-After: { schema: { type: integer, minimum: 1 } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /runs/{runId}/interrupts:
+    get:
+      operationId: listRunInterrupts
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Pending human actions. `resumeToken` is included only for approver and admin callers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Interrupt' }
+  /interrupts/{interruptId}/resolve:
+    post:
+      operationId: resolveInterrupt
+      summary: Resolve a human action using a single-use expiring resume token.
+      parameters:
+        - name: interruptId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resumeToken, decision]
+              properties:
+                resumeToken: { type: string, minLength: 32 }
+                decision: { type: string, enum: [approved, rejected] }
+                comment: { type: string, maxLength: 2000 }
+                data: {}
+      responses:
+        '200':
+          description: Decision persisted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /hooks/resume/{interruptId}:
+    servers: [{ url: / }]
+    post:
+      operationId: resumeWebhookInterrupt
+      summary: Resume one webhook interrupt using a signed, expiring, single-use bearer token.
+      security: []
+      parameters:
+        - name: interruptId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: Authorization
+          in: header
+          required: true
+          schema: { type: string, pattern: '^Resume .{32,}$' }
+          description: Resume bearer token bound to tenant, run, node, attempt, interrupt kind and expiry. Never put it in a URL or body.
+        - name: X-Supaflow-Timestamp
+          in: header
+          required: true
+          schema: { type: integer, format: int64 }
+          description: Current Unix seconds; accepted only within a five-minute replay window.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {}
+      responses:
+        '200': { description: Callback consumed or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /ops/health:
+    servers: [{ url: / }]
+    get:
+      operationId: platformHealth
+      summary: Report process liveness for authenticated operators.
+      responses:
+        '200': { description: Process is live }
+  /ops/ready:
+    servers: [{ url: / }]
+    get:
+      operationId: platformReadiness
+      summary: Verify platform dependencies are ready.
+      responses:
+        '200': { description: Dependencies are ready }
+        '503': { $ref: '#/components/responses/Problem' }
+  /ops/metrics:
+    servers: [{ url: / }]
+    get:
+      operationId: platformMetrics
+      summary: Return tenant-scoped capacity and delivery metrics.
+      responses:
+        '200': { description: Capacity snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/CapacitySnapshot' } } } }
+  /ops/capacity:
+    servers: [{ url: / }]
+    get:
+      operationId: platformCapacity
+      responses:
+        '200': { description: Capacity snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/CapacitySnapshot' } } } }
+  /ops/triggers:
+    servers: [{ url: / }]
+    get:
+      operationId: listTriggers
+      parameters:
+        - { name: workflowId, in: query, schema: { type: string } }
+        - { name: kind, in: query, schema: { type: string, enum: [api, manual, schedule, webhook, event] } }
+        - { name: enabled, in: query, schema: { type: boolean } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        '200': { description: Tenant-owned triggers, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Trigger' } } } } }
+    post:
+      operationId: createTrigger
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateTrigger' } } }
+      responses:
+        '201': { description: Created trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+  /ops/triggers/{triggerId}:
+    servers: [{ url: / }]
+    get:
+      operationId: getTrigger
+      parameters: [{ $ref: '#/components/parameters/TriggerId' }]
+      responses:
+        '200': { description: Tenant-owned trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: updateTrigger
+      parameters:
+        - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateTrigger' } } }
+      responses:
+        '200': { description: Updated trigger or identical replay, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteTrigger
+      parameters:
+        - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: expectedUpdatedAt, in: query, required: true, schema: { type: string, format: date-time } }
+      responses:
+        '204': { description: Deleted or identical replay }
+        '409': { $ref: '#/components/responses/Problem' }
+  /ops/triggers/{triggerId}/state:
+    servers: [{ url: / }]
+    post:
+      operationId: setTriggerState
+      parameters:
+        - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled, expectedUpdatedAt]
+              properties:
+                enabled: { type: boolean }
+                expectedUpdatedAt: { type: string, format: date-time }
+      responses:
+        '200': { description: Trigger state changed or identical replay, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+  /ops/triggers/{triggerId}/fire:
+    servers: [{ url: / }]
+    post:
+      operationId: fireTrigger
+      parameters:
+        - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, idempotencyKey, payload]
+              properties:
+                kind: { type: string, enum: [api, manual] }
+                idempotencyKey: { type: string, minLength: 1, maxLength: 255 }
+                payload: { type: object }
+      responses:
+        '200': { description: Idempotent trigger firing }
+  /hooks/{publicHash}:
+    servers: [{ url: / }]
+    post:
+      operationId: receivePublicWebhook
+      summary: Verify a signed webhook and create an idempotent firing.
+      security: []
+      parameters:
+        - { name: publicHash, in: path, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+        - { name: X-Supaflow-Request-ID, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 255 } }
+        - { name: X-Supaflow-Timestamp, in: header, required: true, schema: { type: integer, format: int64 } }
+        - { name: X-Supaflow-Signature, in: header, required: true, schema: { type: string, pattern: '^v1=[a-f0-9]{64}$' } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '202': { description: Webhook accepted exactly once }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /ops/events/{eventType}:
+    servers: [{ url: / }]
+    post:
+      operationId: receivePlatformEvent
+      summary: Fan out an idempotent event to matching tenant triggers.
+      parameters:
+        - { name: eventType, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [eventId, payload]
+              properties:
+                eventId: { type: string, minLength: 1 }
+                payload: { type: object }
+      responses:
+        '202': { description: Event accepted and matching firings committed }
+  /ops/credentials:
+    servers: [{ url: / }]
+    post:
+      operationId: createCredential
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WriteCredential' } } }
+      responses:
+        '201': { description: Safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
+  /ops/credentials/{credentialId}/rotate:
+    servers: [{ url: / }]
+    post:
+      operationId: rotateCredential
+      parameters:
+        - $ref: '#/components/parameters/CredentialId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, secret]
+              properties:
+                version: { type: integer, minimum: 1 }
+                secret: { type: string, minLength: 1, writeOnly: true }
+      responses:
+        '200': { description: Rotated safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
+  /ops/credentials/{credentialId}/revoke:
+    servers: [{ url: / }]
+    post:
+      operationId: revokeCredential
+      parameters:
+        - $ref: '#/components/parameters/CredentialId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Revoked safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
+  /ops/quotas:
+    servers: [{ url: / }]
+    post:
+      operationId: configureQuota
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Quota' } } }
+      responses:
+        '200': { description: Quota configured }
+  /ops/audit:
+    servers: [{ url: / }]
+    get:
+      operationId: queryAudit
+      responses:
+        '200': { description: Tenant audit records, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } } } } }
+  /ops/retention:
+    servers: [{ url: / }]
+    post:
+      operationId: configureRetention
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } }
+      responses:
+        '200': { description: Retention policy configured }
+  /ops/exports:
+    servers: [{ url: / }]
+    post:
+      operationId: exportTenant
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '202': { description: Secret-free tenant export, content: { application/json: { schema: { $ref: '#/components/schemas/TenantExport' } } } }
+  /ops/workers/{workerId}/drain:
+    servers: [{ url: / }]
+    post:
+      operationId: drainWorker
+      parameters:
+        - { name: workerId, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Worker drain requested }
+  /ops/dlq:
+    servers: [{ url: / }]
+    get:
+      operationId: listDeadLetters
+      responses:
+        '200': { description: Tenant dead letters, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DeadLetter' } } } } }
+  /ops/dlq/{messageId}/requeue:
+    servers: [{ url: / }]
+    post:
+      operationId: requeueDeadLetter
+      parameters:
+        - { name: messageId, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Dead letter requeued }
+  /ops/webhook-subscriptions:
+    servers: [{ url: / }]
+    get:
+      operationId: listOutboundWebhookSubscriptions
+      summary: List safe tenant-scoped outbound event webhook metadata.
+      responses:
+        '200':
+          description: Active and disabled subscriptions
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/OutboundWebhookSubscription' } } } }
+    post:
+      operationId: createOutboundWebhookSubscription
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      summary: Create an HTTPS event sink referencing an encrypted signing credential.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateOutboundWebhookSubscription' } } }
+      responses:
+        '201': { description: Created subscription, content: { application/json: { schema: { $ref: '#/components/schemas/OutboundWebhookSubscription' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /ops/webhook-subscriptions/{subscriptionId}/enable:
+    servers: [{ url: / }]
+    post:
+      operationId: enableOutboundWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Enabled subscription, content: { application/json: { schema: { $ref: '#/components/schemas/OutboundWebhookSubscription' } } } }
+  /ops/webhook-subscriptions/{subscriptionId}/disable:
+    servers: [{ url: / }]
+    post:
+      operationId: disableOutboundWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Disabled subscription, content: { application/json: { schema: { $ref: '#/components/schemas/OutboundWebhookSubscription' } } } }
+  /ops/webhook-subscriptions/{subscriptionId}:
+    servers: [{ url: / }]
+    delete:
+      operationId: deleteOutboundWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Subscription soft-deleted while delivery receipts remain immutable }
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 128 }
+    WorkflowId:
+      name: workflowId
+      in: path
+      required: true
+      schema: { type: string }
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string }
+    TriggerId:
+      name: triggerId
+      in: path
+      required: true
+      schema: { type: string }
+    CredentialId:
+      name: credentialId
+      in: path
+      required: true
+      schema: { type: string }
+    SubscriptionId:
+      name: subscriptionId
+      in: path
+      required: true
+      schema: { type: string }
+    Version:
+      name: version
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+  responses:
+    Problem:
+      description: Stable error response without internal implementation details.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    WorkflowDefinition:
+      $ref: '../schemas/workflow-definition-v1.schema.json'
+    FlowGramDocument:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, workflowId, nodes, edges]
+      properties:
+        schemaVersion: { type: string, const: flowgram-v1 }
+        workflowId: { type: string, minLength: 1 }
+        nodes: { type: array, items: { type: object } }
+        edges: { type: array, items: { type: object } }
+        groups: { type: array, items: { type: object } }
+        viewport: { type: object }
+        metadata: { type: object }
+    WorkflowDraft:
+      type: object
+      additionalProperties: false
+      required: [id, workflowId, document, revision, updatedBy, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        workflowId: { type: string }
+        document: { $ref: '#/components/schemas/FlowGramDocument' }
+        revision: { type: integer, format: int64, minimum: 1 }
+        updatedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    VersionSummary:
+      type: object
+      additionalProperties: false
+      required: [workflowId, version, versionId, planId, planHash, publishedAt]
+      properties:
+        workflowId: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        versionId: { type: string }
+        planId: { type: string }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        publishedAt: { type: string, format: date-time }
+    WorkflowVersion:
+      allOf:
+        - $ref: '#/components/schemas/VersionSummary'
+        - type: object
+          required: [definition]
+          properties: { definition: { $ref: '#/components/schemas/WorkflowDefinition' } }
+    VersionDiff:
+      type: object
+      required: [workflowId, from, to, changes]
+      properties:
+        workflowId: { type: string }
+        from: { type: integer, format: int64, minimum: 1 }
+        to: { type: integer, format: int64, minimum: 1 }
+        changes:
+          type: array
+          items:
+            type: object
+            required: [path]
+            properties: { path: { type: string }, before: {}, after: {} }
+    DryRun:
+      type: object
+      required: [mode, planHash, steps, output]
+      properties:
+        mode: { type: string, const: simulated }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [nodeId, type, status]
+            properties:
+              nodeId: { type: string }
+              type: { type: string }
+              status: { type: string, enum: [executed, executed-test-adapter, validation-only, would-suspend] }
+              selectedPort: { type: string }
+              output: {}
+        output: {}
+    NodeTest:
+      type: object
+      required: [mode, nodeId, nodeType, executor, status]
+      properties:
+        mode: { type: string, const: simulated }
+        nodeId: { type: string }
+        nodeType: { type: string }
+        executor:
+          type: object
+          additionalProperties: false
+          required: [kind, minimumRunnerVersion]
+          properties:
+            kind: { type: string, minLength: 1 }
+            minimumRunnerVersion: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        status: { type: string, enum: [executed, executed-test-adapter, validation-only, would-suspend] }
+        selectedPort: { type: string }
+        output: {}
+    NodeType:
+      type: object
+      required: [type, version, capabilities, defaultTimeoutMs, maximumOutputBytes, permissions, executor, inputs, outputs, configSchema, sensitiveFields, migrations]
+      properties:
+        type: { type: string }
+        version: { type: string }
+        capabilities: { type: object }
+        defaultTimeoutMs: { type: integer, format: int64 }
+        maximumOutputBytes: { type: integer, format: int64 }
+        permissions: { type: object }
+        executor:
+          type: object
+          additionalProperties: false
+          required: [kind, minimumRunnerVersion]
+          properties:
+            kind: { type: string, minLength: 1 }
+            minimumRunnerVersion: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        inputs: { type: object }
+        outputs: { type: object }
+        configSchema: { type: object }
+        sensitiveFields:
+          type: array
+          items: { type: string, pattern: '^/' }
+        migrations:
+          type: array
+          description: Explicit immutable config migrations whose executable bindings must exist in the matching adapter cache.
+          items:
+            type: object
+            additionalProperties: false
+            required: [fromVersion, toVersion, binding]
+            properties:
+              fromVersion: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+              toVersion: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+              binding: { type: string, minLength: 1 }
+    ExecutionPlan:
+      type: object
+      required: [schemaVersion, workflowId, hash, nodes, edges, topologicalOrder]
+      properties:
+        schemaVersion: { type: string, const: v1 }
+        workflowId: { type: string }
+        hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        nodes: { type: array, items: { type: object } }
+        edges: { type: array, items: { type: object } }
+        topologicalOrder: { type: array, items: { type: string } }
+    PublishedPlan:
+      type: object
+      required: [id, workflowId, version, hash, plan, publishedAt]
+      properties:
+        id: { type: string }
+        workflowId: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        plan: { $ref: '#/components/schemas/ExecutionPlan' }
+        publishedAt: { type: string, format: date-time }
+    Run:
+      type: object
+      required: [id, planId, planHash, status, priority, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        planId: { type: string }
+        planHash: { type: string }
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUSPENDED, CANCELLING, SUCCESS, FAILED, ERROR, CANCELLED]
+        priority: { type: integer, minimum: -1000, maximum: 1000 }
+        deadlineAt: { type: string, format: date-time }
+        output:
+          description: Inline JSON output of the final node that atomically transitioned the run to SUCCESS. Omitted for non-terminal and object-backed results.
+        outputMetadata: { $ref: '#/components/schemas/RunOutputMetadata' }
+        rerun: { $ref: '#/components/schemas/RerunLineage' }
+        cancelRequestedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RunSummary:
+      allOf:
+        - $ref: '#/components/schemas/Run'
+        - type: object
+          required: [workflowId]
+          properties: { workflowId: { type: string } }
+    RunDetails:
+      type: object
+      additionalProperties: false
+      required: [run, input, nodes, lastEventCursor]
+      properties:
+        run: { $ref: '#/components/schemas/Run' }
+        input: { description: Run input with credential-like fields recursively redacted. }
+        nodes: { type: array, items: { $ref: '#/components/schemas/NodeDiagnostic' } }
+        lastEventCursor: { type: integer, format: int64, minimum: 0 }
+    NodeDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [nodeId, status, attemptCount, latestAttemptId, updatedAt, attempts]
+      properties:
+        nodeId: { type: string }
+        status: { type: string }
+        attemptCount: { type: integer, minimum: 0 }
+        latestAttemptId: { type: string }
+        updatedAt: { type: string, format: date-time }
+        attempts: { type: array, items: { $ref: '#/components/schemas/AttemptDiagnostic' } }
+        output: { description: Omitted when output is sensitive or object-backed. }
+        outputMetadata: { $ref: '#/components/schemas/RunOutputMetadata' }
+    AttemptDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [id, number, executor, status, input, nextAttemptAt, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        number: { type: integer, minimum: 1 }
+        executor: { type: string }
+        status: { type: string }
+        input: { description: Attempt input with credential-like fields recursively redacted. }
+        errorCode: { type: string, description: Stable code only; internal exception text is never returned. }
+        nextAttemptAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RerunLineage:
+      type: object
+      additionalProperties: false
+      required: [sourceRunId, createdAt]
+      properties:
+        sourceRunId: { type: string }
+        fromNodeId: { type: string, minLength: 1 }
+        createdAt: { type: string, format: date-time }
+    RunOutputMetadata:
+      type: object
+      additionalProperties: false
+      required: [contentType, sizeBytes, sha256, sensitive, storage]
+      properties:
+        contentType: { type: string }
+        sizeBytes: { type: integer, format: int64, minimum: 0 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        sensitive: { type: boolean }
+        storage:
+          type: string
+          enum: [inline, object]
+          description: Object-backed output deliberately omits the internal object reference.
+        downloadUrl:
+          type: string
+          pattern: '^/v1/runs/[^/]+/output$'
+          description: Opaque authenticated API reference present only while an object-backed output is active.
+        retentionStatus: { type: string, enum: [active, archived, deleted] }
+    Interrupt:
+      type: object
+      required: [id, runId, nodeId, kind, expiresAt, createdAt]
+      properties:
+        id: { type: string }
+        runId: { type: string }
+        nodeId: { type: string }
+        kind: { type: string, enum: [approval, wait, webhook] }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        resolvedAt: { type: string, format: date-time }
+        resumeToken:
+          type: string
+          minLength: 32
+          description: Present only to authorized callers so an approval can be decided or a webhook callback can be configured. Never persisted or logged.
+    CreateTrigger:
+      type: object
+      additionalProperties: false
+      required: [workflowId, kind, name, config]
+      properties:
+        workflowId: { type: string }
+        kind: { type: string, enum: [api, manual, schedule, webhook, event] }
+        name: { type: string }
+        config: { type: object }
+        scheduleIntervalSeconds: { type: integer, minimum: 1 }
+        misfirePolicy: { type: string, enum: [skip, fire_once, catch_up] }
+        firstFireAt: { type: string, format: date-time }
+        signingCredentialId: { type: string }
+        eventType: { type: string }
+    Trigger:
+      type: object
+      required: [id, publicHash, workflowId, kind, name, enabled, config, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        publicHash: { type: string, minLength: 16, maxLength: 128 }
+        workflowId: { type: string }
+        kind: { type: string, enum: [api, manual, schedule, webhook, event] }
+        name: { type: string }
+        enabled: { type: boolean }
+        config: { type: object }
+        scheduleInterval: { type: integer, format: int64, description: Nanoseconds }
+        misfirePolicy: { type: string, enum: [skip, fire_once, catch_up] }
+        nextFireAt: { type: string, format: date-time }
+        signingCredentialId: { type: string }
+        eventType: { type: string }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    UpdateTrigger:
+      type: object
+      additionalProperties: false
+      required: [name, config, expectedUpdatedAt]
+      properties:
+        name: { type: string }
+        config: { type: object }
+        scheduleIntervalSeconds: { type: integer, minimum: 1 }
+        misfirePolicy: { type: string, enum: [skip, fire_once, catch_up] }
+        firstFireAt: { type: string, format: date-time }
+        signingCredentialId: { type: string }
+        eventType: { type: string }
+        expectedUpdatedAt: { type: string, format: date-time }
+    WriteCredential:
+      type: object
+      additionalProperties: false
+      required: [name, purpose, secret]
+      properties:
+        name: { type: string }
+        purpose: { type: string }
+        secret: { type: string, minLength: 1, writeOnly: true }
+    Credential:
+      type: object
+      description: Safe credential metadata; secret and encryption material are never returned.
+      required: [id, name, provider, purpose, status, currentVersion, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        provider: { type: string }
+        purpose: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        currentVersion: { type: integer, minimum: 1 }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        revokedAt: { type: string, format: date-time }
+    Quota:
+      type: object
+      additionalProperties: false
+      required: [maxActiveRuns, maxActiveWorkers, maxQueueDepth]
+      properties:
+        maxActiveRuns: { type: integer, minimum: 1 }
+        maxActiveWorkers: { type: integer, minimum: 1 }
+        maxQueueDepth: { type: integer, minimum: 0 }
+    AuditRecord:
+      type: object
+      required: [id, actorId, action, resourceType, resourceId, outcome, metadata, createdAt]
+      properties:
+        id: { type: string }
+        actorId: { type: string }
+        action: { type: string }
+        resourceType: { type: string }
+        resourceId: { type: string }
+        outcome: { type: string, enum: [allowed, denied, failed] }
+        metadata: { type: object, description: Recursively redacted metadata }
+        createdAt: { type: string, format: date-time }
+    RetentionPolicy:
+      type: object
+      additionalProperties: false
+      required: [eventDays, outputDays, archiveBeforeDelete]
+      properties:
+        eventDays: { type: integer, minimum: 1 }
+        outputDays: { type: integer, minimum: 1 }
+        archiveBeforeDelete: { type: boolean }
+    TenantExport:
+      type: object
+      required: [id, status, createdAt]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, ready, failed, expired] }
+        objectId: { type: string }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+    CapacitySnapshot:
+      type: object
+      required: [activeRuns, queuedRuns, activeWorkers, outboxBacklog, oldestOutboxAge, dlqDepth]
+      properties:
+        activeRuns: { type: integer, minimum: 0 }
+        queuedRuns: { type: integer, minimum: 0 }
+        activeWorkers: { type: integer, minimum: 0 }
+        outboxBacklog: { type: integer, minimum: 0 }
+        oldestOutboxAge: { type: integer, format: int64, description: Nanoseconds }
+        dlqDepth: { type: integer, minimum: 0 }
+    DeadLetter:
+      type: object
+      required: [id, originalMessageId, aggregateType, aggregateId, topic, payload, attempts, lastError, failedAt]
+      properties:
+        id: { type: string }
+        originalMessageId: { type: string }
+        aggregateType: { type: string }
+        aggregateId: { type: string }
+        topic: { type: string }
+        payload: { type: object }
+        attempts: { type: integer, minimum: 1 }
+        lastError: { type: string }
+        failedAt: { type: string, format: date-time }
+        requeuedAt: { type: string, format: date-time }
+    CreateOutboundWebhookSubscription:
+      type: object
+      additionalProperties: false
+      required: [name, endpointUrl, eventTypes, signingCredentialId, timeoutMs]
+      properties:
+        name: { type: string, minLength: 1 }
+        endpointUrl: { type: string, format: uri, pattern: '^https://' }
+        eventTypes:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128 }
+        signingCredentialId: { type: string, minLength: 1 }
+        timeoutMs: { type: integer, minimum: 100, maximum: 10000 }
+    OutboundWebhookSubscription:
+      type: object
+      additionalProperties: false
+      description: Safe subscription metadata; signing secret and delivery diagnostics are never returned.
+      required: [id, name, endpointUrl, eventTypes, signingCredentialId, status, timeoutMs, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        endpointUrl: { type: string, format: uri }
+        eventTypes: { type: array, items: { type: string } }
+        signingCredentialId: { type: string }
+        status: { type: string, enum: [enabled, disabled] }
+        timeoutMs: { type: integer, minimum: 100, maximum: 10000 }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        code: { type: string }
+        requestId: { type: string }

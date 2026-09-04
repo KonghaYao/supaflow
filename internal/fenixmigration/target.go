@@ -1,0 +1,167 @@
+package fenixmigration
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pazhou/supaflow/internal/definition"
+	definitionflowgram "github.com/pazhou/supaflow/internal/definition/flowgram"
+	definitionpostgres "github.com/pazhou/supaflow/internal/definition/postgres"
+	"github.com/pazhou/supaflow/internal/platformops"
+	"github.com/pazhou/supaflow/internal/postgres"
+	"github.com/pazhou/supaflow/internal/workflow"
+)
+
+// ImportedVersion identifies the exact immutable target projection.
+type ImportedVersion struct {
+	VersionID string
+	PlanID    string
+	PlanHash  string
+	Version   uint64
+}
+
+// Target is the privileged write boundary used by the one-time migration runner.
+type Target interface {
+	EnsureTenant(context.Context, string, string) error
+	ImportVersion(context.Context, string, string, uint64, workflow.WorkflowDefinition, string) (ImportedVersion, bool, error)
+	ImportDraft(context.Context, string, string, string, workflow.WorkflowDefinition, string) (bool, error)
+	ImportTrigger(context.Context, platformops.ImportTriggerRequest) (bool, error)
+	ImportRun(context.Context, platformops.ImportRunProjectionRequest) (bool, error)
+}
+
+// PostgresTarget wires domain import seams to a migrated Supaflow database.
+type PostgresTarget struct {
+	pool        *pgxpool.Pool
+	definitions *definition.Service
+	admin       *platformops.AdminImporter
+}
+
+// NewPostgresTarget constructs the production target adapter.
+func NewPostgresTarget(pool *pgxpool.Pool) (*PostgresTarget, error) {
+	if pool == nil {
+		return nil, errors.New("target database is required")
+	}
+	registry := workflow.BuiltinRegistry()
+	policy := migrationCompilePolicy()
+	catalog := postgres.NewPlanCatalog(pool, registry, policy)
+	definitions, err := definition.NewService(definitionpostgres.NewStore(pool), definitionflowgram.Adapter{}, catalog, registry, policy)
+	if err != nil {
+		return nil, err
+	}
+	admin, err := platformops.NewAdminImporter(pool)
+	if err != nil {
+		return nil, err
+	}
+	return &PostgresTarget{pool: pool, definitions: definitions, admin: admin}, nil
+}
+
+// EnsureTenant creates a migration tenant or verifies that an existing one is active.
+func (t *PostgresTarget) EnsureTenant(ctx context.Context, tenantID, name string) error {
+	if tenantID == "" || name == "" {
+		return errors.New("tenant id and name are required")
+	}
+	if _, err := t.pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, tenantID, name); err != nil {
+		return fmt.Errorf("ensure migration tenant: %w", err)
+	}
+	var status string
+	if err := t.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id=$1`, tenantID).Scan(&status); err != nil {
+		return fmt.Errorf("verify migration tenant: %w", err)
+	}
+	if status != "active" {
+		return errors.New("migration tenant is not active")
+	}
+	return nil
+}
+
+// ImportVersion preserves source ordering through Definition's administrative seam.
+func (t *PostgresTarget) ImportVersion(ctx context.Context, tenantID, workflowID string, sourceVersion uint64, value workflow.WorkflowDefinition, key string) (ImportedVersion, bool, error) {
+	published, created, err := t.definitions.ImportVersion(ctx, tenantID, workflowID, definition.ImportVersionCommand{
+		Definition: value, SourceVersion: sourceVersion, IdempotencyKey: key,
+	})
+	if err != nil {
+		return ImportedVersion{}, false, err
+	}
+	version, err := t.definitions.GetVersion(ctx, tenantID, workflowID, sourceVersion)
+	if err != nil {
+		return ImportedVersion{}, false, err
+	}
+	if published.ID != version.PlanID || published.Hash != version.PlanHash {
+		return ImportedVersion{}, false, errors.New("imported version projection is inconsistent")
+	}
+	return ImportedVersion{VersionID: version.VersionID, PlanID: version.PlanID, PlanHash: version.PlanHash, Version: version.Version}, created, nil
+}
+
+// ImportDraft stores a FlowGram adapter document derived from the converted canonical model.
+func (t *PostgresTarget) ImportDraft(ctx context.Context, tenantID, workflowID, actorID string, value workflow.WorkflowDefinition, key string) (bool, error) {
+	document, err := flowgramDocument(value)
+	if err != nil {
+		return false, err
+	}
+	_, err = t.definitions.CreateDraft(ctx, tenantID, definition.CreateDraftCommand{
+		WorkflowID: workflowID, Document: document, ActorID: actorID, IdempotencyKey: key,
+	})
+	if errors.Is(err, definition.ErrRevisionConflict) {
+		// A draft under another key is intentionally not overwritten during resume.
+		return false, err
+	}
+	return err == nil, err
+}
+
+// ImportTrigger delegates to the secret-free administrative trigger importer.
+func (t *PostgresTarget) ImportTrigger(ctx context.Context, request platformops.ImportTriggerRequest) (bool, error) {
+	_, created, err := t.admin.ImportTrigger(ctx, request)
+	return created, err
+}
+
+// ImportRun delegates to the terminal-history administrative importer.
+func (t *PostgresTarget) ImportRun(ctx context.Context, request platformops.ImportRunProjectionRequest) (bool, error) {
+	return t.admin.ImportRunProjection(ctx, request)
+}
+
+func flowgramDocument(value workflow.WorkflowDefinition) (json.RawMessage, error) {
+	type position struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	}
+	type node struct {
+		ID       string                           `json:"id"`
+		Type     string                           `json:"type"`
+		Version  string                           `json:"version"`
+		Config   json.RawMessage                  `json:"config"`
+		Inputs   map[string]workflow.InputBinding `json:"inputs,omitempty"`
+		Position position                         `json:"position"`
+	}
+	nodes := make([]node, len(value.Nodes))
+	for index, item := range value.Nodes {
+		nodes[index] = node{ID: item.ID, Type: item.Type, Version: item.Version, Config: item.Config, Inputs: item.Inputs, Position: position{X: float64(index%5) * 280, Y: float64(index/5) * 180}}
+	}
+	edges := make([]map[string]string, len(value.Edges))
+	for index, item := range value.Edges {
+		edges[index] = map[string]string{"id": item.ID, "sourceNodeId": item.FromNode, "sourcePortId": item.FromPort, "targetNodeId": item.ToNode, "targetPortId": item.ToPort}
+	}
+	encoded, err := json.Marshal(map[string]any{"schemaVersion": "flowgram-v1", "workflowId": value.ID, "nodes": nodes, "edges": edges, "metadata": value.Metadata})
+	if err != nil {
+		return nil, fmt.Errorf("encode migrated FlowGram draft: %w", err)
+	}
+	return encoded, nil
+}
+
+func migrationCompilePolicy() workflow.CompilePolicy {
+	return workflow.CompilePolicy{
+		AllowedCapabilities: workflow.CapabilitySet{Streaming: true, Cancellable: true, Interruptible: true, Idempotent: true},
+		AllowedPermissions:  workflow.PermissionSet{Network: true, Credentials: true, Filesystem: true, Compute: true},
+	}
+}
+
+func migrationKey(kind string, parts ...string) string {
+	digest := sha256.Sum256([]byte(kind + "\x00" + strings.Join(parts, "\x00")))
+	return "fenix-" + kind + "-" + hex.EncodeToString(digest[:])
+}
+
+var _ Target = (*PostgresTarget)(nil)

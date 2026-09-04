@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: supaflow
+      POSTGRES_USER: supaflow
+      POSTGRES_PASSWORD: ${SUPAFLOW_POSTGRES_PASSWORD:?required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supaflow -d supaflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migrate:
+    build:
+      context: .
+      target: migration
+    environment:
+      DATABASE_URL: postgres://supaflow:${SUPAFLOW_POSTGRES_PASSWORD:?required}@postgres:5432/supaflow?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  control-plane:
+    build:
+      context: .
+      target: control-plane
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DATABASE_URL: postgres://supaflow:${SUPAFLOW_POSTGRES_PASSWORD:?required}@postgres:5432/supaflow?sslmode=disable
+      SUPAFLOW_ADDR: 0.0.0.0:8080
+      SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED: ${SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED:-false}
+      SUPAFLOW_BOOTSTRAP_API_KEYS_JSON: ${SUPAFLOW_BOOTSTRAP_API_KEYS_JSON:-}
+      SUPAFLOW_RESUME_TOKEN_SECRET: ${SUPAFLOW_RESUME_TOKEN_SECRET:?required}
+      SUPAFLOW_CREDENTIAL_MASTER_KEY: ${SUPAFLOW_CREDENTIAL_MASTER_KEY:?required}
+      SUPAFLOW_CREDENTIAL_KEY_ID: ${SUPAFLOW_CREDENTIAL_KEY_ID:?required}
+      SUPAFLOW_OTEL_ENDPOINT: ${SUPAFLOW_OTEL_ENDPOINT:-}
+      SUPAFLOW_OTEL_INSECURE: ${SUPAFLOW_OTEL_INSECURE:-false}
+      SUPAFLOW_TENANT_HASH_KEY: ${SUPAFLOW_TENANT_HASH_KEY:-}
+      SUPAFLOW_OBJECT_STORE_DIR: /srv/supaflow/data/objects
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports: ["8080:8080"]
+    volumes:
+      - object-data:/srv/supaflow/data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker-runtime
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    environment:
+      DATABASE_URL: postgres://supaflow:${SUPAFLOW_POSTGRES_PASSWORD:?required}@postgres:5432/supaflow?sslmode=disable
+      SUPAFLOW_WORKER_TENANTS: ${SUPAFLOW_WORKER_TENANTS:?required}
+      SUPAFLOW_HTTP_ALLOWED_HOSTS: ${SUPAFLOW_HTTP_ALLOWED_HOSTS:?required}
+      SUPAFLOW_RESUME_TOKEN_SECRET: ${SUPAFLOW_RESUME_TOKEN_SECRET:?required}
+      SUPAFLOW_CREDENTIAL_MASTER_KEY: ${SUPAFLOW_CREDENTIAL_MASTER_KEY:?required}
+      SUPAFLOW_CREDENTIAL_KEY_ID: ${SUPAFLOW_CREDENTIAL_KEY_ID:?required}
+      SUPAFLOW_EINO_MODELS_JSON: ${SUPAFLOW_EINO_MODELS_JSON:-[]}
+      SUPAFLOW_EINO_TOOLS_JSON: '${SUPAFLOW_EINO_TOOLS_JSON:-[{"name":"json-project","kind":"json.project"},{"name":"json-merge","kind":"json.merge"}]}'
+      SUPAFLOW_EINO_AGENTS_JSON: ${SUPAFLOW_EINO_AGENTS_JSON:-[]}
+      SUPAFLOW_OTEL_ENDPOINT: ${SUPAFLOW_OTEL_ENDPOINT:-}
+      SUPAFLOW_OTEL_INSECURE: ${SUPAFLOW_OTEL_INSECURE:-false}
+      SUPAFLOW_TENANT_HASH_KEY: ${SUPAFLOW_TENANT_HASH_KEY:-}
+      SUPAFLOW_OBJECT_STORE_DIR: /srv/supaflow/data/objects
+      SUPAFLOW_ISOLATION_MAX_PIDS: ${SUPAFLOW_ISOLATION_MAX_PIDS:-32}
+      SUPAFLOW_ISOLATION_MEMORY_BYTES: ${SUPAFLOW_ISOLATION_MEMORY_BYTES:-268435456}
+      SUPAFLOW_ISOLATION_WORKSPACE_BYTES: ${SUPAFLOW_ISOLATION_WORKSPACE_BYTES:-16777216}
+      SUPAFLOW_ISOLATION_WORKSPACE_INODES: ${SUPAFLOW_ISOLATION_WORKSPACE_INODES:-1024}
+    volumes:
+      - object-data:/srv/supaflow/data
+      - type: bind
+        source: ${SUPAFLOW_CGROUP_HOST_PATH:?must be a delegated cgroup v2 directory}
+        target: /sys/fs/cgroup/supaflow
+    tmpfs:
+      - /var/lib/supaflow/isolation:rw,noexec,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  object-data:

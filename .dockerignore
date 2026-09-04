@@ -1,0 +1,8 @@
+.git
+.env
+bin
+coverage
+isolation
+web/dist
+web/node_modules
+*.log

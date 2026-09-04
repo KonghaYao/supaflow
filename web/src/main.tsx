@@ -1,0 +1,15 @@
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+
+import { App } from "./app";
+import "./operator.css";
+import "./styles.css";
+import "./utility-panels.css";
+
+const root = document.getElementById("root");
+if (!root) throw new Error("Studio root element is missing.");
+createRoot(root).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
