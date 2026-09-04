@@ -158,11 +158,20 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 	if !ok {
 		return workflowruntime.ExecutionResult{}, executionError("unknown_node", false, errors.New("attempt node is absent from the immutable plan"))
 	}
-	if req.Executor == "" || req.Executor != node.Executor.Kind {
+	shadowMode := workflow.IsShadowAttemptExecutor(req.Executor)
+	expectedExecutor := node.Executor.Kind
+	if shadowMode {
+		expectedExecutor = workflow.ShadowAttemptExecutor(node)
+	}
+	if req.Executor == "" || req.Executor != expectedExecutor {
 		return workflowruntime.ExecutionResult{}, executionError("executor_binding_mismatch", false, errors.New("attempt executor differs from the immutable plan"))
 	}
-	if req.Takeover && !node.Capabilities.RecoverySafe {
+	stubbed := shadowMode && workflow.ShadowStubRequired(node)
+	if req.Takeover && !stubbed && !node.Capabilities.RecoverySafe {
 		return workflowruntime.ExecutionResult{}, executionError("unsafe_lease_takeover", false, errors.New("node cannot be re-executed after an ambiguous lease loss"))
+	}
+	if stubbed {
+		return e.executeShadowStub(ctx, req, node, published.Plan)
 	}
 	// Sensitive nodes never emit ordinary stream events. Their immutable plan
 	// classification forces the final value into protected object storage, and
@@ -170,7 +179,7 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 	if node.SensitiveOutput {
 		emit = nil
 	}
-	if e.credentials != nil {
+	if e.credentials != nil && !shadowMode {
 		if err := e.credentials.AuthorizeCredentials(ctx, req, node); err != nil {
 			return workflowruntime.ExecutionResult{}, executionError("credential_grant_failed", false, errors.New("attempt credential grant was rejected"))
 		}
@@ -233,7 +242,7 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 		return workflowruntime.ExecutionResult{}, applyRetrySafety(node, err)
 	}
 	if resolvedResult {
-		return result, nil
+		return withShadowSuccessors(published.Plan, result, shadowMode), nil
 	}
 
 	if !result.Final {
@@ -246,7 +255,7 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 	if err != nil {
 		return workflowruntime.ExecutionResult{}, err
 	}
-	return result, nil
+	return withShadowSuccessors(published.Plan, result, shadowMode), nil
 }
 
 func applyRetrySafety(node workflow.PlanNode, err error) error {

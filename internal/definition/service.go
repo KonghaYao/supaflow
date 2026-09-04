@@ -65,19 +65,26 @@ func (CanonicalAdapter) ToDefinition(document json.RawMessage) (workflow.Workflo
 
 // CreateDraft creates or idempotently replays a draft.
 func (s *Service) CreateDraft(ctx context.Context, tenantID string, command CreateDraftCommand) (Draft, error) {
+	result, err := s.CreateDraftWithResult(ctx, tenantID, command)
+	return result.Draft, err
+}
+
+// CreateDraftWithResult creates or replays a draft and preserves the atomic
+// persistence outcome for administrative import and observability callers.
+func (s *Service) CreateDraftWithResult(ctx context.Context, tenantID string, command CreateDraftCommand) (CreateDraftResult, error) {
 	if err := validateMutation(tenantID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
-		return Draft{}, err
+		return CreateDraftResult{}, err
 	}
 	id, err := randomID("draft")
 	if err != nil {
-		return Draft{}, err
+		return CreateDraftResult{}, err
 	}
 	now := time.Now().UTC()
 	request := MutationRequest{Draft: Draft{ID: id, TenantID: tenantID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), Revision: 1, UpdatedBy: command.ActorID, CreatedAt: now, UpdatedAt: now}, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("create", command.WorkflowID, command.ActorID, 0, command.Document)
 	result, err := s.store.CreateDraft(ctx, request)
-	if err == nil && len(result.Document) == 0 {
-		result.Document = cloneJSON(command.Document)
+	if err == nil && len(result.Draft.Document) == 0 {
+		result.Draft.Document = cloneJSON(command.Document)
 	}
 	return result, err
 }

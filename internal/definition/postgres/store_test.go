@@ -86,16 +86,16 @@ func TestPostgresDefinitionLifecycle(t *testing.T) {
 	}
 	canonical := minimalDefinition(workflowID)
 	document, _ := json.Marshal(canonical)
-	created, err := service.CreateDraft(ctx, tenant, definition.CreateDraftCommand{
+	created, err := service.CreateDraftWithResult(ctx, tenant, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: "editor", IdempotencyKey: "definition-create-0001",
 	})
-	if err != nil || created.Revision != 1 {
+	if err != nil || !created.Created || created.Draft.Revision != 1 {
 		t.Fatalf("created=%+v err=%v", created, err)
 	}
-	replayed, err := service.CreateDraft(ctx, tenant, definition.CreateDraftCommand{
+	replayed, err := service.CreateDraftWithResult(ctx, tenant, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: "editor", IdempotencyKey: "definition-create-0001",
 	})
-	if err != nil || replayed.ID != created.ID {
+	if err != nil || replayed.Created || replayed.Draft.ID != created.Draft.ID {
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
 	_, err = service.UpdateDraft(ctx, tenant, definition.UpdateDraftCommand{

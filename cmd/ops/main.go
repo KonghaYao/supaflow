@@ -56,8 +56,12 @@ func run() error {
 		if scratchURL == "" {
 			return errors.New("SUPAFLOW_RESTORE_DATABASE_URL must identify a separate scratch database")
 		}
+		archiveSHA256 := strings.TrimSpace(os.Getenv("SUPAFLOW_RESTORE_ARCHIVE_SHA256"))
+		if archiveSHA256 == "" {
+			return errors.New("SUPAFLOW_RESTORE_ARCHIVE_SHA256 is required for restore")
+		}
 		return runVerifiedRestore(ctx, databaseURL, scratchURL, readPostgresDatabaseIdentity, func(production, scratch databaseIdentity) error {
-			return tool.RestoreDrill(ctx, scratchURL, *artifact, scratch, production)
+			return tool.RestoreDrill(ctx, scratchURL, *artifact, archiveSHA256, scratch, production)
 		})
 	case "capacity", "alerts":
 		if strings.TrimSpace(*tenantID) == "" {

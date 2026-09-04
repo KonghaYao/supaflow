@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pazhou/supaflow/internal/runtime"
+	"github.com/pazhou/supaflow/internal/workflow"
 )
 
 type rerunRequestBody struct {
@@ -60,9 +61,13 @@ func (h *Handler) rerunRun(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "fromNodeId does not exist in the source plan")
 		return
 	}
+	entryExecutor := entry.Executor.Kind
+	if workflow.IsShadowAttemptExecutor(source.Plan.Executor) {
+		entryExecutor = workflow.ShadowAttemptExecutor(entry)
+	}
 	result, err := h.runtime.Rerun(r.Context(), runtime.TenantID(principal.TenantID), runtime.RerunRequest{
 		SourceRunID: source.ID, FromNodeID: fromNodeID, EntryNodeID: entry.ID,
-		EntryExecutor: entry.Executor.Kind, IdempotencyKey: idempotencyKey, Priority: body.Priority,
+		EntryExecutor: entryExecutor, IdempotencyKey: idempotencyKey, Priority: body.Priority,
 		Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,
 	})
 	if err != nil {

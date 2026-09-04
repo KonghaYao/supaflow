@@ -24,6 +24,7 @@ export function EditorToolbar({ canvas, canUndo, canRedo, saveState, onUndo, onR
       <button onClick={() => canvas?.copySelected()}>Copy</button>
       <button onClick={() => canvas?.paste()}>Paste</button>
       <button onClick={() => canvas?.groupSelected()}>Group</button>
+      <button onClick={() => canvas?.ungroupSelected()}>Ungroup</button>
       <button onClick={() => canvas?.autoLayout()}>Auto layout</button>
       <button onClick={() => canvas?.fitView()}>Fit</button>
       <span className={`save-state save-state--${saveState}`} role="status" aria-live="polite">

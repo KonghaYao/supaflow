@@ -26,8 +26,8 @@ func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 var _ definition.Store = (*Store)(nil)
 
 // CreateDraft atomically creates a draft and its idempotency result.
-func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequest) (definition.Draft, error) {
-	return s.mutateDraft(ctx, "create", request, func(tx pgx.Tx) (definition.Draft, error) {
+func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequest) (definition.CreateDraftResult, error) {
+	draft, created, err := s.mutateDraft(ctx, "create", request, func(tx pgx.Tx) (definition.Draft, error) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "definition-draft-capacity:"+request.Draft.TenantID); err != nil {
 			return definition.Draft{}, fmt.Errorf("lock workflow draft capacity: %w", err)
 		}
@@ -61,6 +61,7 @@ func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequ
 		}
 		return result, nil
 	})
+	return definition.CreateDraftResult{Draft: draft, Created: created}, err
 }
 
 // GetDraft reads one tenant-owned draft.
@@ -99,7 +100,7 @@ func (s *Store) ListDrafts(ctx context.Context, tenant, cursor string, limit int
 
 // UpdateDraft conditionally replaces a draft and records the immutable response.
 func (s *Store) UpdateDraft(ctx context.Context, request definition.MutationRequest) (definition.Draft, error) {
-	return s.mutateDraft(ctx, "update", request, func(tx pgx.Tx) (definition.Draft, error) {
+	draft, _, err := s.mutateDraft(ctx, "update", request, func(tx pgx.Tx) (definition.Draft, error) {
 		var result definition.Draft
 		err := tx.QueryRow(ctx, `
 			UPDATE workflow_drafts SET document = $1, updated_by = $2, updated_at = $3, revision = revision + 1
@@ -116,11 +117,12 @@ func (s *Store) UpdateDraft(ctx context.Context, request definition.MutationRequ
 		}
 		return result, nil
 	})
+	return draft, err
 }
 
 // DeleteDraft conditionally removes a draft and records a replayable tombstone.
 func (s *Store) DeleteDraft(ctx context.Context, request definition.MutationRequest) error {
-	_, err := s.mutateDraft(ctx, "delete", request, func(tx pgx.Tx) (definition.Draft, error) {
+	_, _, err := s.mutateDraft(ctx, "delete", request, func(tx pgx.Tx) (definition.Draft, error) {
 		command, err := tx.Exec(ctx, `
 			DELETE FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id = $2 AND revision = $3`,
 			request.Draft.TenantID, request.Draft.WorkflowID, request.ExpectedRevision)
@@ -147,63 +149,63 @@ type mutationSnapshot struct {
 	UpdatedAt  time.Time `json:"updatedAt,omitempty"`
 }
 
-func (s *Store) mutateDraft(ctx context.Context, action string, request definition.MutationRequest, apply mutationFunc) (definition.Draft, error) {
+func (s *Store) mutateDraft(ctx context.Context, action string, request definition.MutationRequest, apply mutationFunc) (definition.Draft, bool, error) {
 	if s == nil || s.pool == nil {
-		return definition.Draft{}, errors.New("postgres definition store requires a pool")
+		return definition.Draft{}, false, errors.New("postgres definition store requires a pool")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return definition.Draft{}, fmt.Errorf("begin definition mutation: %w", err)
+		return definition.Draft{}, false, fmt.Errorf("begin definition mutation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = basepostgres.LockAPIMutationTx(ctx, tx); err != nil {
 		if errors.Is(err, basepostgres.ErrIdempotencyConflict) {
-			return definition.Draft{}, definition.ErrIdempotencyConflict
+			return definition.Draft{}, false, definition.ErrIdempotencyConflict
 		}
-		return definition.Draft{}, err
+		return definition.Draft{}, false, err
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`, request.Draft.TenantID, request.IdempotencyKey); err != nil {
-		return definition.Draft{}, fmt.Errorf("lock definition mutation: %w", err)
+		return definition.Draft{}, false, fmt.Errorf("lock definition mutation: %w", err)
 	}
 	if replay, found, readErr := readMutation(ctx, tx, request); readErr != nil {
-		return definition.Draft{}, readErr
+		return definition.Draft{}, false, readErr
 	} else if found {
 		if err = basepostgres.CompleteAPIMutationTx(ctx, tx, request.Draft.WorkflowID, map[string]any{"workflowId": request.Draft.WorkflowID}); err != nil {
-			return definition.Draft{}, err
+			return definition.Draft{}, false, err
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return definition.Draft{}, fmt.Errorf("commit definition mutation replay: %w", err)
+			return definition.Draft{}, false, fmt.Errorf("commit definition mutation replay: %w", err)
 		}
 		apimutation.MarkCommitted(ctx)
-		return replay, nil
+		return replay, false, nil
 	}
 	result, err := apply(tx)
 	if err != nil {
-		return definition.Draft{}, err
+		return definition.Draft{}, false, err
 	}
 	response, err := json.Marshal(snapshotDraft(result))
 	if err != nil {
-		return definition.Draft{}, fmt.Errorf("encode definition mutation response: %w", err)
+		return definition.Draft{}, false, fmt.Errorf("encode definition mutation response: %w", err)
 	}
 	mutationID, err := basepostgres.NewID("definition_mutation")
 	if err != nil {
-		return definition.Draft{}, err
+		return definition.Draft{}, false, err
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO definition_mutations
 		    (id, tenant_id, idempotency_key, action, workflow_id, request_hash, response_snapshot)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`, mutationID, request.Draft.TenantID,
 		request.IdempotencyKey, action, request.Draft.WorkflowID, request.RequestHash[:], response); err != nil {
-		return definition.Draft{}, fmt.Errorf("record definition mutation: %w", err)
+		return definition.Draft{}, false, fmt.Errorf("record definition mutation: %w", err)
 	}
 	if err = basepostgres.CompleteAPIMutationTx(ctx, tx, request.Draft.WorkflowID, map[string]any{"workflowId": request.Draft.WorkflowID}); err != nil {
-		return definition.Draft{}, err
+		return definition.Draft{}, false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return definition.Draft{}, fmt.Errorf("commit definition mutation: %w", err)
+		return definition.Draft{}, false, fmt.Errorf("commit definition mutation: %w", err)
 	}
 	apimutation.MarkCommitted(ctx)
-	return result, nil
+	return result, true, nil
 }
 
 func readMutation(ctx context.Context, tx pgx.Tx, request definition.MutationRequest) (definition.Draft, bool, error) {

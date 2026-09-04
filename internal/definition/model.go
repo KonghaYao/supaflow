@@ -43,6 +43,13 @@ type Draft struct {
 	UpdatedAt  time.Time
 }
 
+// CreateDraftResult reports whether an idempotent create inserted a new draft
+// or atomically replayed the response recorded by the original mutation.
+type CreateDraftResult struct {
+	Draft   Draft
+	Created bool
+}
+
 // DraftSummary is the bounded list projection; it deliberately excludes Document.
 type DraftSummary struct {
 	ID         string

@@ -2,10 +2,12 @@ import "reflect-metadata";
 import "@flowgram.ai/free-layout-editor/index.css";
 
 import {
+  FlowNodeBaseType,
   type FlowNodeType,
   FreeLayoutEditor,
   type FreeLayoutPluginContext,
   type WorkflowJSON,
+  type WorkflowNodeJSON,
   type WorkflowNodeProps,
   type WorkflowNodeRegistry,
   WorkflowNodeRenderer,
@@ -13,6 +15,14 @@ import {
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 
 import type { NodeType, StudioDocument, StudioEdge, StudioNode } from "../domain/models";
+import {
+  type StudioClipboard,
+  copySelection,
+  groupSelection,
+  pasteSelection,
+  ungroupSelection,
+} from "./document-operations";
+import "./groups.css";
 
 export interface CanvasHandle {
   fitView(): void;
@@ -20,6 +30,7 @@ export interface CanvasHandle {
   copySelected(): void;
   paste(): void;
   groupSelected(): void;
+  ungroupSelected(): void;
 }
 
 interface StudioCanvasProps {
@@ -38,14 +49,55 @@ interface FlowEdgeData {
   id: string;
 }
 
+interface FlowGroupData {
+  title: string;
+  blockIDs: string[];
+  width: number;
+  height: number;
+}
+
+const NODE_WIDTH = 210;
+const NODE_HEIGHT = 76;
+const GROUP_PADDING = { top: 52, right: 28, bottom: 28, left: 28 };
+
 function toWorkflowJSON(document: StudioDocument): WorkflowJSON {
+  const nodeByID = new Map(document.nodes.map((node) => [node.id, node]));
+  const groups = (document.groups ?? []).flatMap((group) => {
+    const members = group.nodeIds.flatMap((id) => {
+      const node = nodeByID.get(id);
+      return node?.groupId === group.id ? [node] : [];
+    });
+    return members.length > 0 ? [{ group, members, bounds: groupBounds(members) }] : [];
+  });
+  const groupBoundsByID = new Map(groups.map((entry) => [entry.group.id, entry.bounds]));
   return {
-    nodes: document.nodes.map((node) => ({
-      id: node.id,
-      type: node.type,
-      meta: { position: node.position },
-      data: { definition: withoutPosition(node) } satisfies FlowNodeData,
-    })),
+    nodes: [
+      ...document.nodes.map((node) => {
+        const bounds = node.groupId ? groupBoundsByID.get(node.groupId) : undefined;
+        const position = bounds
+          ? { x: node.position.x - bounds.x, y: node.position.y - bounds.y }
+          : node.position;
+        return {
+          id: node.id,
+          type: node.type,
+          meta: { position },
+          data: { definition: withoutPosition(node) } satisfies FlowNodeData,
+        };
+      }),
+      ...groups.map(
+        ({ group, members, bounds }): WorkflowNodeJSON => ({
+          id: group.id,
+          type: FlowNodeBaseType.GROUP,
+          meta: { position: { x: bounds.x, y: bounds.y } },
+          data: {
+            title: group.title,
+            blockIDs: members.map((node) => node.id),
+            width: bounds.width,
+            height: bounds.height,
+          } satisfies FlowGroupData,
+        }),
+      ),
+    ],
     edges: document.edges.map((edge) => ({
       sourceNodeID: edge.sourceNodeId,
       sourcePortID: edge.sourcePortId,
@@ -57,11 +109,39 @@ function toWorkflowJSON(document: StudioDocument): WorkflowJSON {
 }
 
 function fromWorkflowJSON(source: WorkflowJSON, previous: StudioDocument): StudioDocument {
-  const nodes = source.nodes.flatMap((raw): StudioNode[] => {
+  const rawNodes = flattenNodes(source.nodes);
+  const groupEntries = rawNodes.flatMap((raw) => {
+    if (raw.type !== FlowNodeBaseType.GROUP) return [];
+    const data = readGroupData(raw.data);
+    const position = raw.meta?.position;
+    return data
+      ? [
+          {
+            group: { id: raw.id, title: data.title, nodeIds: data.blockIDs },
+            position: { x: position?.x ?? 0, y: position?.y ?? 0 },
+          },
+        ]
+      : [];
+  });
+  const groups = groupEntries.map((entry) => entry.group);
+  const groupByNode = new Map(
+    groupEntries.flatMap((entry) =>
+      entry.group.nodeIds.map((id) => [id, { id: entry.group.id, position: entry.position }] as const),
+    ),
+  );
+  const seen = new Set<string>();
+  const nodes = rawNodes.flatMap((raw): StudioNode[] => {
+    if (raw.type === FlowNodeBaseType.GROUP || seen.has(raw.id)) return [];
     const data = readNodeData(raw.data);
     if (!data) return [];
-    const position = raw.meta?.position;
-    return [{ ...data.definition, position: { x: position?.x ?? 0, y: position?.y ?? 0 } }];
+    seen.add(raw.id);
+    const local = raw.meta?.position;
+    const membership = groupByNode.get(raw.id);
+    const position = membership
+      ? { x: (local?.x ?? 0) + membership.position.x, y: (local?.y ?? 0) + membership.position.y }
+      : { x: local?.x ?? 0, y: local?.y ?? 0 };
+    const node = { ...data.definition, position };
+    return [membership ? { ...node, groupId: membership.id } : withoutGroup(node)];
   });
   const edges = source.edges.map(
     (raw, index): StudioEdge => ({
@@ -72,7 +152,7 @@ function fromWorkflowJSON(source: WorkflowJSON, previous: StudioDocument): Studi
       targetPortId: String(raw.targetPortID ?? "input"),
     }),
   );
-  return { ...previous, nodes, edges };
+  return { ...previous, nodes, edges, groups };
 }
 
 function withoutPosition(node: StudioNode): Omit<StudioNode, "position"> {
@@ -96,11 +176,56 @@ function readEdgeID(value: unknown): string | undefined {
   return isRecord(value) && typeof value.id === "string" ? value.id : undefined;
 }
 
+function readGroupData(value: unknown): FlowGroupData | undefined {
+  if (!isRecord(value) || typeof value.title !== "string" || !Array.isArray(value.blockIDs)) return;
+  const blockIDs = value.blockIDs.filter((id): id is string => typeof id === "string");
+  if (blockIDs.length !== value.blockIDs.length) return;
+  return {
+    title: value.title,
+    blockIDs,
+    width: typeof value.width === "number" ? value.width : NODE_WIDTH + GROUP_PADDING.left + GROUP_PADDING.right,
+    height: typeof value.height === "number" ? value.height : NODE_HEIGHT + GROUP_PADDING.top + GROUP_PADDING.bottom,
+  };
+}
+
+function flattenNodes(nodes: WorkflowNodeJSON[]): WorkflowNodeJSON[] {
+  return nodes.flatMap((node) => [node, ...flattenNodes(node.blocks ?? [])]);
+}
+
+function withoutGroup(node: StudioNode): StudioNode {
+  const { groupId: _groupId, ...ungrouped } = node;
+  return ungrouped;
+}
+
+function groupBounds(nodes: StudioNode[]) {
+  const left = Math.min(...nodes.map((node) => node.position.x));
+  const top = Math.min(...nodes.map((node) => node.position.y));
+  const right = Math.max(...nodes.map((node) => node.position.x + NODE_WIDTH));
+  const bottom = Math.max(...nodes.map((node) => node.position.y + NODE_HEIGHT));
+  return {
+    x: left - GROUP_PADDING.left,
+    y: top - GROUP_PADDING.top,
+    width: right - left + GROUP_PADDING.left + GROUP_PADDING.right,
+    height: bottom - top + GROUP_PADDING.top + GROUP_PADDING.bottom,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function registryFor(type: FlowNodeType, nodeTypes: NodeType[]): WorkflowNodeRegistry {
+  if (type === FlowNodeBaseType.GROUP) {
+    return {
+      type,
+      meta: {
+        isContainer: true,
+        padding: GROUP_PADDING,
+        size: { width: NODE_WIDTH + GROUP_PADDING.left + GROUP_PADDING.right, height: 156 },
+        defaultPorts: [],
+      },
+    };
+  }
   const descriptor = nodeTypes.find((entry) => entry.type === String(type));
   return {
     type,
@@ -109,6 +234,19 @@ function registryFor(type: FlowNodeType, nodeTypes: NodeType[]): WorkflowNodeReg
       defaultPorts: descriptor ? portsForNodeType(descriptor) : [],
     },
   };
+}
+
+function GroupCard({ node }: WorkflowNodeProps) {
+  const data = readGroupData(node.toJSON().data);
+  return (
+    <WorkflowNodeRenderer
+      node={node}
+      className="flow-group"
+      style={{ width: data?.width, height: data?.height }}
+    >
+      <strong className="flow-group__title">{data?.title ?? "Group"}</strong>
+    </WorkflowNodeRenderer>
+  );
 }
 
 /** Maps the backend's typed port contract to FlowGram's directional port model. */
@@ -137,7 +275,8 @@ export const StudioCanvas = forwardRef<CanvasHandle, StudioCanvasProps>(function
   ref,
 ) {
   const context = useRef<FreeLayoutPluginContext | null>(null);
-  const clipboard = useRef<StudioNode[]>([]);
+  const clipboard = useRef<StudioClipboard>({ nodes: [], edges: [], groups: [] });
+  const identity = useRef(0);
   const canvasSignature = JSON.stringify(toWorkflowJSON(document));
   const lastCanvasSignature = useRef(canvasSignature);
   useEffect(() => {
@@ -152,28 +291,22 @@ export const StudioCanvas = forwardRef<CanvasHandle, StudioCanvasProps>(function
       autoLayout: () => void context.current?.tools.autoLayout({}),
       copySelected: () => {
         const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
-        clipboard.current = document.nodes.filter((node) => ids.has(node.id));
+        clipboard.current = copySelection(document, ids);
       },
       paste: () => {
-        if (clipboard.current.length === 0) return;
-        const stamp = Date.now().toString(36);
-        const copies = clipboard.current.map((node, index) => ({
-          ...node,
-          id: `${node.id}-copy-${stamp}-${index}`,
-          label: `${node.label} copy`,
-          position: { x: node.position.x + 40, y: node.position.y + 40 },
-        }));
-        onChange({ ...document, nodes: [...document.nodes, ...copies] });
+        if (clipboard.current.nodes.length === 0) return;
+        identity.current += 1;
+        onChange(pasteSelection(document, clipboard.current, `${Date.now().toString(36)}-${identity.current}`));
       },
       groupSelected: () => {
         const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
-        if (ids.size === 0) return;
-        const id = `group-${Date.now().toString(36)}`;
-        onChange({
-          ...document,
-          nodes: document.nodes.map((node) => (ids.has(node.id) ? { ...node, groupId: id } : node)),
-          groups: [...(document.groups ?? []), { id, title: "New group", nodeIds: [...ids] }],
-        });
+        identity.current += 1;
+        const id = `group-${Date.now().toString(36)}-${identity.current}`;
+        onChange(groupSelection(document, ids, id, "New group"));
+      },
+      ungroupSelected: () => {
+        const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
+        onChange(ungroupSelection(document, ids));
       },
     }),
     [document, onChange],
@@ -185,8 +318,11 @@ export const StudioCanvas = forwardRef<CanvasHandle, StudioCanvasProps>(function
       initialData={toWorkflowJSON(document)}
       readonly={readonly}
       getNodeDefaultRegistry={(type) => registryFor(type, nodeTypes)}
-      nodeRegistries={nodeTypes.map((entry) => registryFor(entry.type as FlowNodeType, nodeTypes))}
-      materials={{ renderDefaultNode: NodeCard }}
+      nodeRegistries={[
+        registryFor(FlowNodeBaseType.GROUP, nodeTypes),
+        ...nodeTypes.map((entry) => registryFor(entry.type as FlowNodeType, nodeTypes)),
+      ]}
+      materials={{ renderDefaultNode: NodeCard, renderNodes: { [FlowNodeBaseType.GROUP]: GroupCard } }}
       history={{ enable: true }}
       variableEngine={{ enable: true }}
       onContentChange={(ctx) => {

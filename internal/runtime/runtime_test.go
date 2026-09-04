@@ -64,6 +64,25 @@ func startRequest(key string) StartRunRequest {
 	}
 }
 
+// 验证 shadow 与普通运行共享幂等键时冲突，而普通运行的既有重放指纹保持不变。
+func TestStartRunSeparatesShadowIdempotencySemantics(t *testing.T) {
+	service, _, _ := testService(time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC))
+	normal := startRequest("shared-shadow-key")
+	first, err := service.StartRun(context.Background(), "tenant_a", normal)
+	if err != nil || !first.Created {
+		t.Fatalf("normal start=%+v err=%v", first, err)
+	}
+	replay, err := service.StartRun(context.Background(), "tenant_a", normal)
+	if err != nil || replay.Created || replay.Run.ID != first.Run.ID {
+		t.Fatalf("normal replay=%+v err=%v", replay, err)
+	}
+	shadow := normal
+	shadow.Plan.Executor = "shadow-v1:builtin.start"
+	if _, err = service.StartRun(context.Background(), "tenant_a", shadow); !IsCode(err, CodeIdempotencyConflict) {
+		t.Fatalf("normal/shadow idempotency error=%v", err)
+	}
+}
+
 // 验证子工作流创建失败时不会遗留可执行子运行或占用幂等键。
 func TestStartSubworkflowCreatesChildAndLineageAtomically(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))

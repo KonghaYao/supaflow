@@ -124,14 +124,14 @@ func (t *PostgresTarget) ImportDraft(ctx context.Context, tenantID, workflowID, 
 	if err != nil {
 		return false, err
 	}
-	_, err = t.definitions.CreateDraft(ctx, tenantID, definition.CreateDraftCommand{
+	result, err := t.definitions.CreateDraftWithResult(ctx, tenantID, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: actorID, IdempotencyKey: key,
 	})
 	if errors.Is(err, definition.ErrRevisionConflict) {
 		// A draft under another key is intentionally not overwritten during resume.
 		return false, err
 	}
-	return err == nil, err
+	return result.Created, err
 }
 
 // ImportTrigger delegates to the secret-free administrative trigger importer.

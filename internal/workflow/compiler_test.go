@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -250,6 +251,42 @@ func TestParseExecutionPlanRoundTrip(t *testing.T) {
 		!reflect.DeepEqual(parsed.TopologicalOrder(), plan.TopologicalOrder()) {
 		t.Fatalf("parsed plan differs: parsed=%s original=%s", parsed.Hash(), plan.Hash())
 	}
+}
+
+// 验证 PostgreSQL JSONB 重排嵌套 config 与 literal 后，语义相同的已发布计划仍可通过完整性校验。
+func TestParseExecutionPlanCanonicalizesNestedJSONValues(t *testing.T) {
+	definition := validDefinition()
+	definition.Nodes[1].Config = json.RawMessage(`{"method":"POST","url":"https://must-not-run.invalid/orders"}`)
+	definition.Nodes[1].Inputs = map[string]InputBinding{
+		"body": {Type: ValueTypeAny, Literal: json.RawMessage(`{"longerKey":1,"x":2}`)},
+	}
+	plan, err := Compile(definition, BuiltinRegistry(), builtinPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalized := bytes.Replace(encoded,
+		[]byte(`{"method":"POST","url":"https://must-not-run.invalid/orders"}`),
+		[]byte(`{"url":"https://must-not-run.invalid/orders","method":"POST"}`), 1)
+	normalized = bytes.Replace(normalized,
+		[]byte(`{"longerKey":1,"x":2}`), []byte(`{"x":2,"longerKey":1}`), 1)
+	if bytes.Equal(normalized, encoded) {
+		t.Fatal("test fixture did not reorder nested JSON")
+	}
+	parsed, err := ParseExecutionPlan(normalized)
+	if err != nil || parsed.Hash() != plan.Hash() {
+		t.Fatalf("ParseExecutionPlan() hash=%q error=%v", parsedHash(parsed), err)
+	}
+}
+
+func parsedHash(plan *ExecutionPlan) string {
+	if plan == nil {
+		return ""
+	}
+	return plan.Hash()
 }
 
 // 验证持久化计划任一语义字段被篡改时都会被内容哈希拒绝。

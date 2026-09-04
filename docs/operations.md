@@ -180,14 +180,39 @@ Run capacity/alert and backup/restore drills with the production `ops` command. 
 go run ./cmd/ops -action capacity -tenant tenant-a
 go run ./cmd/ops -action alerts -tenant tenant-a
 SUPAFLOW_BACKUP_ROOT=./data/backups go run ./cmd/ops -action backup -artifact nightly.dump
-SUPAFLOW_RESTORE_DATABASE_URL='postgres://scratch-host/scratch' go run ./cmd/ops -action restore -artifact nightly.dump
+SUPAFLOW_RESTORE_DATABASE_URL='postgres://scratch-host/scratch' \
+SUPAFLOW_RESTORE_ARCHIVE_SHA256='<trusted-64-character-lowercase-hex-digest>' \
+  go run ./cmd/ops -action restore -artifact nightly.dump
 ```
 
-The restore drill does not hand the archive directly to a third, independently resolved `pg_restore` connection. It first resolves the production and scratch PostgreSQL cluster system identifier, database OID, and database name. `pg_restore` then renders the complete archive without connecting to a database into an already-unlinked mode-`0600` file descriptor. Before opening `psql`, Supaflow scans the rendered stream and rejects every psql meta-command except exact `\restrict`/`\unrestrict` guards emitted by supported pg_dump versions and the `\.` terminator while inside `COPY FROM stdin`. It also rejects top-level transaction-control statements such as `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `PREPARE TRANSACTION`, `SAVEPOINT`, and `RELEASE`. Transaction words inside SQL strings, quoted identifiers, comments, dollar-quoted bodies, and `COPY` data are not interpreted as commands. This prevents a replaced or damaged artifact from changing databases, running a shell, including a second script, or committing a prefix of the restore outside the enforced transaction.
+Immediately after backup, calculate the archive SHA-256 and store it in signed release evidence or another access-controlled, immutable channel separate from the backup directory. Restore requires that trusted value through `SUPAFLOW_RESTORE_ARCHIVE_SHA256`; it accepts exactly 64 lowercase hex characters. Do not derive this environment variable from the artifact immediately before restore, because an attacker able to replace both inputs would defeat the trust boundary.
 
-Finally one `psql --single-transaction` connection executes an identity guard as its first statement and the validated archive after it. The guard must observe the exact verified scratch identity and must not observe the production identity. A DNS, service-discovery, or proxy change between preflight and that connection therefore aborts before archive SQL; neither a psql reconnect nor an explicit SQL commit can escape the guarded transaction. Keep backup hashes in release evidence and investigate any meta-command or transaction-control rejection as artifact corruption rather than bypassing the scanner.
+The restore drill does not hand the archive path directly to a third, independently resolved `pg_restore` connection. It first resolves the production and scratch PostgreSQL cluster system identifier, database OID, and database name. Supaflow opens the archive once, rejects symlinks or an inode changed during open, and in one streaming pass hashes its bytes while copying them into an already-unlinked mode-`0600` snapshot. Only after the snapshot digest matches the trusted value does Supaflow rewind that private descriptor and supply it to `pg_restore` through stdin; later path replacement or in-place mutation of the source inode cannot change the bytes restored. `pg_restore` renders the complete archive without connecting to a database into a separate already-unlinked mode-`0600` file descriptor. Before opening `psql`, Supaflow scans the rendered stream and rejects every psql meta-command except exact `\restrict`/`\unrestrict` guards emitted by supported pg_dump versions and the `\.` terminator while inside `COPY FROM stdin`. It also rejects top-level transaction-control statements such as `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `PREPARE TRANSACTION`, `SAVEPOINT`, and `RELEASE`. Transaction words inside SQL strings, quoted identifiers, comments, dollar-quoted bodies, and `COPY` data are not interpreted as commands. This prevents a replaced or damaged artifact from changing databases, running a shell, including a second script, or committing a prefix of the restore outside the enforced transaction.
+
+Finally one `psql --single-transaction` connection executes an identity guard as its first statement and the validated archive after it. Supaflow requires URL-form PostgreSQL DSNs, validates their connection options, and passes the parsed host, port, user, password, database, and TLS settings only as explicit libpq environment variables; the URI and password never enter process arguments or diagnostics. Inherited `PG*` variables are removed so `PGHOSTADDR` or another ambient setting cannot redirect the subprocess. The guard must observe the exact verified scratch identity and must not observe the production identity. A DNS, service-discovery, or proxy change between preflight and that connection therefore aborts before archive SQL; neither a psql reconnect nor an explicit SQL commit can escape the guarded transaction. Keep backup hashes in release evidence and investigate any meta-command or transaction-control rejection as artifact corruption rather than bypassing the scanner.
 
 Any guard rejection, `pg_restore` error, `psql` error, signal, or connection loss returns failure. Because all archive SQL is applied in one transaction, PostgreSQL rolls it back on error or process death. The expanded script has no directory entry and is reclaimed by the kernel even after a hard crash. Before retrying, confirm that the scratch database has no successful prior restore, resolve the routing incident, and rerun the same immutable backup. Never bypass the identity guard by invoking `pg_restore --dbname` manually, and never point `SUPAFLOW_RESTORE_DATABASE_URL` at a transaction router that can move one open transaction between database identities.
+
+The real-tool restore drill is opt-in because it creates and drops three disposable databases. Run it only against an isolated PostgreSQL instance with a URL-form admin connection that can use `CREATE DATABASE`, `pg_control_system()`, and event triggers. `pg_dump`, `pg_restore`, and `psql` must already be in `PATH` and should match the server major version. A local Docker/CI invocation is:
+
+```bash
+docker run --rm --detach --name supaflow-restore-postgres \
+  --publish 55433:5432 \
+  --env POSTGRES_USER=supaflow_restore_admin \
+  --env POSTGRES_PASSWORD=restore-test-only \
+  postgres:17-alpine
+trap 'docker rm --force supaflow-restore-postgres >/dev/null 2>&1 || true' EXIT
+for attempt in $(seq 1 30); do
+  docker exec supaflow-restore-postgres pg_isready -U supaflow_restore_admin && break
+  test "$attempt" -lt 30 || exit 1
+  sleep 1
+done
+export SUPAFLOW_RESTORE_TEST_ADMIN_DATABASE_URL='postgres://supaflow_restore_admin:restore-test-only@127.0.0.1:55433/postgres?sslmode=disable'
+command -v pg_dump pg_restore psql
+go test ./internal/platformops -run '^TestExecCommandRunnerRealPostgresRestoreDrill$' -count=1 -v
+```
+
+The test creates a real custom-format archive, restores it successfully, proves the first-statement identity guard rejects the source database as a target, and injects a target-side DDL failure to prove earlier restored schema/data is rolled back. CI should execute the same command in a job image that already includes matching PostgreSQL client tools; absence of the env var or any required client produces an explicit skip.
 
 ## Verification
 
@@ -216,19 +241,139 @@ Run the real-TCP PostgreSQL contention profile separately so its 1,000
 simultaneous clients do not distort unit-test timing:
 
 ```bash
+set -euo pipefail
+umask 077
 export SUPAFLOW_TEST_DATABASE_URL='postgres://least-privilege-user@127.0.0.1:55432/supaflow_pressure?sslmode=disable'
-go test -timeout=120s -run '^TestPostgresControlPlanePressure$' -count=1 -v ./tests/load
+test -z "$(git status --porcelain)" || { echo 'release profile requires a clean checkout' >&2; exit 1; }
+export SUPAFLOW_RELEASE_COMMIT="$(git rev-parse HEAD)"
+evidence_root="release-evidence/${SUPAFLOW_RELEASE_COMMIT}"
+mkdir -p "$evidence_root"
+chmod 700 "$evidence_root"
+export SUPAFLOW_RELEASE_EVIDENCE_DIR="$evidence_root/$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}${RANDOM}"
+mkdir "$SUPAFLOW_RELEASE_EVIDENCE_DIR"
+chmod 700 "$SUPAFLOW_RELEASE_EVIDENCE_DIR"
+go test -timeout=120s -run '^TestPostgresControlPlanePressure$' -count=1 -json ./tests/load 2>&1 \
+  | tee "$SUPAFLOW_RELEASE_EVIDENCE_DIR/go-test.jsonl"
+find "$SUPAFLOW_RELEASE_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
+  | xargs -0 shasum -a 256 \
+  > "$SUPAFLOW_RELEASE_EVIDENCE_DIR/SHA256SUMS"
 ```
 
 The database must be disposable and isolated from development and production
 data. The test applies the immutable migration chain, creates a unique tenant,
 database API key, service account and membership, uses a 32-connection pool,
-then releases 1,000 TCP starts simultaneously. It also performs exactly 2,000
-bounded worker advances and requires all 1,000 Runs to be successful with both
+then releases 1,000 TCP starts simultaneously. It records p50/p95/p99 request
+latency. Eight independently identified workers then issue concurrent claims while
+performing exactly 2,000 successful advances under an 8,000-call bound. The
+profile records advance latency, non-working calls, lease takeovers, durable
+event and outbox enqueue throughput, oldest pre-drain queue age and maximum
+queue admission delay. It requires all 1,000 Runs to be successful with both
 admission counters returned to zero. A missing
 `SUPAFLOW_TEST_DATABASE_URL` is an intentional skip; release evidence must set
-it and retain the `profile=postgres-tcp` and `profile=postgres-worker-drain`
-log lines.
+it. The test atomically writes a private, commit-bound JSON object and the
+`go test -json` stream retains the raw logs. The JSON also captures Go/host,
+PostgreSQL-version and connection-pool context and refuses to overwrite an
+existing object for that commit. Keep those files and their
+`SHA256SUMS`; console excerpts alone are not release evidence.
+
+There is no in-process substitute for ingress/TLS SSE capacity or a replicated
+outbox dispatcher. On production-equivalent staging, first choose a non-terminal
+Run that will remain open for the measurement and use an API key with at least the
+operator role, then exercise bounded SSE fan-out:
+
+```bash
+set -euo pipefail
+umask 077
+: "${SUPAFLOW_RELEASE_COMMIT:?export the exact deployed 40-character commit SHA}"
+printf '%s\n' "$SUPAFLOW_RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+export SUPAFLOW_RELEASE_COMMIT
+export SUPAFLOW_RELEASE_EVIDENCE_DIR="${SUPAFLOW_RELEASE_EVIDENCE_DIR:-release-evidence/${SUPAFLOW_RELEASE_COMMIT}/staging-$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$SUPAFLOW_RELEASE_EVIDENCE_DIR"
+chmod 700 "$SUPAFLOW_RELEASE_EVIDENCE_DIR"
+export SSE_PROFILE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}${RANDOM}"
+export SSE_EVIDENCE_DIR="$SUPAFLOW_RELEASE_EVIDENCE_DIR/sse-$SSE_PROFILE_ID"
+mkdir "$SSE_EVIDENCE_DIR"
+chmod 700 "$SSE_EVIDENCE_DIR"
+printf '%s\n' "$SUPAFLOW_RELEASE_COMMIT" > "$SSE_EVIDENCE_DIR/deployed-commit.txt"
+export SUPAFLOW_URL='https://supaflow.staging.example'
+export SUPAFLOW_API_KEY='staging-secret-from-vault'
+export SUPAFLOW_RUN_ID='run_kept_non_terminal_for_profile'
+export SSE_CLIENTS=64
+export SSE_DURATION_SECONDS=30
+curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+  "$SUPAFLOW_URL/ops/metrics" > "$SSE_EVIDENCE_DIR/metrics-before-sse.json"
+seq "$SSE_CLIENTS" | xargs -I{} -P "$SSE_CLIENTS" sh -c '
+  curl --fail --silent --show-error --no-buffer --max-time "$SSE_DURATION_SECONDS" \
+    -H "X-API-Key: $SUPAFLOW_API_KEY" -H "Accept: text/event-stream" \
+    "$SUPAFLOW_URL/v1/runs/$SUPAFLOW_RUN_ID/events?afterCursor=0" \
+    > "$SSE_EVIDENCE_DIR/client-{}.log"
+  status=$?
+  [ "$status" -eq 0 ] || [ "$status" -eq 28 ]
+'
+curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+  "$SUPAFLOW_URL/ops/metrics" > "$SSE_EVIDENCE_DIR/metrics-after-sse.json"
+find "$SSE_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
+  | xargs -0 shasum -a 256 \
+  > "$SSE_EVIDENCE_DIR/SHA256SUMS"
+```
+
+To measure outbox drain rather than only enqueue throughput, keep the deployed
+dispatcher running, prepare a JSON Run request containing a valid immutable
+`planId`/`planHash`, and capture the capacity series while creating bounded load:
+
+```bash
+set -euo pipefail
+umask 077
+: "${SUPAFLOW_URL:?run the SSE preamble or export the staging URL}"
+: "${SUPAFLOW_API_KEY:?export a staging operator API key}"
+: "${SUPAFLOW_RELEASE_COMMIT:?export the exact deployed commit SHA}"
+: "${SUPAFLOW_RELEASE_EVIDENCE_DIR:?run the SSE preamble or export an evidence directory}"
+source_run_request="$SUPAFLOW_RELEASE_EVIDENCE_DIR/run-request.json"
+test -f "$source_run_request"
+export OUTBOX_OBSERVATION_SECONDS=120
+export OUTBOX_PROFILE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}${RANDOM}"
+export OUTBOX_EVIDENCE_DIR="$SUPAFLOW_RELEASE_EVIDENCE_DIR/outbox-$OUTBOX_PROFILE_ID"
+mkdir "$OUTBOX_EVIDENCE_DIR"
+chmod 700 "$OUTBOX_EVIDENCE_DIR"
+printf '%s\n' "$OUTBOX_PROFILE_ID" > "$OUTBOX_EVIDENCE_DIR/profile-id.txt"
+printf '%s\n' "$SUPAFLOW_RELEASE_COMMIT" > "$OUTBOX_EVIDENCE_DIR/deployed-commit.txt"
+cp "$source_run_request" "$OUTBOX_EVIDENCE_DIR/run-request.json"
+export RUN_REQUEST_JSON="$OUTBOX_EVIDENCE_DIR/run-request.json"
+curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+  "$SUPAFLOW_URL/ops/metrics" > "$OUTBOX_EVIDENCE_DIR/metrics-before-outbox.json"
+(
+  for sample in $(seq 0 "$OUTBOX_OBSERVATION_SECONDS"); do
+    curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+      "$SUPAFLOW_URL/ops/metrics" \
+      > "$OUTBOX_EVIDENCE_DIR/capacity-${sample}.json"
+    sleep 1
+  done
+) &
+metrics_sampler_pid=$!
+export RUN_REQUEST_JSON OUTBOX_PROFILE_ID OUTBOX_EVIDENCE_DIR SUPAFLOW_URL SUPAFLOW_API_KEY
+seq 1000 | xargs -P 64 -n 1 sh -c '
+  index=$1
+  http_code=$(curl --fail --silent --show-error \
+    -H "X-API-Key: $SUPAFLOW_API_KEY" \
+    -H "Idempotency-Key: staging-outbox-$OUTBOX_PROFILE_ID-$index" \
+    -H "Content-Type: application/json" --data-binary "@$RUN_REQUEST_JSON" \
+    --dump-header "$OUTBOX_EVIDENCE_DIR/run-start-$index.headers" \
+    --output "$OUTBOX_EVIDENCE_DIR/run-start-$index.json" \
+    --write-out "%{http_code}" "$SUPAFLOW_URL/v1/runs")
+  printf "%s\n" "$http_code" > "$OUTBOX_EVIDENCE_DIR/run-start-$index.status"
+  [ "$http_code" -eq 202 ]
+' sh
+wait "$metrics_sampler_pid"
+find "$OUTBOX_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
+  | xargs -0 shasum -a 256 \
+  > "$OUTBOX_EVIDENCE_DIR/SHA256SUMS"
+```
+
+Treat these staging artifacts as observations, not a production SLO. Record the
+replica counts, quota/pool configuration, ingress version and commit alongside
+them. A release candidate is rejected if SSE requests fail for reasons other
+than the intentional curl time limit, if outbox backlog does not return toward
+its pre-load value, or if queue/outbox age remains unbounded after load stops.
 
 Before a production release, also build every command to catch command-only dependency errors:
 

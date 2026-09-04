@@ -38,7 +38,31 @@ fenix-migrate \
 
 Remove `-dry-run` only after every blocker is resolved. Workflow identity, name, and description are imported first with an immutable source fingerprint; published versions then import in contiguous source order, while drafts, triggers and terminal run projections use independent idempotency identities. Re-running the exact snapshot is safe and is reported as replay; a changed name or description under the same source identity is a conflict rather than a silent overwrite. The command reloads the source after import and fails when its watermark or fingerprint changed during the run. `sourceDatabaseFingerprint` is the versioned cleanup digest: PostgreSQL canonicalizes and hashes every complete row from all nine legacy Workflow tables, then aggregates row hashes in primary-key order. `sourceFingerprint` additionally commits to that database digest, the complete database watermark, and every exact Workflow YAML byte sequence, trigger and run in the loaded snapshot. Secrets and outputs affect the database digest, but their raw values never leave PostgreSQL or enter the report.
 
-The final non-dry-run report contains the durable target installation UUID plus the v2 canonical digest and counts for every Fenix-imported workflow, definition, draft, trigger, and run. The digest covers complete workflow/import-marker rows, immutable versions and plans, draft mutation evidence, triggers, and each imported run with its events, node states, node attempts, and outputs. The migration fails rather than emitting a cleanup-capable report when these target counts differ from the source plan. Record the production UUID from `SELECT installation_id FROM platform_installations` and keep it in deployment configuration; do not substitute a staging UUID. Compare source and target counts and hashes, then shadow only workflows with no external side effects or with every side-effect executor replaced by a reviewed stub. Route Fenix execution traffic to Supaflow and observe the agreed stability window.
+The final non-dry-run report contains the durable target installation UUID plus the v2 canonical digest and counts for every Fenix-imported workflow, definition, draft, trigger, and run. The digest covers complete workflow/import-marker rows, immutable versions and plans, draft mutation evidence, triggers, and each imported run with its events, node states, node attempts, and outputs. The migration fails rather than emitting a cleanup-capable report when these target counts differ from the source plan. Record the production UUID from `SELECT installation_id FROM platform_installations` and keep it in deployment configuration; do not substitute a staging UUID. Compare source and target counts and hashes, execute the constrained shadow sample below, then route Fenix execution traffic to Supaflow and observe the agreed stability window.
+
+## Constrained shadow runs
+
+`POST /v1/shadow-runs` is the only shadow execution entry point. The application service resolves the tenant-owned immutable plan and requires an exact `stubBindings` entry for every node that can reach external resources. Network, credential, filesystem and compute permissions always require a stub. Custom and newly introduced executors also require a stub by default; only the reviewed deterministic built-in control executors are allowed to run directly. Subworkflow nodes require a stub even though their child plan owns the resource permissions.
+
+The only supported stub is `builtin.shadow-noop.v1`. It does not copy node input or config, resolve credentials, invoke child workflows, run user code, or call external adapters. It emits bounded synthetic JSON containing only the node ID and stub kind. The request must name every unsafe node and must not name pure or unknown nodes:
+
+```http
+POST /v1/shadow-runs
+Idempotency-Key: migration-shadow-orders-v1
+Content-Type: application/json
+
+{
+  "planId": "plan_...",
+  "planHash": "<64 lowercase hex characters>",
+  "input": {"fixture": "migration-sample-1"},
+  "stubBindings": {
+    "send_order": "builtin.shadow-noop.v1",
+    "notify_customer": "builtin.shadow-noop.v1"
+  }
+}
+```
+
+A missing unsafe-node binding returns `409 shadow_stub_required`; an unknown node, pure-node binding, or unreviewed stub returns `400 invalid_shadow_stub_binding`. The runtime persists `shadow-v1:<selected-executor>` on every attempt. Successors, retries, lease takeover, process restart, and rerun therefore cannot silently fall back to the plan's real side-effect executor. Attempt diagnostics provide durable evidence of the selected real-or-stub binding. The ordinary `POST /v1/runs` contract and executor selection are unchanged.
 
 ## Destructive Fenix cleanup gate
 

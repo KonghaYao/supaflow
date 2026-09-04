@@ -26,6 +26,28 @@ func canonicalizeJSON(input json.RawMessage) (json.RawMessage, error) {
 	return canonical, nil
 }
 
+func canonicalizePlanJSONValues(semantics *planSemantics) error {
+	for nodeIndex := range semantics.Nodes {
+		config, err := canonicalizeJSON(semantics.Nodes[nodeIndex].Config)
+		if err != nil {
+			return fmt.Errorf("node %q config: %w", semantics.Nodes[nodeIndex].ID, err)
+		}
+		semantics.Nodes[nodeIndex].Config = config
+		for name, binding := range semantics.Nodes[nodeIndex].Inputs {
+			if len(binding.Literal) == 0 {
+				continue
+			}
+			literal, err := canonicalizeJSON(binding.Literal)
+			if err != nil {
+				return fmt.Errorf("node %q input %q literal: %w", semantics.Nodes[nodeIndex].ID, name, err)
+			}
+			binding.Literal = literal
+			semantics.Nodes[nodeIndex].Inputs[name] = binding
+		}
+	}
+	return nil
+}
+
 func decodeStrict(input json.RawMessage, target any) error {
 	if len(input) == 0 {
 		return fmt.Errorf("config is required")

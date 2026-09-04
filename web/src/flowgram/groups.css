@@ -1,0 +1,27 @@
+.flow-group {
+  box-sizing: border-box;
+  min-width: 266px;
+  min-height: 156px;
+  border: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: inherit;
+}
+
+.flow-group.activated,
+.flow-group.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.flow-group__title {
+  display: block;
+  min-height: 36px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 16px 16px 0 0;
+  background: color-mix(in srgb, var(--accent) 11%, var(--panel));
+  cursor: grab;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}

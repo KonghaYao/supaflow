@@ -286,6 +286,46 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
+  /shadow-runs:
+    post:
+      operationId: startShadowRun
+      summary: Idempotently start a durable run whose external side effects are replaced by reviewed stubs.
+      description: |
+        Every node outside the reviewed pure-executor set must appear exactly once in `stubBindings`.
+        The only supported binding is `builtin.shadow-noop.v1`; it emits deterministic synthetic output and
+        never resolves credentials, invokes child workflows, runs user code, or accesses external resources.
+        The shadow executor binding is persisted on every attempt so retries and process restarts remain stubbed.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [planId, planHash, input, stubBindings]
+              properties:
+                planId: { type: string, minLength: 1, maxLength: 128 }
+                planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+                input: {}
+                stubBindings:
+                  type: object
+                  description: Exact node-ID map for every side-effecting node; safe or unknown node IDs are rejected.
+                  propertyNames: { type: string, minLength: 1, maxLength: 128 }
+                  additionalProperties: { type: string, const: builtin.shadow-noop.v1 }
+                priority: { type: integer, minimum: -1000, maximum: 1000, default: 0 }
+                timeoutMs:
+                  oneOf:
+                    - { type: integer, format: int64, const: 0 }
+                    - { type: integer, format: int64, minimum: 1000, maximum: 2592000000 }
+      responses:
+        '200': { description: Idempotent replay of the existing shadow run, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '202': { description: Shadow run accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '400': { description: Request or stub map is invalid (`invalid_shadow_stub_binding`), content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { description: A side-effect node lacks a reviewed stub (`shadow_stub_required`) or idempotency conflicts, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '429': { $ref: '#/components/responses/Problem' }
   /runs/{runId}:
     get:
       operationId: getRun

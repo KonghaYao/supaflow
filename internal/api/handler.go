@@ -16,6 +16,7 @@ import (
 	"github.com/pazhou/supaflow/internal/platform"
 	"github.com/pazhou/supaflow/internal/platformops"
 	"github.com/pazhou/supaflow/internal/runtime"
+	"github.com/pazhou/supaflow/internal/shadowrun"
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
@@ -24,6 +25,7 @@ const maxRequestBody = 1 << 20
 // Handler serves the stable Supaflow HTTP contract.
 type Handler struct {
 	runtime         *runtime.Service
+	shadowRuns      *shadowrun.Service
 	catalog         platform.PlanCatalog
 	auth            *Authenticator
 	resumeTokens    *runtime.ResumeTokenIssuer
@@ -43,7 +45,11 @@ func NewHandler(runtimeService *runtime.Service, catalog platform.PlanCatalog, a
 	}
 	runtimeService.SetResumeTokenIssuer(resumeTokens)
 	streams, _ := newEventStreamLimiter(defaultEventStreamConfig())
-	return &Handler{runtime: runtimeService, catalog: catalog, auth: auth, resumeTokens: resumeTokens, eventStreams: streams}, nil
+	shadowRuns, err := shadowrun.NewService(catalog, runtimeService)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{runtime: runtimeService, shadowRuns: shadowRuns, catalog: catalog, auth: auth, resumeTokens: resumeTokens, eventStreams: streams}, nil
 }
 
 // SetReadinessProbe configures the dependency check used by /health/ready.
@@ -85,6 +91,7 @@ func (h *Handler) Routes() http.Handler {
 	protected.Handle("POST /v1/workflows/compile", h.require(RoleEditor, http.HandlerFunc(h.compile)))
 	protected.Handle("POST /v1/workflows/{workflowID}/publish", h.require(RolePublisher, http.HandlerFunc(h.publish)))
 	protected.Handle("POST /v1/runs", h.require(RoleOperator, http.HandlerFunc(h.startRun)))
+	protected.Handle("POST /v1/shadow-runs", h.require(RoleOperator, http.HandlerFunc(h.startShadowRun)))
 	h.registerRunMonitorRoutes(protected)
 	protected.Handle("GET /v1/runs/{runID}", h.require(RoleViewer, http.HandlerFunc(h.getRun)))
 	protected.Handle("GET /v1/runs/{runID}/output", h.require(RoleViewer, http.HandlerFunc(h.getRunOutput)))

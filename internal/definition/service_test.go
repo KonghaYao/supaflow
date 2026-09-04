@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,17 +90,46 @@ func TestDraftLifecycleAndOptimisticConflict(t *testing.T) {
 func TestDraftMutationIdempotency(t *testing.T) {
 	service, _ := newTestService(t)
 	command := CreateDraftCommand{WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "create-0001", Document: mustJSON(t, definitionFor("flow"))}
-	first, err := service.CreateDraft(context.Background(), "tenant-a", command)
-	if err != nil {
-		t.Fatal(err)
+	first, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+	if err != nil || !first.Created {
+		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	replay, err := service.CreateDraft(context.Background(), "tenant-a", command)
-	if err != nil || replay.ID != first.ID || replay.Revision != first.Revision {
+	replay, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+	if err != nil || replay.Created || replay.Draft.ID != first.Draft.ID || replay.Draft.Revision != first.Draft.Revision {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
 	command.WorkflowID = "other"
-	if _, err := service.CreateDraft(context.Background(), "tenant-a", command); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("key reuse err=%v", err)
+	}
+}
+
+// 验证并发提交同一创建命令时，原子存储结果只允许一个调用计为创建。
+func TestConcurrentDraftCreateHasSingleCreator(t *testing.T) {
+	service, _ := newTestService(t)
+	command := CreateDraftCommand{WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "concurrent-create", Document: mustJSON(t, definitionFor("flow"))}
+	results := make([]CreateDraftResult, 2)
+	errs := make([]error, 2)
+	var wait sync.WaitGroup
+	for index := range results {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			results[index], errs[index] = service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+		}(index)
+	}
+	wait.Wait()
+	created := 0
+	for index, result := range results {
+		if errs[index] != nil {
+			t.Fatalf("result[%d]=%+v err=%v", index, result, errs[index])
+		}
+		if result.Created {
+			created++
+		}
+	}
+	if created != 1 || results[0].Draft.ID != results[1].Draft.ID {
+		t.Fatalf("results=%+v created=%d", results, created)
 	}
 }
 

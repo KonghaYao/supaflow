@@ -317,6 +317,11 @@ func requestFingerprint(plan PlanRef, input json.RawMessage, priority int, timeo
 	h.Write([]byte(strconv.FormatInt(timeout.Milliseconds(), 10)))
 	h.Write([]byte{0})
 	h.Write(compact)
+	// Existing normal-run fingerprints remain byte-for-byte stable. Shadow mode
+	// changes execution semantics, so it receives a disjoint idempotency scope.
+	if strings.HasPrefix(plan.Executor, "shadow-v1:") {
+		h.Write([]byte("\x00shadow-v1"))
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 

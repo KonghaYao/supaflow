@@ -33,18 +33,18 @@ func NewMemoryStore() *MemoryStore {
 func scope(tenant, value string) string { return tenant + "\x00" + value }
 
 // CreateDraft creates or replays one tenant mutation.
-func (m *MemoryStore) CreateDraft(_ context.Context, req MutationRequest) (Draft, error) {
+func (m *MemoryStore) CreateDraft(_ context.Context, req MutationRequest) (CreateDraftResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if found, replay, err := m.replay(req.Draft.TenantID, req.IdempotencyKey, req.RequestHash); found || err != nil {
 		if replay == nil {
-			return Draft{}, err
+			return CreateDraftResult{}, err
 		}
-		return cloneDraft(*replay), err
+		return CreateDraftResult{Draft: cloneDraft(*replay)}, err
 	}
 	key := scope(req.Draft.TenantID, req.Draft.WorkflowID)
 	if _, exists := m.drafts[key]; exists {
-		return Draft{}, ErrRevisionConflict
+		return CreateDraftResult{}, ErrRevisionConflict
 	}
 	count := 0
 	for _, item := range m.drafts {
@@ -53,12 +53,12 @@ func (m *MemoryStore) CreateDraft(_ context.Context, req MutationRequest) (Draft
 		}
 	}
 	if count >= MaxDraftsPerTenant {
-		return Draft{}, ErrTenantDraftLimit
+		return CreateDraftResult{}, ErrTenantDraftLimit
 	}
 	draft := cloneDraft(req.Draft)
 	m.drafts[key] = draft
 	m.record(req, &draft, false)
-	return cloneDraft(draft), nil
+	return CreateDraftResult{Draft: cloneDraft(draft), Created: true}, nil
 }
 
 // GetDraft reads one tenant workflow draft.

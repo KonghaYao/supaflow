@@ -177,6 +177,24 @@ func TestEventFanoutRateLimitRetryContract(t *testing.T) {
 	}
 }
 
+// 验证 shadow run 契约要求逐节点显式绑定唯一受审 stub，并公开稳定失败码。
+func TestShadowRunContract(t *testing.T) {
+	contents, err := os.ReadFile("openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow := contractSection(t, string(contents), "  /shadow-runs:", "  /runs/{runId}:")
+	for _, required := range []string{
+		"operationId: startShadowRun", "stubBindings", "builtin.shadow-noop.v1",
+		"shadow_stub_required", "invalid_shadow_stub_binding", "additionalProperties: false",
+		"IdempotencyKey", "'202'", "'409'",
+	} {
+		if !strings.Contains(shadow, required) {
+			t.Fatalf("shadow run contract missing %q", required)
+		}
+	}
+}
+
 // 验证 outbound webhook 契约仅接受凭据引用并完整描述生命周期。
 func TestOutboundWebhookContracts(t *testing.T) {
 	contents, err := os.ReadFile("openapi.yaml")

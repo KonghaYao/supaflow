@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,11 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("SUPAFLOW_TEST_DATABASE_URL is not set")
 	}
+	if os.Getenv("SUPAFLOW_RELEASE_EVIDENCE_DIR") != "" {
+		if err := validateEvidenceRevision(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	poolConfig, err := pgxpool.ParseConfig(databaseURL)
@@ -41,6 +47,10 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	var postgresVersion string
+	if err = pool.QueryRow(ctx, `SHOW server_version`).Scan(&postgresVersion); err != nil {
+		t.Fatal(err)
+	}
 	migrations, err := postgres.LoadMigrations(os.DirFS("../.."), "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -103,15 +113,18 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	}
 	const requests = 1000
 	const concurrency = requests
+	startLatencies := make([]time.Duration, requests)
 	startGate := make(chan struct{})
 	failures := make(chan string, requests)
 	var succeeded atomic.Int64
-	started := time.Now()
+	var ready sync.WaitGroup
+	ready.Add(requests)
 	var workers sync.WaitGroup
 	for index := 0; index < requests; index++ {
 		workers.Add(1)
 		go func(index int) {
 			defer workers.Done()
+			ready.Done()
 			<-startGate
 			req, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/runs", bytes.NewReader(payload))
 			if requestErr != nil {
@@ -120,12 +133,19 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 			}
 			req.Header.Set("X-API-Key", apiKey)
 			req.Header.Set("Idempotency-Key", fmt.Sprintf("postgres-pressure-%08d", index))
+			requestStarted := time.Now()
 			response, requestErr := client.Do(req)
 			if requestErr != nil {
 				failures <- fmt.Sprintf("request %d: %v", index, requestErr)
 				return
 			}
-			_ = response.Body.Close()
+			_, readErr := io.Copy(io.Discard, response.Body)
+			closeErr := response.Body.Close()
+			startLatencies[index] = time.Since(requestStarted)
+			if readErr != nil || closeErr != nil {
+				failures <- fmt.Sprintf("request %d read=%v close=%v", index, readErr, closeErr)
+				return
+			}
 			if response.StatusCode != http.StatusAccepted {
 				failures <- fmt.Sprintf("request %d status=%d", index, response.StatusCode)
 				return
@@ -133,6 +153,8 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 			succeeded.Add(1)
 		}(index)
 	}
+	ready.Wait()
+	started := time.Now()
 	close(startGate)
 	workers.Wait()
 	close(failures)
@@ -150,33 +172,104 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 		t.Fatalf("durable runs=%d want=%d", durableRuns, requests)
 	}
 	elapsed := time.Since(started)
-	t.Logf("profile=postgres-tcp requests=%d concurrency=%d elapsed=%s throughput=%.0f req/s", requests, concurrency, elapsed, requests/elapsed.Seconds())
+	startPercentiles := durationPercentiles(startLatencies)
+	t.Logf("profile=postgres-tcp requests=%d concurrency=%d elapsed=%s throughput=%.0f req/s latency_p50_ms=%.3f latency_p95_ms=%.3f latency_p99_ms=%.3f",
+		requests, concurrency, elapsed, requests/elapsed.Seconds(), startPercentiles.P50Milliseconds,
+		startPercentiles.P95Milliseconds, startPercentiles.P99Milliseconds)
 
 	planExecutor, err := executor.NewPlanExecutor(catalog, executor.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	orchestrator, err := workflowruntime.NewOrchestrator(postgres.NewRuntimeStore(pool), planExecutor, nil, nil, workflowruntime.OrchestratorConfig{
-		WorkerID:      "pressure-worker-" + suffix,
-		LeaseDuration: time.Minute,
-		RetryPolicy: workflowruntime.RetryPolicy{
-			MaxAttempts: 2,
-			BaseDelay:   time.Millisecond,
-			MaxDelay:    time.Second,
-		},
-		ResumeTokens: issuer,
-	})
-	if err != nil {
+	const workerCount = 8
+	orchestrators := make([]*workflowruntime.Orchestrator, workerCount)
+	for index := range orchestrators {
+		orchestrators[index], err = workflowruntime.NewOrchestrator(postgres.NewRuntimeStore(pool), planExecutor, nil, nil, workflowruntime.OrchestratorConfig{
+			WorkerID:      fmt.Sprintf("pressure-worker-%s-%02d", suffix, index),
+			LeaseDuration: time.Minute,
+			RetryPolicy: workflowruntime.RetryPolicy{
+				MaxAttempts: 2,
+				BaseDelay:   time.Millisecond,
+				MaxDelay:    time.Second,
+			},
+			ResumeTokens: issuer,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var queuedRunsBeforeDrain int
+	var oldestQueueAgeBeforeDrainMS float64
+	if err = pool.QueryRow(ctx, `SELECT count(*), COALESCE((EXTRACT(EPOCH FROM (clock_timestamp()-min(created_at)))*1000)::double precision,0)
+		FROM admission_entries WHERE tenant_id=$1 AND resource_type='run' AND status='queued'`, tenantID).
+		Scan(&queuedRunsBeforeDrain, &oldestQueueAgeBeforeDrainMS); err != nil {
+		t.Fatal(err)
+	}
+	if queuedRunsBeforeDrain == 0 || oldestQueueAgeBeforeDrainMS <= 0 {
+		t.Fatalf("queue pressure was not exercised: queued=%d oldest_age_ms=%.3f", queuedRunsBeforeDrain, oldestQueueAgeBeforeDrainMS)
+	}
+	var eventsBeforeDrain, outboxBeforeDrain int64
+	if err = pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM run_events WHERE tenant_id=$1),
+		(SELECT count(*) FROM outbox_messages WHERE tenant_id=$1)`, tenantID).
+		Scan(&eventsBeforeDrain, &outboxBeforeDrain); err != nil {
 		t.Fatal(err)
 	}
 	drainStarted := time.Now()
-	for advances := 0; advances < requests*2; advances++ {
-		result, advanceErr := orchestrator.Advance(ctx, workflowruntime.TenantID(tenantID))
-		if advanceErr != nil || !result.Worked {
-			t.Fatalf("advance %d worked=%t error=%v", advances, result.Worked, advanceErr)
-		}
+	const expectedAdvances = int64(requests * 2)
+	const maximumAdvanceCalls = expectedAdvances * 4
+	var advances, advanceCalls, emptyAdvanceCalls atomic.Int64
+	advanceLatencies := make([]time.Duration, 0, maximumAdvanceCalls)
+	var latencyMu sync.Mutex
+	drainCtx, stopDrain := context.WithCancel(ctx)
+	defer stopDrain()
+	var drainErr error
+	var failOnce sync.Once
+	fail := func(reason error) {
+		failOnce.Do(func() {
+			drainErr = reason
+			stopDrain()
+		})
 	}
-	result, err := orchestrator.Advance(ctx, workflowruntime.TenantID(tenantID))
+	var drainWorkers sync.WaitGroup
+	for _, orchestrator := range orchestrators {
+		drainWorkers.Add(1)
+		go func(orchestrator *workflowruntime.Orchestrator) {
+			defer drainWorkers.Done()
+			for advances.Load() < expectedAdvances && drainCtx.Err() == nil {
+				call := advanceCalls.Add(1)
+				if call > maximumAdvanceCalls {
+					fail(fmt.Errorf("worker drain exceeded bounded call budget: %d", call))
+					return
+				}
+				callStarted := time.Now()
+				result, advanceErr := orchestrator.Advance(drainCtx, workflowruntime.TenantID(tenantID))
+				callElapsed := time.Since(callStarted)
+				latencyMu.Lock()
+				advanceLatencies = append(advanceLatencies, callElapsed)
+				latencyMu.Unlock()
+				if advanceErr != nil {
+					fail(advanceErr)
+					return
+				}
+				if result.Worked {
+					advances.Add(1)
+				} else {
+					emptyAdvanceCalls.Add(1)
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}(orchestrator)
+	}
+	drainWorkers.Wait()
+	if drainErr != nil {
+		t.Fatal(drainErr)
+	}
+	if advances.Load() != expectedAdvances {
+		t.Fatalf("worker advances=%d want=%d", advances.Load(), expectedAdvances)
+	}
+	drainElapsed := time.Since(drainStarted)
+	result, err := orchestrators[0].Advance(ctx, workflowruntime.TenantID(tenantID))
 	if err != nil || result.Worked {
 		t.Fatalf("queue was not drained: result=%+v error=%v", result, err)
 	}
@@ -190,7 +283,55 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	if successfulRuns != requests || activeRuns != 0 || queuedRuns != 0 {
 		t.Fatalf("terminal projection success=%d active=%d queued=%d", successfulRuns, activeRuns, queuedRuns)
 	}
-	t.Logf("profile=postgres-worker-drain runs=%d advances=%d elapsed=%s", requests, requests*2, time.Since(drainStarted))
+	var eventsAfterDrain, outboxAfterDrain, leaseTakeovers int64
+	var maximumQueueAdmissionDelayMS float64
+	if err = pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM run_events WHERE tenant_id=$1),
+		(SELECT count(*) FROM outbox_messages WHERE tenant_id=$1),
+		(SELECT count(*) FROM run_events WHERE tenant_id=$1 AND event_type='attempt.lease_taken_over'),
+		(SELECT COALESCE((max(EXTRACT(EPOCH FROM (admitted_at-created_at))*1000))::double precision,0)
+		 FROM admission_entries WHERE tenant_id=$1 AND resource_type='run')`, tenantID).
+		Scan(&eventsAfterDrain, &outboxAfterDrain, &leaseTakeovers, &maximumQueueAdmissionDelayMS); err != nil {
+		t.Fatal(err)
+	}
+	committedEvents := eventsAfterDrain - eventsBeforeDrain
+	committedOutbox := outboxAfterDrain - outboxBeforeDrain
+	if committedEvents <= 0 || committedOutbox <= 0 || maximumQueueAdmissionDelayMS <= 0 {
+		t.Fatalf("bounded runtime metrics missing: events=%d outbox=%d queue_delay_ms=%.3f",
+			committedEvents, committedOutbox, maximumQueueAdmissionDelayMS)
+	}
+	advancePercentiles := durationPercentiles(advanceLatencies)
+	t.Logf("profile=postgres-worker-drain workers=%d runs=%d advances=%d calls=%d empty_calls=%d elapsed=%s throughput=%.0f advances/s advance_p95_ms=%.3f events=%d event_throughput=%.0f events/s outbox=%d outbox_throughput=%.0f messages/s queue_oldest_ms=%.3f queue_admission_max_ms=%.3f lease_takeovers=%d",
+		workerCount, requests, advances.Load(), advanceCalls.Load(), emptyAdvanceCalls.Load(), drainElapsed,
+		float64(advances.Load())/drainElapsed.Seconds(), advancePercentiles.P95Milliseconds,
+		committedEvents, float64(committedEvents)/drainElapsed.Seconds(), committedOutbox,
+		float64(committedOutbox)/drainElapsed.Seconds(), oldestQueueAgeBeforeDrainMS,
+		maximumQueueAdmissionDelayMS, leaseTakeovers)
+	revision := os.Getenv("SUPAFLOW_RELEASE_COMMIT")
+	if revision == "" {
+		revision = "unbound-local-run"
+	}
+	evidence := newPressureEvidence(revision)
+	evidence.PostgreSQL = postgresVersion
+	evidence.PoolMaxConns = poolConfig.MaxConns
+	evidence.PoolMinConns = poolConfig.MinConns
+	evidence.Start = startPressureEvidence{
+		Requests: requests, Concurrency: concurrency, ElapsedSeconds: elapsed.Seconds(),
+		Throughput: float64(requests) / elapsed.Seconds(), Latency: startPercentiles,
+	}
+	evidence.Runtime = runtimePressureEvidence{
+		Workers: workerCount, Advances: advances.Load(), AdvanceCallLimit: maximumAdvanceCalls,
+		AdvanceCalls:      advanceCalls.Load(),
+		EmptyAdvanceCalls: emptyAdvanceCalls.Load(), ElapsedSeconds: drainElapsed.Seconds(),
+		AdvanceThroughput: float64(advances.Load()) / drainElapsed.Seconds(), AdvanceLatency: advancePercentiles,
+		CommittedEvents: committedEvents, EventCommitThroughput: float64(committedEvents) / drainElapsed.Seconds(),
+		CommittedOutboxMessages: committedOutbox, OutboxEnqueueThroughput: float64(committedOutbox) / drainElapsed.Seconds(),
+		QueuedRunsBeforeDrain: queuedRunsBeforeDrain, OldestQueueAgeBeforeDrainMS: oldestQueueAgeBeforeDrainMS,
+		MaximumQueueAdmissionDelayMS: maximumQueueAdmissionDelayMS, LeaseTakeovers: leaseTakeovers,
+	}
+	if path := writePressureEvidence(t, evidence); path != "" {
+		t.Logf("release_evidence_path=%s", path)
+	}
 }
 
 func pressureDefinition(workflowID string) workflow.WorkflowDefinition {

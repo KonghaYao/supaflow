@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -167,6 +168,52 @@ func TestPlanExecutorRejectsBindingMismatch(t *testing.T) {
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "untrusted.executor", Input: json.RawMessage(`null`), FencingToken: 1,
 	})
 	assertExecutionError(t, err, "executor_binding_mismatch", false)
+	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
+		TenantID: "tenant_a", RunID: "run_2", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		NodeID: "request", AttemptID: "attempt_2", Executor: "shadow-v1:http.request", Input: json.RawMessage(`null`), FencingToken: 1,
+	})
+	assertExecutionError(t, err, "executor_binding_mismatch", false)
+}
+
+// 验证 shadow executor 模式跨后继 attempt 持续存在，且副作用节点不会解析凭据或发起网络调用。
+func TestPlanExecutorShadowModeStubsSideEffectsDurably(t *testing.T) {
+	published := publishPlan(t, workflowDefinition("https://api.example/orders", "credential_1"))
+	dialCalls, credentialCalls := 0, 0
+	executor, err := NewPlanExecutor(published.catalog, Config{
+		AllowedHosts: []string{"api.example"},
+		DNSResolver:  fixedResolver{IP: net.ParseIP("93.184.216.34")},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialCalls++
+			return nil, errors.New("network must not be reached")
+		},
+		CredentialAuthorizer: credentialAuthorizerFunc(func(context.Context, workflowruntime.ExecutionRequest, workflow.PlanNode) error {
+			credentialCalls++
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := workflowruntime.ExecutionRequest{
+		TenantID: "tenant_a", RunID: "run_shadow", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		NodeID: "begin", AttemptID: "attempt_1", Attempt: 1, Executor: "shadow-v1:builtin.start",
+		Input: json.RawMessage(`{"secret":"must-not-copy"}`), FencingToken: 1,
+	}
+	started, err := executor.Execute(context.Background(), request)
+	if err != nil || len(started.Next) != 1 || started.Next[0].Executor != "shadow-v1:builtin.shadow-noop.v1" {
+		t.Fatalf("shadow start = %+v, err = %v", started, err)
+	}
+	request.NodeID, request.AttemptID, request.Executor, request.Input = started.Next[0].NodeID, "attempt_2", started.Next[0].Executor, started.Next[0].Input
+	stubbed, err := executor.Execute(context.Background(), request)
+	if err != nil || len(stubbed.Next) != 1 || stubbed.Next[0].Executor != "shadow-v1:builtin.human-approval" {
+		t.Fatalf("shadow HTTP = %+v, err = %v", stubbed, err)
+	}
+	if dialCalls != 0 || credentialCalls != 0 {
+		t.Fatalf("shadow side effects dial=%d credential=%d", dialCalls, credentialCalls)
+	}
+	if bytes.Contains(stubbed.Output.Inline, []byte("must-not-copy")) || !bytes.Contains(stubbed.Output.Inline, []byte(`"shadowStubbed":true`)) {
+		t.Fatalf("unsafe or missing stub evidence: %s", stubbed.Output.Inline)
+	}
 }
 
 type credentialAuthorizerFunc func(context.Context, workflowruntime.ExecutionRequest, workflow.PlanNode) error

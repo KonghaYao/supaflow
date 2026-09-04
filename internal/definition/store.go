@@ -12,7 +12,7 @@ type MutationRequest struct {
 
 // Store is the tenant-scoped persistence port for drafts and version history.
 type Store interface {
-	CreateDraft(context.Context, MutationRequest) (Draft, error)
+	CreateDraft(context.Context, MutationRequest) (CreateDraftResult, error)
 	GetDraft(context.Context, string, string) (Draft, error)
 	ListDrafts(context.Context, string, string, int) (DraftPage, error)
 	UpdateDraft(context.Context, MutationRequest) (Draft, error)

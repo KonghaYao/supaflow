@@ -65,6 +65,9 @@ func ParseExecutionPlan(input json.RawMessage) (*ExecutionPlan, error) {
 	if err != nil || len(recordedHash) != sha256.Size || envelope.Hash != hex.EncodeToString(recordedHash) {
 		return nil, fmt.Errorf("workflow: execution plan hash is invalid")
 	}
+	if err = canonicalizePlanJSONValues(&envelope.planSemantics); err != nil {
+		return nil, fmt.Errorf("workflow: canonicalize execution plan semantics: %w", err)
+	}
 	canonical, err := json.Marshal(envelope.planSemantics)
 	if err != nil {
 		return nil, fmt.Errorf("workflow: encode execution plan semantics: %w", err)

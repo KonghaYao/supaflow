@@ -24,10 +24,10 @@ type RestoreTargetIdentity struct {
 	DatabaseName     string
 }
 
-// BackupRestoreRunner is the process boundary for backup and identity-bound restore drills.
+// BackupRestoreRunner is the process boundary for backup and digest/identity-bound restore drills.
 type BackupRestoreRunner interface {
 	Run(context.Context, string, []string, []string) error
-	RunRestore(context.Context, string, string, RestoreTargetIdentity, RestoreTargetIdentity) error
+	RunRestore(context.Context, []string, string, string, RestoreTargetIdentity, RestoreTargetIdentity) error
 }
 
 // ExecCommandRunner executes PostgreSQL tools with bounded redacted diagnostics.
@@ -36,18 +36,19 @@ type ExecCommandRunner struct{}
 // Run executes one fixed tool command supplied by BackupRestore.
 func (ExecCommandRunner) Run(ctx context.Context, name string, args, environment []string) error {
 	command := exec.CommandContext(ctx, name, args...)
-	command.Env = append(os.Environ(), environment...)
-	return runBoundedCommand(command, name)
+	command.Env = postgresProcessEnvironment(environment)
+	return runBoundedCommandRedacting(command, name, postgresEnvironmentSecrets(environment))
 }
 
-// RunRestore renders the archive without a database connection, then sends an
-// identity guard and the complete script through one transaction and one psql
-// connection. DNS or proxy changes before that connection therefore fail at
-// the first statement instead of redirecting pg_restore after preflight.
+// RunRestore verifies and snapshots one archive, then renders it without a
+// database connection. It sends an identity guard plus the complete script
+// through one transaction and one psql connection. DNS, proxy, symlink, or
+// path changes cannot redirect either pg_restore or psql after verification.
 func (ExecCommandRunner) RunRestore(
 	ctx context.Context,
-	databaseURL string,
+	databaseEnvironment []string,
 	archivePath string,
+	expectedArchiveSHA256 string,
 	expected RestoreTargetIdentity,
 	forbidden RestoreTargetIdentity,
 ) error {
@@ -55,6 +56,11 @@ func (ExecCommandRunner) RunRestore(
 	if err != nil {
 		return err
 	}
+	archiveSnapshot, err := openVerifiedRestoreArchive(archivePath, expectedArchiveSHA256)
+	if err != nil {
+		return err
+	}
+	defer archiveSnapshot.Close()
 	script, err := os.CreateTemp(filepath.Dir(archivePath), ".supaflow-restore-*.sql")
 	if err != nil {
 		return fmt.Errorf("create private restore script: %w", err)
@@ -68,8 +74,14 @@ func (ExecCommandRunner) RunRestore(
 	}
 	defer script.Close()
 
-	render := exec.CommandContext(ctx, "pg_restore", "--no-owner", "--no-privileges", "--file=/dev/fd/3", archivePath)
-	render.ExtraFiles = []*os.File{script}
+	// pg_restore may reopen a named archive while probing its format. On
+	// descriptor filesystems such as macOS /dev/fd, reopening shares the file
+	// offset and can make the second probe miss the archive header. Supplying
+	// the verified snapshot as stdin keeps the exact descriptor binding while
+	// remaining portable across supported PostgreSQL clients.
+	render := exec.CommandContext(ctx, "pg_restore", "--no-owner", "--no-privileges", "--file=-")
+	render.Stdin = archiveSnapshot
+	render.Stdout = script
 	if err = runBoundedCommand(render, "pg_restore"); err != nil {
 		return err
 	}
@@ -84,9 +96,9 @@ func (ExecCommandRunner) RunRestore(
 	}
 
 	apply := exec.CommandContext(ctx, "psql", "--no-psqlrc", "--single-transaction", "--set=ON_ERROR_STOP=1", "--quiet")
-	apply.Env = append(os.Environ(), "PGDATABASE="+databaseURL)
+	apply.Env = postgresProcessEnvironment(databaseEnvironment)
 	apply.Stdin = io.MultiReader(strings.NewReader(guard), script)
-	return runBoundedCommand(apply, "psql")
+	return runBoundedCommandRedacting(apply, "psql", postgresEnvironmentSecrets(databaseEnvironment))
 }
 
 type restoreSQLLexState struct {
@@ -352,10 +364,19 @@ func validRestoreIdentity(value RestoreTargetIdentity) bool {
 }
 
 func runBoundedCommand(command *exec.Cmd, name string) error {
+	return runBoundedCommandRedacting(command, name, nil)
+}
+
+func runBoundedCommandRedacting(command *exec.Cmd, name string, secrets []string) error {
 	var stderr bytes.Buffer
 	command.Stderr = &limitedWriter{writer: &stderr, remaining: 4096}
 	if err := command.Run(); err != nil {
 		diagnostic := strings.TrimSpace(RedactDiagnostic(stderr.String()))
+		for _, secret := range secrets {
+			if secret != "" {
+				diagnostic = strings.ReplaceAll(diagnostic, secret, "[REDACTED]")
+			}
+		}
 		if diagnostic == "" {
 			diagnostic = "no diagnostic output"
 		}
@@ -388,33 +409,37 @@ func (b *BackupRestore) Backup(ctx context.Context, databaseURL, name string) (s
 	if err != nil || databaseURL == "" {
 		return "", ErrInvalidArgument
 	}
-	err = b.runner.Run(ctx, "pg_dump", []string{"--format=custom", "--no-owner", "--file", path}, []string{"PGDATABASE=" + databaseURL})
+	databaseEnvironment, err := postgresToolEnvironment(databaseURL)
+	if err != nil {
+		return "", ErrInvalidArgument
+	}
+	err = b.runner.Run(ctx, "pg_dump", []string{"--format=custom", "--no-owner", "--file", path}, databaseEnvironment)
 	if err != nil {
 		return "", err
 	}
 	return path, nil
 }
 
-// RestoreDrill restores only through a session bound to the verified scratch identity.
+// RestoreDrill restores only an archive bound to a trusted digest, through a
+// session bound to the verified scratch identity.
 func (b *BackupRestore) RestoreDrill(
 	ctx context.Context,
 	databaseURL string,
 	name string,
+	expectedArchiveSHA256 string,
 	expected RestoreTargetIdentity,
 	forbidden RestoreTargetIdentity,
 ) error {
 	path, err := b.artifactPath(name)
 	if err != nil || databaseURL == "" || !validRestoreIdentity(expected) ||
-		!validRestoreIdentity(forbidden) || expected == forbidden {
+		!validRestoreIdentity(forbidden) || expected == forbidden || !validArchiveSHA256(expectedArchiveSHA256) {
 		return ErrInvalidArgument
 	}
-	if _, err = os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrInvalidArgument
-		}
-		return fmt.Errorf("inspect backup artifact: %w", err)
+	databaseEnvironment, err := postgresToolEnvironment(databaseURL)
+	if err != nil {
+		return ErrInvalidArgument
 	}
-	return b.runner.RunRestore(ctx, databaseURL, path, expected, forbidden)
+	return b.runner.RunRestore(ctx, databaseEnvironment, path, expectedArchiveSHA256, expected, forbidden)
 }
 
 func (b *BackupRestore) artifactPath(name string) (string, error) {

@@ -10,5 +10,6 @@ The following artifacts are the compatibility boundary for Phase 0–4. Changes 
 - Event protocol: cursor is positive, monotonic per run, replayed strictly after `afterCursor`/`Last-Event-ID`, and committed with the state it describes.
 - Tenant model: tenant comes from an authenticated principal; all durable workflow, version, plan, run, event, output, credential, trigger and audit records carry the tenant key.
 - Stable transport: `contracts/openapi/openapi.yaml`; error codes are stable and never contain stack traces, SQL, internal addresses or secrets.
+- Shadow execution: `/shadow-runs` requires the exact reviewed stub binding for every non-pure node; each durable attempt carries its `shadow-v1:` real-or-stub executor selection.
 
 Published plans and historical events are immutable. Editor/FlowGram documents, database rows, OpenAPI DTOs and executor requests are adapter models and are converted at their boundaries rather than shared as domain state.
