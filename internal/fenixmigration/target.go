@@ -33,6 +33,7 @@ type TargetAttestation struct {
 	SchemaVersion   int
 	InstallationID  string
 	ContentHash     string
+	WorkflowCount   int
 	DefinitionCount int
 	DraftCount      int
 	TriggerCount    int
@@ -42,11 +43,17 @@ type TargetAttestation struct {
 // Target is the privileged write boundary used by the one-time migration runner.
 type Target interface {
 	EnsureTenant(context.Context, string, string) error
+	ImportWorkflow(context.Context, platformops.ImportWorkflowRequest) (bool, error)
 	ImportVersion(context.Context, string, string, uint64, workflow.WorkflowDefinition, string) (ImportedVersion, bool, error)
 	ImportDraft(context.Context, string, string, string, workflow.WorkflowDefinition, string) (bool, error)
 	ImportTrigger(context.Context, platformops.ImportTriggerRequest) (bool, error)
 	ImportRun(context.Context, platformops.ImportRunProjectionRequest) (bool, error)
 	Attest(context.Context) (TargetAttestation, error)
+}
+
+// ImportWorkflow preserves source-owned metadata before definitions create any implicit record.
+func (t *PostgresTarget) ImportWorkflow(ctx context.Context, request platformops.ImportWorkflowRequest) (bool, error) {
+	return t.admin.ImportWorkflow(ctx, request)
 }
 
 // PostgresTarget wires domain import seams to a migrated Supaflow database.
@@ -149,11 +156,12 @@ var (
 func (t *PostgresTarget) Attest(ctx context.Context) (TargetAttestation, error) {
 	var value TargetAttestation
 	err := t.pool.QueryRow(ctx, `SELECT schema_version,installation_id,content_hash,
-		definition_count,draft_count,trigger_count,run_count
-		FROM fenix_target_attestation_v1()`).Scan(
+		workflow_count,definition_count,draft_count,trigger_count,run_count
+		FROM fenix_target_attestation_v2()`).Scan(
 		&value.SchemaVersion,
 		&value.InstallationID,
 		&value.ContentHash,
+		&value.WorkflowCount,
 		&value.DefinitionCount,
 		&value.DraftCount,
 		&value.TriggerCount,
@@ -169,10 +177,10 @@ func (t *PostgresTarget) Attest(ctx context.Context) (TargetAttestation, error) 
 }
 
 func validateTargetAttestation(value TargetAttestation) error {
-	if value.SchemaVersion != 1 || !uuidPattern.MatchString(value.InstallationID) || !sha256Pattern.MatchString(value.ContentHash) {
+	if value.SchemaVersion != 2 || !uuidPattern.MatchString(value.InstallationID) || !sha256Pattern.MatchString(value.ContentHash) {
 		return errors.New("target attestation is malformed or unsupported")
 	}
-	if value.DefinitionCount < 0 || value.DraftCount < 0 || value.TriggerCount < 0 || value.RunCount < 0 {
+	if value.WorkflowCount < 0 || value.DefinitionCount < 0 || value.DraftCount < 0 || value.TriggerCount < 0 || value.RunCount < 0 {
 		return errors.New("target attestation contains a negative count")
 	}
 	return nil

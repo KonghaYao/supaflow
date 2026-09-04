@@ -175,6 +175,60 @@ func TestTriggerCapacityMigrationDefinesHardGuardsAndRetention(t *testing.T) {
 	}
 }
 
+// 验证 v2 证明保留 workflow 来源标记，并哈希迁移产生的 mutation 与 node attempt 支撑行。
+func TestFenixTargetAttestationV2CoversEveryImportedRowType(t *testing.T) {
+	contents, err := os.ReadFile("../../migrations/000024_fenix_target_attestation_v2.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"CREATE TABLE workflow_imports", "source_import_hash bytea NOT NULL",
+		"CREATE FUNCTION fenix_target_attestation_v2", "'supaflow-fenix-target-v2'",
+		"SET search_path = pg_catalog, public",
+		"'workflow', to_jsonb(workflow)", "'import', to_jsonb(marker)",
+		"'mutations', imported.mutations", "'nodeAttempts'", "FROM node_attempts attempt",
+		"VALUES ('workflow'), ('definition'), ('draft'), ('trigger'), ('run')",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("v2 attestation migration missing %q", required)
+		}
+	}
+}
+
+// 验证 Fenix cutover seal 在同一数据库事务内锁定权威根、校验完整证明并以 token 控制释放。
+func TestFenixCutoverSealMigrationDefinesAtomicWriteBarrier(t *testing.T) {
+	contents, err := os.ReadFile("../../migrations/000025_fenix_cutover_seal.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"CREATE TABLE fenix_cutover_seals", "token_hash bytea NOT NULL",
+		"CREATE FUNCTION acquire_fenix_cutover_seal_v2", "SECURITY DEFINER",
+		"LOCK TABLE public.workflows, public.workflow_imports, public.workflow_drafts, public.workflow_versions",
+		"public.execution_plans, public.definition_mutations, public.triggers",
+		"public.runs, public.run_events, public.node_states, public.node_attempts, public.node_outputs",
+		"FROM public.fenix_target_attestation_v2()", "SET search_path = pg_catalog, public",
+		"CREATE FUNCTION release_fenix_cutover_seal_v2",
+		"reject_mutation_while_fenix_cutover_sealed_v2", "BEFORE INSERT OR UPDATE OR DELETE",
+		"BEFORE TRUNCATE", "REVOKE ALL ON FUNCTION acquire_fenix_cutover_seal_v2",
+		"REVOKE ALL ON FUNCTION release_fenix_cutover_seal_v2", "FROM PUBLIC",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("cutover seal migration missing %q", required)
+		}
+	}
+	for _, table := range []string{
+		"workflows", "workflow_imports", "workflow_drafts", "workflow_versions", "execution_plans", "definition_mutations",
+		"triggers", "runs", "run_events", "node_states", "node_attempts", "node_outputs",
+	} {
+		if !strings.Contains(sql, "'"+table+"'") {
+			t.Fatalf("cutover seal migration does not guard %s", table)
+		}
+	}
+}
+
 // 验证对象上传迁移持久化 owner lease，并提供可恢复的删除中状态与有界索引。
 func TestObjectUploadIntentMigrationDefinesFencingAndDeletionRecovery(t *testing.T) {
 	contents, err := os.ReadFile("../../migrations/000020_object_upload_intents.sql")

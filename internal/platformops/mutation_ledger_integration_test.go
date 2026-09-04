@@ -74,3 +74,41 @@ func TestPostgresMutationLedgerLeaseTakeoverAndReplay(t *testing.T) {
 		t.Fatalf("audit count=%d err=%v", auditCount, err)
 	}
 }
+
+// 验证 retryable 结果立即交还 lease 且保留 operation identity，避免部分提交后的同键重试冲突。
+func TestPostgresMutationLedgerRetryPreservesOperationIdentity(t *testing.T) {
+	databaseURL := os.Getenv("SUPAFLOW_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SUPAFLOW_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	migrations, err := postgres.LoadMigrations(os.DirFS("../.."), "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = postgres.NewMigrator(pool).Up(ctx, migrations); err != nil {
+		t.Fatal(err)
+	}
+	tenantID := fmt.Sprintf("mutation_retry_%d", time.Now().UnixNano())
+	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$1)`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	ledger, _ := NewPostgresMutationLedger(pool)
+	hash := bytes.Repeat([]byte{5}, 32)
+	first, err := ledger.Claim(ctx, tenantID, "trigger.event.receive", "event-retry-key", hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = ledger.Retry(ctx, tenantID, "trigger.event.receive", "event-retry-key", first.Owner); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ledger.Claim(ctx, tenantID, "trigger.event.receive", "event-retry-key", hash)
+	if err != nil || second.Owner == first.Owner || second.OperationID != first.OperationID {
+		t.Fatalf("first=%+v second=%+v err=%v", first, second, err)
+	}
+}

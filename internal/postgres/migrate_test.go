@@ -154,6 +154,7 @@ func TestProductionMigrationsContainDurabilityConstraints(t *testing.T) {
 		"outbound_webhook_subscriptions", "outbound_webhook_receipts",
 		"webhook_resumptions", "attempt_stream_state", "attempt_stream_chunks",
 		"platform_installations",
+		"workflow_imports", "fenix_cutover_seals",
 	} {
 		if !strings.Contains(sql, "CREATE TABLE "+table) {
 			t.Errorf("missing table %s", table)
@@ -174,6 +175,7 @@ func TestProductionMigrationsContainDurabilityConstraints(t *testing.T) {
 		"ADD COLUMN deadline_at timestamptz", "runs_deadline_due_idx",
 		"fenix_target_attestation_v1", "platform_installations_immutable",
 		"JOIN node_states output_state", "'planHash', run.plan_hash",
+		"fenix_target_attestation_v2", "'nodeAttempts'", "acquire_fenix_cutover_seal_v2",
 	} {
 		if !strings.Contains(sql, contract) {
 			t.Errorf("missing SQL contract %q", contract)

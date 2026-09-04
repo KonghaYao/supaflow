@@ -3,6 +3,7 @@ package fenixmigration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 )
 
 type fakeTarget struct {
+	workflows           map[string]platformops.ImportWorkflowRequest
 	versions            map[string]ImportedVersion
 	drafts              map[string]bool
 	triggers            map[string]bool
@@ -22,7 +24,15 @@ type fakeTarget struct {
 }
 
 func newFakeTarget() *fakeTarget {
-	return &fakeTarget{versions: map[string]ImportedVersion{}, drafts: map[string]bool{}, triggers: map[string]bool{}, runs: map[string]bool{}}
+	return &fakeTarget{workflows: map[string]platformops.ImportWorkflowRequest{}, versions: map[string]ImportedVersion{}, drafts: map[string]bool{}, triggers: map[string]bool{}, runs: map[string]bool{}}
+}
+func (f *fakeTarget) ImportWorkflow(_ context.Context, request platformops.ImportWorkflowRequest) (bool, error) {
+	key := request.TenantID + "\x00" + request.WorkflowID
+	if _, ok := f.workflows[key]; ok {
+		return false, nil
+	}
+	f.workflows[key], f.writes = request, f.writes+1
+	return true, nil
 }
 func (f *fakeTarget) EnsureTenant(_ context.Context, tenantID, _ string) error {
 	f.tenantIDs = append(f.tenantIDs, tenantID)
@@ -62,9 +72,10 @@ func (f *fakeTarget) Attest(context.Context) (TargetAttestation, error) {
 		return *f.attestationOverride, nil
 	}
 	return TargetAttestation{
-		SchemaVersion:   1,
+		SchemaVersion:   2,
 		InstallationID:  "11111111-1111-4111-8111-111111111111",
 		ContentHash:     fmt.Sprintf("%064d", f.writes+1),
+		WorkflowCount:   len(f.workflows),
 		DefinitionCount: len(f.versions),
 		DraftCount:      len(f.drafts),
 		TriggerCount:    len(f.triggers),
@@ -78,7 +89,7 @@ func TestMigrateIsRestartable(t *testing.T) {
 	yaml := []byte("schema_version: '1'\nname: flow\nnodes:\n  - {id: finish, type: end}\n")
 	version := uint64(1)
 	snapshot := Snapshot{
-		Workflows: []SourceWorkflow{{ID: "flow", OrganizationID: "org", Name: "flow", Versions: []SourceVersion{{Version: 0, Status: "draft", YAML: yaml, SourceHash: "draft"}, {Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}}}},
+		Workflows: []SourceWorkflow{{ID: "flow", OrganizationID: "org", Name: "Customer onboarding", Description: "Preserved source description", Versions: []SourceVersion{{Version: 0, Status: "draft", YAML: yaml, SourceHash: "draft"}, {Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}}}},
 		Triggers:  []SourceTrigger{{ID: "trigger", OrganizationID: "org", WorkflowID: "flow", Kind: "webhook", PublicHash: "abcdefghijklmnop", Config: json.RawMessage(`{}`), Enabled: true, CreatedAt: now}},
 		Runs:      []SourceRun{{ID: "run", OrganizationID: "org", WorkflowID: "flow", Version: &version, Status: "SUCCESS", Input: json.RawMessage(`{"secret":"redact downstream"}`), Output: json.RawMessage(`{"ok":true}`), StartedAt: now, FinishedAt: now, CreatedAt: now}},
 	}
@@ -88,8 +99,11 @@ func TestMigrateIsRestartable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.CreatedDefinitions != 1 || first.CreatedDrafts != 1 || first.CreatedTriggers != 1 || first.CreatedRuns != 1 {
+	if first.CreatedWorkflows != 1 || first.CreatedDefinitions != 1 || first.CreatedDrafts != 1 || first.CreatedTriggers != 1 || first.CreatedRuns != 1 {
 		t.Fatalf("first report = %#v", first)
+	}
+	if imported := target.workflows["tenant\x00flow"]; imported.Name != "Customer onboarding" || imported.Description != "Preserved source description" {
+		t.Fatalf("workflow metadata was not preserved: %#v", imported)
 	}
 	if first.TargetInstallationID != "11111111-1111-4111-8111-111111111111" || first.TargetContentHash == "" {
 		t.Fatalf("first report has no production target attestation: %#v", first)
@@ -98,7 +112,7 @@ func TestMigrateIsRestartable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.ReplayedDefinitions != 1 || second.ReplayedDrafts != 1 || second.ReplayedTriggers != 1 || second.ReplayedRuns != 1 {
+	if second.ReplayedWorkflows != 1 || second.ReplayedDefinitions != 1 || second.ReplayedDrafts != 1 || second.ReplayedTriggers != 1 || second.ReplayedRuns != 1 {
 		t.Fatalf("second report = %#v", second)
 	}
 }
@@ -117,8 +131,8 @@ func TestMigrateRejectsWrongTargetAttestation(t *testing.T) {
 	}}}
 	target := newFakeTarget()
 	target.attestationOverride = &TargetAttestation{
-		SchemaVersion: 1, InstallationID: "22222222-2222-4222-8222-222222222222",
-		ContentHash: "a" + fmt.Sprintf("%063d", 0), DefinitionCount: 1, RunCount: 0,
+		SchemaVersion: 2, InstallationID: "22222222-2222-4222-8222-222222222222",
+		ContentHash: "a" + fmt.Sprintf("%063d", 0), WorkflowCount: 1, DefinitionCount: 1, RunCount: 0,
 	}
 	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org": "tenant"}}, target, RunOptions{ActorID: "admin"})
 	if err == nil {
@@ -133,6 +147,27 @@ func TestMigratePreflightHasNoPartialWrites(t *testing.T) {
 	_, err := Migrate(context.Background(), snapshot, Mapping{}, target, RunOptions{ActorID: "admin", DryRun: true})
 	if err == nil || target.writes != 0 {
 		t.Fatalf("err = %v, writes = %d", err, target.writes)
+	}
+}
+
+// 验证后续 workflow 元数据非法或映射后身份重复时，连租户也不会被提前写入。
+func TestMigratePreflightsAllWorkflowMetadataAndTargetIdentities(t *testing.T) {
+	yaml := []byte("schema_version: '1'\nname: flow\nnodes:\n  - {id: finish, type: end}\n")
+	snapshot := Snapshot{Workflows: []SourceWorkflow{
+		{ID: "flow", OrganizationID: "org-a", Name: "Valid", Versions: []SourceVersion{{Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}}},
+		{ID: "flow", OrganizationID: "org-b", Name: "", Versions: []SourceVersion{{Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}}},
+	}}
+	target := newFakeTarget()
+	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org-a": "tenant", "org-b": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	if err == nil {
+		t.Fatal("expected workflow metadata and target identity blockers")
+	}
+	if target.writes != 0 || len(target.tenantIDs) != 0 {
+		t.Fatalf("preflight performed writes: %#v", target)
+	}
+	var preflight *PreflightError
+	if !errors.As(err, &preflight) || len(preflight.Blockers) < 2 {
+		t.Fatalf("preflight blockers=%#v err=%v", preflight, err)
 	}
 }
 

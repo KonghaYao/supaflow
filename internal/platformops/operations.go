@@ -1,13 +1,9 @@
 package platformops
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -330,90 +326,4 @@ func (m *CapacityMonitor) Alerts(snapshot CapacitySnapshot, maxQueue, maxDLQ int
 		alerts = append(alerts, "outbox_delivery_lag")
 	}
 	return alerts
-}
-
-// CommandRunner is the process boundary for backup/restore drills.
-type CommandRunner interface {
-	Run(context.Context, string, []string, []string) error
-}
-
-// ExecCommandRunner executes PostgreSQL tools with bounded redacted diagnostics.
-type ExecCommandRunner struct{}
-
-// Run executes one fixed tool command supplied by BackupRestore.
-func (ExecCommandRunner) Run(ctx context.Context, name string, args, environment []string) error {
-	command := exec.CommandContext(ctx, name, args...)
-	command.Env = append(os.Environ(), environment...)
-	var stderr bytes.Buffer
-	command.Stderr = &limitedWriter{writer: &stderr, remaining: 4096}
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("%s failed: %s: %w", filepath.Base(name), RedactDiagnostic(stderr.String()), err)
-	}
-	return nil
-}
-
-// BackupRestore safely constructs executable PostgreSQL backup/restore drills.
-type BackupRestore struct {
-	runner CommandRunner
-	root   string
-}
-
-// NewBackupRestore restricts backup artifacts below root.
-func NewBackupRestore(root string, runner CommandRunner) (*BackupRestore, error) {
-	absolute, err := filepath.Abs(root)
-	if err != nil || root == "" || runner == nil {
-		return nil, ErrInvalidArgument
-	}
-	if err = os.MkdirAll(absolute, 0o700); err != nil {
-		return nil, fmt.Errorf("create backup root: %w", err)
-	}
-	return &BackupRestore{runner: runner, root: absolute}, nil
-}
-
-// Backup runs pg_dump in custom format with the connection secret supplied only via environment.
-func (b *BackupRestore) Backup(ctx context.Context, databaseURL, name string) (string, error) {
-	path, err := b.artifactPath(name)
-	if err != nil || databaseURL == "" {
-		return "", ErrInvalidArgument
-	}
-	err = b.runner.Run(ctx, "pg_dump", []string{"--format=custom", "--no-owner", "--file", path}, []string{"PGDATABASE=" + databaseURL})
-	if err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-// RestoreDrill restores an artifact into an explicitly supplied scratch database.
-func (b *BackupRestore) RestoreDrill(ctx context.Context, databaseURL, name string) error {
-	path, err := b.artifactPath(name)
-	if err != nil || databaseURL == "" {
-		return ErrInvalidArgument
-	}
-	return b.runner.Run(ctx, "pg_restore", []string{"--exit-on-error", "--no-owner", path}, []string{"PGDATABASE=" + databaseURL})
-}
-
-func (b *BackupRestore) artifactPath(name string) (string, error) {
-	if !objectPathPart.MatchString(name) {
-		return "", ErrInvalidArgument
-	}
-	path := filepath.Join(b.root, name)
-	if filepath.Dir(path) != b.root {
-		return "", ErrInvalidArgument
-	}
-	return path, nil
-}
-
-type limitedWriter struct {
-	writer    *bytes.Buffer
-	remaining int
-}
-
-func (w *limitedWriter) Write(value []byte) (int, error) {
-	original := len(value)
-	if len(value) > w.remaining {
-		value = value[:w.remaining]
-	}
-	_, _ = w.writer.Write(value)
-	w.remaining -= len(value)
-	return original, nil
 }

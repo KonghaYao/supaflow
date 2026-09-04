@@ -108,6 +108,18 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if operation == "trigger.event.receive" && status == http.StatusTooManyRequests {
+			if err = h.services.Mutations.Retry(requestContext, principal.TenantID, operation, key, record.Owner); err != nil {
+				respond(w, nil, err, http.StatusOK)
+				return
+			}
+			for name, values := range captured.header {
+				w.Header()[name] = append([]string(nil), values...)
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write(captured.body.Bytes())
+			return
+		}
 		if err = h.services.Mutations.Complete(requestContext, principal.TenantID, operation, key, completion); err != nil {
 			respond(w, nil, err, http.StatusOK)
 			return

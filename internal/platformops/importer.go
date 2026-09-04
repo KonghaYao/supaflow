@@ -6,8 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +17,17 @@ import (
 )
 
 var importedPublicHashPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+
+// ImportWorkflowRequest preserves the source workflow identity and user-visible metadata.
+type ImportWorkflowRequest struct {
+	TenantID         string
+	ActorID          string
+	SourceSystem     string
+	SourceWorkflowID string
+	WorkflowID       string
+	Name             string
+	Description      string
+}
 
 // ImportTriggerRequest preserves an existing external trigger identity without secret material.
 type ImportTriggerRequest struct {
@@ -73,7 +86,8 @@ type ImportRunProjectionRequest struct {
 	Events            []ImportedRunEvent
 }
 
-// AdminImporter is the privileged, idempotent Phase4 seam for trigger and terminal history import.
+// AdminImporter is the privileged, idempotent Phase4 seam for workflow metadata,
+// trigger, and terminal history import.
 // It accepts credential references only; callers must migrate secret values through CredentialService.
 type AdminImporter struct{ pool *pgxpool.Pool }
 
@@ -83,6 +97,75 @@ func NewAdminImporter(pool *pgxpool.Pool) (*AdminImporter, error) {
 		return nil, ErrInvalidArgument
 	}
 	return &AdminImporter{pool: pool}, nil
+}
+
+// ImportWorkflow creates the workflow and its immutable source fingerprint in one transaction.
+func (i *AdminImporter) ImportWorkflow(ctx context.Context, request ImportWorkflowRequest) (bool, error) {
+	if err := validateImportedWorkflow(request); err != nil {
+		return false, err
+	}
+	fingerprint := request
+	fingerprint.ActorID = ""
+	requestHash, err := canonicalImportHash(fingerprint)
+	if err != nil {
+		return false, err
+	}
+	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin workflow import: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,hashtextextended($2,0)))`, request.TenantID, request.WorkflowID); err != nil {
+		return false, fmt.Errorf("lock workflow import: %w", err)
+	}
+	var existingHash []byte
+	var existingSlug, existingName, existingDescription, existingStatus string
+	err = tx.QueryRow(ctx, `
+		SELECT marker.source_import_hash,workflow.slug,workflow.name,workflow.description,workflow.status
+		FROM workflow_imports marker
+		JOIN workflows workflow ON workflow.tenant_id=marker.tenant_id AND workflow.id=marker.workflow_id
+		WHERE marker.tenant_id=$1 AND marker.workflow_id=$2`, request.TenantID, request.WorkflowID,
+	).Scan(&existingHash, &existingSlug, &existingName, &existingDescription, &existingStatus)
+	if err == nil {
+		if subtle.ConstantTimeCompare(existingHash, requestHash[:]) != 1 || existingSlug != request.WorkflowID ||
+			existingName != request.Name || existingDescription != request.Description || existingStatus != "active" {
+			return false, ErrConflict
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit workflow import replay: %w", err)
+		}
+		return false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("read workflow import: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO workflows (id,tenant_id,slug,name,description,status,created_by)
+		VALUES ($1,$2,$1,$3,$4,'active',$5)
+		ON CONFLICT DO NOTHING`, request.WorkflowID, request.TenantID, request.Name, request.Description, request.ActorID)
+	if err != nil {
+		return false, fmt.Errorf("create imported workflow: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, ErrConflict
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO workflow_imports
+			(tenant_id,workflow_id,source_system,source_workflow_id,source_import_hash,imported_by)
+		VALUES ($1,$2,$3,$4,$5,$6)`, request.TenantID, request.WorkflowID, request.SourceSystem,
+		request.SourceWorkflowID, requestHash[:], request.ActorID); err != nil {
+		return false, fmt.Errorf("record workflow import: %w", err)
+	}
+	if _, err = insertAuditTx(ctx, tx, AuditRecord{
+		TenantID: request.TenantID, ActorID: request.ActorID, Action: "workflow.import",
+		ResourceType: "workflow", ResourceID: request.WorkflowID, Outcome: AuditAllowed,
+	}); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit workflow import: %w", err)
+	}
+	return true, nil
 }
 
 // ImportTrigger preserves trigger ID/publicHash and rejects a conflicting replay.
@@ -288,6 +371,19 @@ func validateImportedTrigger(request ImportTriggerRequest) error {
 		ScheduleInterval: request.ScheduleInterval, MisfirePolicy: request.MisfirePolicy,
 		FirstFireAt: request.NextFireAt, SigningCredentialID: request.SigningCredentialID, EventType: request.EventType,
 	})
+}
+
+func validateImportedWorkflow(request ImportWorkflowRequest) error {
+	if strings.TrimSpace(request.TenantID) == "" || strings.TrimSpace(request.ActorID) == "" ||
+		strings.TrimSpace(request.SourceSystem) == "" || strings.TrimSpace(request.SourceWorkflowID) == "" ||
+		strings.TrimSpace(request.WorkflowID) == "" || strings.TrimSpace(request.Name) == "" {
+		return ErrInvalidArgument
+	}
+	if len(request.SourceSystem) > 64 || len(request.SourceWorkflowID) > 255 || len(request.WorkflowID) > 255 ||
+		len(request.Name) > 255 || len(request.Description) > 4096 {
+		return ErrInvalidArgument
+	}
+	return nil
 }
 
 func validateImportedRun(request ImportRunProjectionRequest) error {

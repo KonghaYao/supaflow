@@ -257,6 +257,35 @@ func TestOpsMutationRejectsBodyWithValidJSONPrefixBeyondLimit(t *testing.T) {
 	}
 }
 
+// 验证事件 fanout 的可重试 429 不会写成永久完成结果，同一幂等键可在容量恢复后继续。
+func TestEventCapacityResponseReleasesMutationForImmediateRetry(t *testing.T) {
+	store := &httpTriggerStore{eventFailures: 1}
+	service, err := platformops.NewTriggerService(store, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := newHTTPMutationLedger()
+	handler := &Handler{services: Services{Triggers: service, Mutations: ledger}}
+	auth, err := api.NewAuthenticator([]api.APIKey{{Value: "api-key-at-least-24-bytes", Principal: api.Principal{
+		TenantID: "tenant_auth", ActorID: "operator", Role: api.RoleOperator,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/ops/events/document.ready", strings.NewReader(`{"eventId":"event-1","payload":{"id":1}}`))
+		request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+		request.Header.Set("Idempotency-Key", "event-capacity-retry")
+		response := httptest.NewRecorder()
+		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
+		return response
+	}
+	first, second := serve(), serve()
+	if first.Code != http.StatusTooManyRequests || second.Code != http.StatusAccepted || ledger.retries != 1 || store.eventCalls != 2 {
+		t.Fatalf("first=%d second=%d retries=%d calls=%d", first.Code, second.Code, ledger.retries, store.eventCalls)
+	}
+}
+
 // 验证 outbound webhook 管理面仅使用认证 tenant 且不接收明文 secret。
 func TestCreateOutboundWebhookSubscriptionUsesAuthenticatedTenant(t *testing.T) {
 	webhooks := &httpWebhookManager{}
@@ -282,6 +311,7 @@ type httpSecrets struct{ secret []byte }
 type httpMutationLedger struct {
 	records map[string]platformops.MutationRecord
 	hashes  map[string]string
+	retries int
 }
 
 func newHTTPMutationLedger() *httpMutationLedger {
@@ -307,6 +337,13 @@ func (l *httpMutationLedger) Complete(_ context.Context, tenant, operation, key 
 }
 
 func (l *httpMutationLedger) Renew(context.Context, string, string, string, string) error { return nil }
+func (l *httpMutationLedger) Retry(_ context.Context, tenant, operation, key, _ string) error {
+	scope := tenant + "/" + operation + "/" + key
+	delete(l.records, scope)
+	delete(l.hashes, scope)
+	l.retries++
+	return nil
+}
 
 func (s httpSecrets) ResolveTriggerSecret(context.Context, string, string) ([]byte, error) {
 	return append([]byte(nil), s.secret...), nil
@@ -316,6 +353,8 @@ type httpTriggerStore struct {
 	receivedTenant string
 	receivedBody   []byte
 	resolveErr     error
+	eventFailures  int
+	eventCalls     int
 }
 
 func (s *httpTriggerStore) CreateTrigger(context.Context, platformops.CreateTriggerRequest) (platformops.Trigger, error) {
@@ -345,7 +384,11 @@ func (s *httpTriggerStore) FireDueSchedules(context.Context, platformops.Schedul
 	return nil, nil
 }
 func (s *httpTriggerStore) FireEvent(context.Context, string, string, string, json.RawMessage, time.Time) ([]platformops.Firing, error) {
-	return nil, nil
+	s.eventCalls++
+	if s.eventCalls <= s.eventFailures {
+		return nil, platformops.ErrRateLimited
+	}
+	return []platformops.Firing{{ID: "event-firing"}}, nil
 }
 func (s *httpTriggerStore) ListTriggers(_ context.Context, request platformops.ListTriggersRequest) ([]platformops.Trigger, error) {
 	s.receivedTenant = request.TenantID

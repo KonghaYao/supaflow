@@ -131,6 +131,50 @@ func TestFireEventUsesBoundedTransactionPages(t *testing.T) {
 	}
 }
 
+// 验证分页 fanout 部分提交后遇到容量背压，同一事件重试会复用前缀并最终补齐全部 trigger。
+func TestFireEventResumesAfterPartialCapacityBackpressure(t *testing.T) {
+	ctx, pool := triggerCapacityPool(t)
+	tenantID, workflowID := seedCapacityTenant(t, ctx, pool, "event_resume")
+	admission, _ := NewAdmission(pool, time.Second)
+	if err := admission.ConfigureQuota(ctx, Quota{TenantID: tenantID, MaxActiveRuns: 10, MaxActiveWorkers: 2,
+		MaxQueueDepth: 10, MaxTriggers: 3, MaxPendingTriggerFirings: 1, MaxPendingOutboxMessages: 1}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewPostgresTriggerStore(pool)
+	service, _ := NewTriggerService(store, nil, time.Minute)
+	for index := 0; index < 3; index++ {
+		if _, err := service.Create(ctx, CreateTriggerRequest{TenantID: tenantID, ActorID: "operator",
+			WorkflowID: workflowID, Kind: TriggerEvent, Name: fmt.Sprintf("resume-%d", index), EventType: "document.ready"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := databaseClock(t, ctx, pool)
+	for expected := 1; expected <= 3; expected++ {
+		firings, err := service.ReceiveEvent(ctx, tenantID, "document.ready", "event-resume-request", json.RawMessage(`{"id":1}`), at)
+		if len(firings) != expected || (expected < 3 && !errors.Is(err, ErrRateLimited)) || (expected == 3 && err != nil) {
+			t.Fatalf("attempt=%d firings=%d err=%v", expected, len(firings), err)
+		}
+		if expected < 3 {
+			if _, err = pool.Exec(ctx, `UPDATE trigger_firings SET status='dispatched'
+				WHERE tenant_id=$1 AND deduplication_key=$2 AND status='pending'`, tenantID, "event:event-resume-request"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = pool.Exec(ctx, `UPDATE outbox_messages SET delivered_at=clock_timestamp()
+				WHERE tenant_id=$1 AND payload->>'firingId'=ANY($2)`, tenantID, firingIDs(firings)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func firingIDs(firings []Firing) []string {
+	ids := make([]string, 0, len(firings))
+	for _, firing := range firings {
+		ids = append(ids, firing.ID)
+	}
+	return ids
+}
+
 // 验证 delivered outbox 与 completed firing 仅在七天幂等窗口之后按租户有界清理。
 func TestCompletedTriggerHistoryRetentionPreservesIdempotencyWindow(t *testing.T) {
 	ctx, pool := triggerCapacityPool(t)

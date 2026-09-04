@@ -48,23 +48,30 @@ func TestVerifySeparateRestoreDatabaseAllowsDistinctDatabase(t *testing.T) {
 	}
 }
 
-// 第二次身份解析发现 target 被换回 production 时，必须在调用 pg_restore 前停止。
-func TestRunVerifiedRestoreRechecksIdentityImmediatelyBeforeRestore(t *testing.T) {
+// 攻击复现：preflight 后连接被换回 production 时，同一 restore session 的首条身份 guard 必须阻止任何归档 SQL。
+func TestRunVerifiedRestoreBindsGuardToVerifiedScratchIdentity(t *testing.T) {
 	calls := 0
 	restored := false
 	reader := func(_ context.Context, databaseURL string) (databaseIdentity, error) {
 		calls++
 		production := databaseIdentity{SystemIdentifier: "7500123456789", DatabaseOID: 16384, DatabaseName: "supaflow"}
-		if databaseURL == "production" || calls > 2 {
+		if databaseURL == "production" {
 			return production, nil
 		}
 		return databaseIdentity{SystemIdentifier: "7500123456789", DatabaseOID: 16385, DatabaseName: "restore"}, nil
 	}
-	err := runVerifiedRestore(context.Background(), "production", "scratch", reader, func() error {
+	err := runVerifiedRestore(context.Background(), "production", "scratch", reader, func(production, expectedScratch databaseIdentity) error {
+		// This models the identity observed by the third connection after a DNS or
+		// proxy switch. Production RunRestore performs this comparison in SQL
+		// before the archive, on that exact connection and transaction.
+		actualRestoreConnection := production
+		if actualRestoreConnection != expectedScratch {
+			return errors.New("restore target identity does not match verified scratch database")
+		}
 		restored = true
-		return errors.New("must not run")
+		return nil
 	})
-	if err == nil || restored || calls != 4 {
+	if err == nil || restored || calls != 2 {
 		t.Fatalf("err=%v restored=%v calls=%d", err, restored, calls)
 	}
 }

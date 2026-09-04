@@ -42,14 +42,18 @@ type Report struct {
 	TargetAttestationSchemaVersion int       `json:"targetAttestationSchemaVersion"`
 	TargetInstallationID           string    `json:"targetInstallationId"`
 	TargetContentHash              string    `json:"targetContentHash"`
+	TargetWorkflowCount            int       `json:"targetWorkflowCount"`
 	TargetDefinitionCount          int       `json:"targetDefinitionCount"`
 	TargetDraftCount               int       `json:"targetDraftCount"`
 	TargetTriggerCount             int       `json:"targetTriggerCount"`
 	TargetRunCount                 int       `json:"targetRunCount"`
+	PlannedWorkflows               int       `json:"plannedWorkflows"`
 	PlannedDefinitions             int       `json:"plannedDefinitions"`
 	PlannedDrafts                  int       `json:"plannedDrafts"`
 	PlannedTriggers                int       `json:"plannedTriggers"`
 	PlannedRuns                    int       `json:"plannedRuns"`
+	CreatedWorkflows               int       `json:"createdWorkflows"`
+	ReplayedWorkflows              int       `json:"replayedWorkflows"`
 	CreatedDefinitions             int       `json:"createdDefinitions"`
 	ReplayedDefinitions            int       `json:"replayedDefinitions"`
 	CreatedDrafts                  int       `json:"createdDrafts"`
@@ -100,6 +104,7 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 		return report, errors.New("migration actor is required")
 	}
 	prepared, blockers := preflight(snapshot, mapping)
+	report.PlannedWorkflows = len(prepared)
 	for _, item := range prepared {
 		report.PlannedDefinitions += len(item.versions)
 		if item.draft != nil {
@@ -132,6 +137,19 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 	versions := make(map[string]ImportedVersion)
 	latest := make(map[string]ImportedVersion)
 	for _, item := range prepared {
+		created, err := target.ImportWorkflow(ctx, platformops.ImportWorkflowRequest{
+			TenantID: item.tenantID, ActorID: options.ActorID, SourceSystem: "fenix",
+			SourceWorkflowID: item.source.ID, WorkflowID: item.source.ID,
+			Name: item.source.Name, Description: item.source.Description,
+		})
+		if err != nil {
+			return report, fmt.Errorf("import workflow %s metadata: %w", item.source.ID, err)
+		}
+		if created {
+			report.CreatedWorkflows++
+		} else {
+			report.ReplayedWorkflows++
+		}
 		for _, version := range item.versions {
 			key := migrationKey("version", version.organizationID, version.workflowID, fmt.Sprint(version.version.Version), version.version.SourceHash)
 			imported, created, err := target.ImportVersion(ctx, version.tenantID, version.workflowID, version.version.Version, version.definition, key)
@@ -202,7 +220,8 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 	if err := validateTargetAttestation(attestation); err != nil {
 		return report, err
 	}
-	if attestation.DefinitionCount != report.PlannedDefinitions ||
+	if attestation.WorkflowCount != report.PlannedWorkflows ||
+		attestation.DefinitionCount != report.PlannedDefinitions ||
 		attestation.DraftCount != report.PlannedDrafts ||
 		attestation.TriggerCount != report.PlannedTriggers ||
 		attestation.RunCount != report.PlannedRuns {
@@ -211,6 +230,7 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 	report.TargetAttestationSchemaVersion = attestation.SchemaVersion
 	report.TargetInstallationID = attestation.InstallationID
 	report.TargetContentHash = attestation.ContentHash
+	report.TargetWorkflowCount = attestation.WorkflowCount
 	report.TargetDefinitionCount = attestation.DefinitionCount
 	report.TargetDraftCount = attestation.DraftCount
 	report.TargetTriggerCount = attestation.TriggerCount
@@ -224,6 +244,7 @@ func preflight(snapshot Snapshot, mapping Mapping) ([]preparedWorkflow, []Workfl
 	blockers := make([]WorkflowBlocker, 0)
 	knownVersions := make(map[string]bool)
 	knownLatest := make(map[string]bool)
+	knownWorkflowTargets := make(map[string]string)
 	for _, source := range snapshot.Workflows {
 		tenantID := mapping.Tenants[source.OrganizationID]
 		if tenantID == "" {
@@ -231,6 +252,16 @@ func preflight(snapshot Snapshot, mapping Mapping) ([]preparedWorkflow, []Workfl
 			continue
 		}
 		item := preparedWorkflow{source: source, tenantID: tenantID}
+		if strings.TrimSpace(source.ID) == "" || len(source.ID) > 255 || strings.TrimSpace(source.Name) == "" ||
+			len(source.Name) > 255 || len(source.Description) > 4096 {
+			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "workflow_metadata", Message: "workflow identity, name, or description is invalid"}))
+		}
+		targetKey := workflowKey(tenantID, source.ID)
+		if previousOrganization, exists := knownWorkflowTargets[targetKey]; exists {
+			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "workflow_identity", Message: "multiple source workflows map to the same target identity as organization " + previousOrganization}))
+		} else {
+			knownWorkflowTargets[targetKey] = source.OrganizationID
+		}
 		expected := uint64(1)
 		for _, version := range source.Versions {
 			if version.Status == "published" && version.Version != expected {

@@ -37,6 +37,7 @@ type MutationCompletion struct {
 type MutationLedger interface {
 	Claim(context.Context, string, string, string, []byte) (MutationRecord, error)
 	Renew(context.Context, string, string, string, string) error
+	Retry(context.Context, string, string, string, string) error
 	Complete(context.Context, string, string, string, MutationCompletion) error
 }
 
@@ -135,6 +136,26 @@ func (l *PostgresMutationLedger) Renew(ctx context.Context, tenantID, operation,
 		tenantID, operation, key, owner, l.leaseDuration.Seconds())
 	if err != nil {
 		return fmt.Errorf("renew operation mutation: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// Retry relinquishes a live pending lease without discarding its stable
+// operation identity. This is used only when an idempotent domain operation
+// reports retryable backpressure after committing a resumable prefix.
+func (l *PostgresMutationLedger) Retry(ctx context.Context, tenantID, operation, key, owner string) error {
+	if tenantID == "" || operation == "" || !validMutationKey(key) || owner == "" {
+		return ErrInvalidArgument
+	}
+	tag, err := l.pool.Exec(ctx, `UPDATE ops_mutation_ledger
+		SET lease_expires_at=clock_timestamp(),updated_at=clock_timestamp()
+		WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3 AND status='pending'
+		  AND lease_owner=$4 AND lease_expires_at > clock_timestamp()`, tenantID, operation, key, owner)
+	if err != nil {
+		return fmt.Errorf("release retryable operation mutation: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrConflict

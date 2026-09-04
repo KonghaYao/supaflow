@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	// MaxDefinitionNodes is the hard compile-time node bound for one workflow.
-	MaxDefinitionNodes = 512
+	MaxDefinitionNodes = 1000
 	// MaxDefinitionEdges is the hard compile-time edge bound for one workflow.
 	MaxDefinitionEdges = 2048
 	// MaxNodeOutDegree bounds durable attempts emitted by one completed node.

@@ -625,6 +625,20 @@ paths:
                 payload: { type: object }
       responses:
         '202': { description: Event accepted and matching firings committed }
+        '429':
+          description: >-
+            Tenant trigger-ingress capacity is exhausted and a bounded prefix of matching
+            firings may already be committed. Retry after the `Retry-After` delay with the
+            same `Idempotency-Key` header, the same `eventId`, and the identical request
+            payload. Previously committed firings replay idempotently and fan-out resumes
+            over the remaining matching triggers.
+          headers:
+            Retry-After:
+              description: Minimum number of seconds before retrying the identical event request.
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /ops/credentials:
     servers: [{ url: / }]
     post:

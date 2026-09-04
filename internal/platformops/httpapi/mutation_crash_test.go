@@ -75,6 +75,7 @@ func (l *crashWindowLedger) Complete(context.Context, string, string, string, pl
 }
 
 func (l *crashWindowLedger) Renew(context.Context, string, string, string, string) error { return nil }
+func (l *crashWindowLedger) Retry(context.Context, string, string, string, string) error { return nil }
 
 type recoveringCredentialStore struct {
 	resources map[string]platformops.Credential

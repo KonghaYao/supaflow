@@ -56,8 +56,8 @@ func run() error {
 		if scratchURL == "" {
 			return errors.New("SUPAFLOW_RESTORE_DATABASE_URL must identify a separate scratch database")
 		}
-		return runVerifiedRestore(ctx, databaseURL, scratchURL, readPostgresDatabaseIdentity, func() error {
-			return tool.RestoreDrill(ctx, scratchURL, *artifact)
+		return runVerifiedRestore(ctx, databaseURL, scratchURL, readPostgresDatabaseIdentity, func(production, scratch databaseIdentity) error {
+			return tool.RestoreDrill(ctx, scratchURL, *artifact, scratch, production)
 		})
 	case "capacity", "alerts":
 		if strings.TrimSpace(*tenantID) == "" {

@@ -6,13 +6,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pazhou/supaflow/internal/platformops"
 )
 
-type databaseIdentity struct {
-	SystemIdentifier string
-	DatabaseOID      uint32
-	DatabaseName     string
-}
+type databaseIdentity = platformops.RestoreTargetIdentity
 
 type databaseIdentityReader func(context.Context, string) (databaseIdentity, error)
 
@@ -72,15 +69,20 @@ func runVerifiedRestore(
 	productionURL string,
 	scratchURL string,
 	readIdentity databaseIdentityReader,
-	restore func() error,
+	restore func(databaseIdentity, databaseIdentity) error,
 ) error {
-	// Resolve once during validation and once immediately before the external
-	// pg_restore connection, failing closed on DNS/alias/configuration changes.
-	if err := verifySeparateRestoreDatabase(ctx, productionURL, scratchURL, readIdentity); err != nil {
+	production, err := readIdentity(ctx, productionURL)
+	if err != nil {
 		return err
 	}
-	if err := verifySeparateRestoreDatabase(ctx, productionURL, scratchURL, readIdentity); err != nil {
+	scratch, err := readIdentity(ctx, scratchURL)
+	if err != nil {
 		return err
 	}
-	return restore()
+	if production == scratch {
+		return errors.New("SUPAFLOW_RESTORE_DATABASE_URL must identify a separate scratch database")
+	}
+	// These immutable identities are checked by the first SQL statement on the
+	// same psql connection and transaction that applies the restore archive.
+	return restore(production, scratch)
 }

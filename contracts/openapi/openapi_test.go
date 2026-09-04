@@ -159,6 +159,24 @@ func TestPlatformOperationsContracts(t *testing.T) {
 	}
 }
 
+// 验证事件 fanout 的稳定 429 契约要求同一幂等身份续传，并明确已提交前缀不会重复创建。
+func TestEventFanoutRateLimitRetryContract(t *testing.T) {
+	contents, err := os.ReadFile("openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := contractSection(t, string(contents), "  /ops/events/{eventType}:", "  /ops/credentials:")
+	for _, required := range []string{
+		"        '429':", "Retry-After:", "minimum: 1", "application/problem+json",
+		"same `Idempotency-Key`", "same `eventId`", "identical request", "Previously committed firings replay",
+		"fan-out resumes", "$ref: '#/components/schemas/Problem'",
+	} {
+		if !strings.Contains(event, required) {
+			t.Fatalf("event fanout 429 contract missing %q", required)
+		}
+	}
+}
+
 // 验证 outbound webhook 契约仅接受凭据引用并完整描述生命周期。
 func TestOutboundWebhookContracts(t *testing.T) {
 	contents, err := os.ReadFile("openapi.yaml")

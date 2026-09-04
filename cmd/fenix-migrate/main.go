@@ -97,7 +97,7 @@ func run() error {
 	if !report.SourceStable {
 		return errors.New("Fenix workflow source changed during migration; keep writes frozen and resume with the same mapping")
 	}
-	fmt.Printf("migration verified: definitions=%d drafts=%d triggers=%d terminalRuns=%d report=%s\n", report.PlannedDefinitions, report.PlannedDrafts, report.PlannedTriggers, report.PlannedRuns, options.reportPath)
+	fmt.Printf("migration verified: workflows=%d definitions=%d drafts=%d triggers=%d terminalRuns=%d report=%s\n", report.PlannedWorkflows, report.PlannedDefinitions, report.PlannedDrafts, report.PlannedTriggers, report.PlannedRuns, options.reportPath)
 	return nil
 }
 

@@ -19,11 +19,15 @@ func seedPlatformTenant(ctx context.Context, pool *pgxpool.Pool, tenantID, workf
 }
 
 func seedTriggerPublication(ctx context.Context, pool *pgxpool.Pool, tenantID, workflowID, suffix string) error {
+	return seedTriggerPublicationWithKey(ctx, pool, tenantID, workflowID, suffix, "trigger-publication-"+suffix)
+}
+
+func seedTriggerPublicationWithKey(ctx context.Context, pool *pgxpool.Pool, tenantID, workflowID, suffix, publicationKey string) error {
 	hash := sha256.Sum256([]byte("trigger-publication-" + suffix))
 	versionID, planID := "trigger_version_"+suffix, "trigger_plan_"+suffix
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow_versions
 		(id,tenant_id,workflow_id,version,publication_key,definition,definition_hash,published_by)
-		VALUES ($1,$2,$3,1,$4,'{}',$5,'integration')`, versionID, tenantID, workflowID, "trigger-publication-"+suffix, hash[:]); err != nil {
+		VALUES ($1,$2,$3,1,$4,'{}',$5,'integration')`, versionID, tenantID, workflowID, publicationKey, hash[:]); err != nil {
 		return err
 	}
 	_, err := pool.Exec(ctx, `INSERT INTO execution_plans
