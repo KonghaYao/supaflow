@@ -17,7 +17,7 @@ import (
 
 func webhookResumeFixture(t *testing.T) (http.Handler, *workflowruntime.Service, *workflowruntime.MemoryStore, *workflowruntime.ResumeTokenIssuer, workflowruntime.Interrupt) {
 	t.Helper()
-	auth, err := NewAuthenticator([]APIKey{{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "admin", Role: RoleAdmin}}})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}

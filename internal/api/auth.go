@@ -3,15 +3,20 @@ package api
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
+	"crypto/subtle"
 	"net/http"
 	"strings"
-	"time"
+	"unicode"
 
 	"github.com/pazhou/supaflow/internal/identity"
 )
 
-// Role is a tenant-scoped platform permission loaded from identity storage.
+const (
+	organizationHeader = "X-Fenix-Organization-Id"
+	maxOrganizationID  = 128
+)
+
+// Role remains an alias while handlers migrate away from Supaflow business RBAC.
 type Role = identity.Role
 
 const (
@@ -23,107 +28,88 @@ const (
 	RoleAdmin     = identity.RoleAdmin
 )
 
-// Principal is the authenticated tenant and actor injected into request context.
+// Principal is the authenticated organization context injected into requests.
 type Principal = identity.Principal
 
-// APIKey registers an opaque key without retaining it after construction.
-type APIKey struct {
-	Value     string
-	Principal Principal
-}
-
-// Authenticator resolves opaque API keys to tenant principals.
+// Authenticator validates platform master keys and injects Fenix organization scope.
 type Authenticator struct {
-	byDigest          map[[sha256.Size]byte]Principal
-	resolver          identity.Resolver
-	now               func() time.Time
+	masterKeyDigests  [][sha256.Size]byte
 	requestMiddleware func(http.Handler) http.Handler
 }
 
-// NewAuthenticator hashes configured keys so raw credentials are not retained.
-func NewAuthenticator(keys []APIKey) (*Authenticator, error) {
-	a := &Authenticator{byDigest: make(map[[sha256.Size]byte]Principal, len(keys)), now: time.Now}
+// NewMasterKeyAuthenticator stores only digests of current and optional previous keys.
+func NewMasterKeyAuthenticator(keys ...string) (*Authenticator, error) {
+	digests := make([][sha256.Size]byte, 0, len(keys))
 	for _, key := range keys {
-		if len(key.Value) < 24 || key.Principal.TenantID == "" || key.Principal.ActorID == "" {
+		if key == "" {
+			continue
+		}
+		if len([]byte(key)) < 32 {
 			return nil, errInvalidAuthConfig
 		}
-		digest := identity.DigestSecret(key.Value)
-		if _, exists := a.byDigest[digest]; exists {
-			return nil, errInvalidAuthConfig
-		}
-		a.byDigest[digest] = key.Principal
+		digests = append(digests, sha256.Sum256([]byte(key)))
 	}
-	return a, nil
-}
-
-// NewDatabaseAuthenticator creates the production authenticator backed by durable identity state.
-func NewDatabaseAuthenticator(resolver identity.Resolver) (*Authenticator, error) {
-	if resolver == nil {
+	if len(digests) == 0 {
 		return nil, errInvalidAuthConfig
 	}
-	return &Authenticator{resolver: resolver, now: time.Now}, nil
+	return &Authenticator{masterKeyDigests: digests}, nil
 }
 
-// Middleware authenticates an API key and injects its server-owned tenant.
+// Middleware validates Bearer master key before validating the organization header.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	protected := next
-	unauthorized := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeProblem(w, r, http.StatusUnauthorized, "unauthorized", "authentication required")
-	})
 	if a.requestMiddleware != nil {
 		protected = a.requestMiddleware(protected)
-		unauthorized = a.requestMiddleware(unauthorized).ServeHTTP
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		value := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if value == "" {
-			const bearer = "Bearer "
-			authorization := r.Header.Get("Authorization")
-			if strings.HasPrefix(authorization, bearer) {
-				value = strings.TrimSpace(strings.TrimPrefix(authorization, bearer))
-			}
-		}
-		principal, err := a.authenticate(r.Context(), value, r)
-		if err != nil {
-			unauthorized.ServeHTTP(w, r)
+		key, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok || !a.matches(key) {
+			writeProblem(w, r, http.StatusUnauthorized, "unauthorized", "authentication required")
 			return
 		}
-		ctx := identity.ContextWithPrincipal(r.Context(), principal)
-		protected.ServeHTTP(w, r.WithContext(ctx))
+		organizationID := r.Header.Get(organizationHeader)
+		if !validOrganizationID(organizationID) {
+			writeProblem(w, r, http.StatusBadRequest, "invalid_organization", organizationHeader+" is required and must be valid")
+			return
+		}
+		principal := Principal{TenantID: organizationID, ActorID: "fenix", Role: RoleAdmin}
+		protected.ServeHTTP(w, r.WithContext(identity.ContextWithPrincipal(r.Context(), principal)))
 	})
 }
 
-// SetRequestMiddleware configures identity-aware middleware around authentication outcomes.
-// Successful requests expose Principal in context; rejected requests remain anonymous.
-// Configure it before constructing route handlers or serving requests.
-func (a *Authenticator) SetRequestMiddleware(middleware func(http.Handler) http.Handler) {
-	a.requestMiddleware = middleware
+func bearerToken(value string) (string, bool) {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(value, prefix) {
+		return "", false
+	}
+	key := strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	return key, key != ""
 }
 
-func (a *Authenticator) authenticate(ctx context.Context, apiKey string, r *http.Request) (Principal, error) {
-	if apiKey != "" {
-		digest := identity.DigestSecret(apiKey)
-		if a.resolver != nil {
-			return a.resolver.ResolveAPIKey(ctx, digest, a.now().UTC())
+func (a *Authenticator) matches(key string) bool {
+	candidate := sha256.Sum256([]byte(key))
+	matched := 0
+	for _, expected := range a.masterKeyDigests {
+		matched |= subtle.ConstantTimeCompare(candidate[:], expected[:])
+	}
+	return matched == 1
+}
+
+func validOrganizationID(value string) bool {
+	if value == "" || len([]byte(value)) > maxOrganizationID || strings.ContainsAny(value, "/\\") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return false
 		}
-		principal, ok := a.byDigest[digest]
-		if !ok {
-			return Principal{}, identity.ErrUnauthenticated
-		}
-		return principal, nil
 	}
-	if a.resolver == nil {
-		return Principal{}, identity.ErrUnauthenticated
-	}
-	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil || strings.TrimSpace(cookie.Value) == "" {
-		return Principal{}, identity.ErrUnauthenticated
-	}
-	principal, err := a.resolver.ResolveSession(ctx, identity.DigestSecret(cookie.Value), a.now().UTC())
-	if errors.Is(err, identity.ErrUnauthenticated) {
-		return Principal{}, identity.ErrUnauthenticated
-	}
-	return principal, err
+	return true
+}
+
+// SetRequestMiddleware configures organization-aware middleware around authenticated requests.
+func (a *Authenticator) SetRequestMiddleware(middleware func(http.Handler) http.Handler) {
+	a.requestMiddleware = middleware
 }
 
 // PrincipalFromContext returns the authenticated principal.
@@ -131,5 +117,5 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return identity.PrincipalFromContext(ctx)
 }
 
-// SessionCookieName is the private cookie carrying an opaque database session credential.
+// SessionCookieName remains for the unchanged Studio/identity tables during this transition.
 const SessionCookieName = "__Host-supaflow_session"

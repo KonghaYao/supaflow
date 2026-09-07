@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	tenantAPublisherKey = "tenant-a-publisher-key-for-e2e"
+	tenantAPublisherKey = "tenant-a-publisher-master-key-for-e2e-32"
 	tenantAOperatorKey  = "tenant-a-operator-key-for-e2e"
 	tenantAApproverKey  = "tenant-a-approver-key-for-e2e"
 	tenantAViewerKey    = "tenant-a-viewer-key-for-e2e"
@@ -81,16 +81,7 @@ type sseEvent struct {
 
 func newHarness(t *testing.T) harness {
 	t.Helper()
-	authenticator, err := api.NewAuthenticator([]api.APIKey{
-		{Value: tenantAPublisherKey, Principal: api.Principal{TenantID: "tenant-a", ActorID: "publisher-a", Role: api.RolePublisher}},
-		{Value: tenantAOperatorKey, Principal: api.Principal{TenantID: "tenant-a", ActorID: "operator-a", Role: api.RoleOperator}},
-		{Value: tenantAApproverKey, Principal: api.Principal{TenantID: "tenant-a", ActorID: "approver-a", Role: api.RoleApprover}},
-		{Value: tenantAViewerKey, Principal: api.Principal{TenantID: "tenant-a", ActorID: "viewer-a", Role: api.RoleViewer}},
-		{Value: tenantBPublisherKey, Principal: api.Principal{TenantID: "tenant-b", ActorID: "publisher-b", Role: api.RolePublisher}},
-		{Value: tenantBOperatorKey, Principal: api.Principal{TenantID: "tenant-b", ActorID: "operator-b", Role: api.RoleOperator}},
-		{Value: tenantBApproverKey, Principal: api.Principal{TenantID: "tenant-b", ActorID: "approver-b", Role: api.RoleApprover}},
-		{Value: tenantBViewerKey, Principal: api.Principal{TenantID: "tenant-b", ActorID: "viewer-b", Role: api.RoleViewer}},
-	})
+	authenticator, err := api.NewMasterKeyAuthenticator(tenantAPublisherKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +132,15 @@ func approvalDefinition(id string) workflow.WorkflowDefinition {
 	}
 }
 
+func authenticatedTestRequest(request *http.Request, key string) {
+	request.Header.Set("Authorization", "Bearer "+tenantAPublisherKey)
+	organizationID := "tenant-a"
+	if strings.Contains(key, "tenant-b") {
+		organizationID = "tenant-b"
+	}
+	request.Header.Set("X-Fenix-Organization-Id", organizationID)
+}
+
 func requestJSON(t *testing.T, handler http.Handler, method, path, key, idempotencyKey string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -149,7 +149,7 @@ func requestJSON(t *testing.T, handler http.Handler, method, path, key, idempote
 	}
 	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", key)
+	authenticatedTestRequest(request, key)
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
@@ -219,7 +219,7 @@ func readSSE(t *testing.T, handler http.Handler, path, key, lastEventID string, 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	request := httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil)
-	request.Header.Set("X-API-Key", key)
+	authenticatedTestRequest(request, key)
 	if lastEventID != "" {
 		request.Header.Set("Last-Event-ID", lastEventID)
 	}
@@ -301,8 +301,8 @@ func TestApprovalWorkflowLifecycleAndSSECursor(t *testing.T) {
 	if len(interrupts) != 1 || interrupts[0].ID != suspended.Interrupt.ID || interrupts[0].RunID != run.ID || interrupts[0].NodeID != "approval" || interrupts[0].Kind != "approval" {
 		t.Fatalf("interrupts=%+v", interrupts)
 	}
-	if interrupts[0].ResumeToken != "" || strings.Contains(interruptsResponse.Body.String(), "resumeToken") {
-		t.Fatal("viewer interrupt listing exposed the approval token")
+	if interrupts[0].ResumeToken == "" {
+		t.Fatal("authenticated organization interrupt listing omitted the approval token")
 	}
 	approverInterruptsResponse := requestJSON(t, h.handler, http.MethodGet, fmt.Sprintf("/v1/runs/%s/interrupts", run.ID), tenantAApproverKey, "", nil)
 	assertPrivateNoStore(t, approverInterruptsResponse)
@@ -371,7 +371,7 @@ func assertPrivateNoStore(t *testing.T, response *httptest.ResponseRecorder) {
 	if response.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("Cache-Control=%q", response.Header().Get("Cache-Control"))
 	}
-	if response.Header().Get("Vary") != "X-API-Key" {
+	if response.Header().Get("Vary") != "X-Fenix-Organization-Id" {
 		t.Fatalf("Vary=%q", response.Header().Get("Vary"))
 	}
 }
@@ -463,15 +463,15 @@ func TestCancelRunIsIdempotentAndTerminal(t *testing.T) {
 	}
 }
 
-// 验证 RBAC 在 DTO 进入应用层前拒绝 viewer 执行发布和取消等写操作。
-func TestRBACRejectsViewerMutations(t *testing.T) {
+// 验证 Supaflow 不解释 Fenix 用户角色，组织内写操作可达且猜测的资源仍返回 404。
+func TestFenixAuthorizationBoundaryAllowsOrganizationMutations(t *testing.T) {
 	h := newHarness(t)
 	publishResponse := requestJSON(t, h.handler, http.MethodPost, "/v1/workflows/forbidden-flow/publish", tenantAViewerKey, "publish-e2e-0004", approvalDefinition("forbidden-flow"))
-	if publishResponse.Code != http.StatusForbidden {
+	if publishResponse.Code != http.StatusCreated {
 		t.Fatalf("publish status=%d body=%s", publishResponse.Code, publishResponse.Body.String())
 	}
 	cancelResponse := requestJSON(t, h.handler, http.MethodPost, "/v1/runs/guessed-run/cancel", tenantAViewerKey, "cancel-e2e-0004", map[string]any{})
-	if cancelResponse.Code != http.StatusForbidden {
+	if cancelResponse.Code != http.StatusNotFound {
 		t.Fatalf("cancel status=%d body=%s", cancelResponse.Code, cancelResponse.Body.String())
 	}
 }

@@ -2,20 +2,18 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/identity"
 	pgstore "github.com/pazhou/supaflow/internal/postgres"
 )
 
-// 验证真实 PostgreSQL + HTTP 中 DB API key/session 的租户隔离、过期和撤销契约。
+// 验证暂留 identity 表的 DB API key/session 摘要解析、过期和撤销契约。
 func TestPostgresIdentityAtHTTPBoundary(t *testing.T) {
 	databaseURL := os.Getenv("SUPAFLOW_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -59,44 +57,24 @@ func TestPostgresIdentityAtHTTPBoundary(t *testing.T) {
 	if _, err = store.CreateSession(ctx, identity.Principal{TenantID: tenantA, ActorID: userID, Role: identity.RoleAdmin}, identity.DigestSecret(rawSession), time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	authenticator, err := api.NewDatabaseAuthenticator(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var principal api.Principal
-	handler := authenticator.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		principal, _ = api.PrincipalFromContext(r.Context())
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	request := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	request.Header.Set("X-API-Key", rawKey)
-	request.Header.Set("X-Tenant-ID", tenantB)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || principal.TenantID != tenantA || principal.Role != api.RoleViewer {
-		t.Fatalf("status=%d principal=%+v", response.Code, principal)
+	principal, err := store.ResolveAPIKey(ctx, identity.DigestSecret(rawKey), time.Now())
+	if err != nil || principal.TenantID != tenantA || principal.Role != identity.RoleViewer {
+		t.Fatalf("principal=%+v err=%v", principal, err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE api_keys SET revoked_at=now() WHERE tenant_id=$1`, tenantA); err != nil {
 		t.Fatal(err)
 	}
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked key status=%d", response.Code)
+	if _, err = store.ResolveAPIKey(ctx, identity.DigestSecret(rawKey), time.Now()); !errors.Is(err, identity.ErrUnauthenticated) {
+		t.Fatalf("revoked key err=%v", err)
 	}
-	sessionRequest := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	sessionRequest.AddCookie(&http.Cookie{Name: api.SessionCookieName, Value: rawSession})
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, sessionRequest)
-	if response.Code != http.StatusNoContent || principal.ActorID != userID {
-		t.Fatalf("session status=%d principal=%+v", response.Code, principal)
+	principal, err = store.ResolveSession(ctx, identity.DigestSecret(rawSession), time.Now())
+	if err != nil || principal.ActorID != userID {
+		t.Fatalf("session principal=%+v err=%v", principal, err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE identity_sessions SET expires_at=now()-interval '1 second' WHERE tenant_id=$1`, tenantA); err != nil {
 		t.Fatal(err)
 	}
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, sessionRequest)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("expired session status=%d", response.Code)
+	if _, err = store.ResolveSession(ctx, identity.DigestSecret(rawSession), time.Now()); !errors.Is(err, identity.ErrUnauthenticated) {
+		t.Fatalf("expired session err=%v", err)
 	}
 }

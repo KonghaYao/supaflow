@@ -77,11 +77,7 @@ func TestStudioResourceLimitsReturnTooManyRequests(t *testing.T) {
 
 func studioHandler(t *testing.T) http.Handler {
 	t.Helper()
-	auth, err := NewAuthenticator([]APIKey{
-		{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "admin-a", Role: RoleAdmin}},
-		{Value: tenantBKey, Principal: Principal{TenantID: "tenant-b", ActorID: "admin-b", Role: RoleAdmin}},
-		{Value: viewerKey, Principal: Principal{TenantID: "tenant-a", ActorID: "viewer-a", Role: RoleViewer}},
-	})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +119,9 @@ func TestStudioDraftLifecycle(t *testing.T) {
 	if created.Code != http.StatusCreated || replayed.Code != http.StatusCreated || created.Body.String() != replayed.Body.String() {
 		t.Fatalf("create=%d %s replay=%d %s", created.Code, created.Body.String(), replayed.Code, replayed.Body.String())
 	}
-	forbidden := requestJSON(t, handler, http.MethodPost, "/v1/workflows", viewerKey, "draft-create-viewer", body)
-	if forbidden.Code != http.StatusForbidden {
-		t.Fatalf("viewer create status=%d", forbidden.Code)
+	duplicate := requestJSON(t, handler, http.MethodPost, "/v1/workflows", viewerKey, "draft-create-viewer", body)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("same organization duplicate create status=%d", duplicate.Code)
 	}
 	otherTenant := requestJSON(t, handler, http.MethodGet, "/v1/workflows/flow", tenantBKey, "", nil)
 	if otherTenant.Code != http.StatusNotFound {
@@ -217,7 +213,7 @@ func (s *nodeTypeProjectionStub) ListNodeTypes(context.Context) ([]workflow.Node
 
 // 验证节点发现从配置的持久化 projection 读取，而不是从 compiler 内存缓存读取。
 func TestNodeTypeDiscoveryReadsConfiguredProjection(t *testing.T) {
-	auth, err := NewAuthenticator([]APIKey{{Value: viewerKey, Principal: Principal{TenantID: "tenant-a", ActorID: "viewer-a", Role: RoleViewer}}})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}

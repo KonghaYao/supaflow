@@ -239,7 +239,7 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) interrupts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("Vary", "X-API-Key")
+	w.Header().Set("Vary", organizationHeader)
 	principal, _ := PrincipalFromContext(r.Context())
 	items, err := h.runtime.ListInterrupts(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
 	if err != nil {
@@ -293,10 +293,10 @@ func (h *Handler) resolveInterrupt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runDTO(result.Run))
 }
 
-func (h *Handler) require(required Role, next http.Handler) http.Handler {
+func (h *Handler) require(_ Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := PrincipalFromContext(r.Context())
-		if !ok || !roleAllows(principal.Role, required) {
+		if !ok || principal.TenantID == "" {
 			writeProblem(w, r, http.StatusForbidden, "forbidden", "permission denied")
 			return
 		}

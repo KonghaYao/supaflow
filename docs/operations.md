@@ -7,7 +7,7 @@ The default deterministic suite uses the real Go HTTP handler without opening
 a listener or requiring PostgreSQL. The explicit
 `TestPostgresControlPlanePressure` production profile intentionally opens a
 loopback TCP listener and requires an isolated PostgreSQL database; it crosses
-database API-key authentication, RBAC, catalog, runtime and admission instead
+master-key authentication, trusted Fenix organization scope, catalog, runtime and admission instead
 of substituting memory adapters.
 
 ## Configuration
@@ -17,14 +17,8 @@ The production processes use these environment variables:
 | Variable | Process | Required | Purpose |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | all | yes | PostgreSQL connection string. Use TLS and a least-privilege service identity outside local development. |
-| `SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED` | control plane | no | Set to `true` only during an explicit initial API-key import; disable it after the digest has been persisted. |
-| `SUPAFLOW_BOOTSTRAP_API_KEYS_JSON` | control plane | with bootstrap | One-time JSON array of initial service-account keys. Raw values are hashed before insertion and are never used by the production request path. |
-| `SUPAFLOW_OIDC_ENABLED` | control plane | no | Enables OIDC Authorization Code + PKCE login. When `true`, every OIDC variable below is validated and startup fails closed. |
-| `SUPAFLOW_OIDC_ISSUER_URL` | control plane | with OIDC | Exact HTTPS issuer used for discovery and ID-token issuer validation. |
-| `SUPAFLOW_OIDC_CLIENT_ID` | control plane | with OIDC | Registered OIDC client ID and ID-token audience. |
-| `SUPAFLOW_OIDC_CLIENT_SECRET` | control plane | provider-dependent | Client secret injected by a secret manager; may be empty for a public PKCE client if the provider allows it. |
-| `SUPAFLOW_OIDC_REDIRECT_URL` | control plane | with OIDC | Registered HTTPS callback URL ending in `/auth/oidc/callback`. |
-| `SUPAFLOW_OIDC_SUCCESS_REDIRECT` | control plane | no | Local absolute path after login; defaults to `/studio/`. |
+| `SUPAFLOW_MASTER_KEY_FILE` | control plane | yes | Read-only file containing the Fenix platform master key (at least 32 bytes). Only its SHA-256 digest is retained by the authenticator. |
+| `SUPAFLOW_PREVIOUS_MASTER_KEY_FILE` | control plane | no | Read-only previous-key file accepted only during a bounded rotation overlap. The production Compose defaults it to the current secret file when no previous key is configured. |
 | `SUPAFLOW_RESUME_TOKEN_SECRET` | all | yes | Shared HMAC secret of at least 32 bytes used to derive approval resume tokens. Every control-plane and worker replica must use the same value. |
 | `SUPAFLOW_ADDR` | control plane | no | Listen address; defaults to `127.0.0.1:8080`. |
 | `SUPAFLOW_WORKER_ID` | worker | no | Stable, unique identity for one worker process. A random ID is generated when absent; set it explicitly in production for diagnostics. Never share it between live replicas. |
@@ -57,36 +51,20 @@ The production processes use these environment variables:
 | `SUPAFLOW_SSE_POLL_MAX_MS` | control plane | no | Maximum exponential empty-stream polling delay; defaults to 2000. |
 | `SUPAFLOW_SSE_WRITE_TIMEOUT_MS` | control plane | no | Deadline for every event or heartbeat socket write; defaults to 5000 and is capped at 30000. |
 
-Authenticated HTTP telemetry is installed inside the identity boundary: successful requests use an HMAC-derived tenant hash, rejected authentication remains anonymous, and HTTP status codes drive the span/metric outcome. Public webhook telemetry starts one request span before routing, attributes it only after `publicHash` resolves to a server-owned tenant, and leaves unresolved or early-invalid requests anonymous. Raw tenant IDs, API keys, cookies, and request bodies are never attached to telemetry.
+Authenticated HTTP telemetry is installed inside the Fenix trust boundary: successful requests use an HMAC-derived organization hash, rejected authentication remains anonymous, and HTTP status codes drive the span/metric outcome. Public webhook telemetry starts one request span before routing, attributes it only after `publicHash` resolves to a server-owned organization, and leaves unresolved or early-invalid requests anonymous. Raw organization IDs, bearer master keys, and request bodies are never attached to telemetry.
 
-The explicit bootstrap JSON has this exact shape:
+Normal organization-scoped requests require `Authorization: Bearer <master-key>` and `X-Fenix-Organization-Id`. The master key authenticates the trusted Fenix backend; the organization header becomes `Principal.TenantID` and is the only request organization scope. Fenix is the only IAM and business-RBAC authority. Supaflow does not evaluate Fenix users or roles. Legacy `X-API-Key`, database API-key, bootstrap, session, and OIDC paths are not production request authentication; identity tables remain unchanged for later migration work.
 
-```json
-[
-  {
-    "key": "replace-with-at-least-24-random-bytes",
-    "tenantId": "tenant-a",
-    "actorId": "service-a",
-    "role": "admin"
-  }
-]
-```
-
-Valid roles are `viewer`, `editor`, `publisher`, `operator`, `approver`, and `admin`. A bootstrap tenant must already exist. Enable bootstrap for one controlled start, verify the service account and API-key digest, then remove `SUPAFLOW_BOOTSTRAP_API_KEYS_JSON` and disable the switch. The old `SUPAFLOW_API_KEYS_JSON` is rejected so production cannot silently fall back to a static tenant/role map.
-
-Normal requests authenticate through a database API-key digest or the `__Host-supaflow_session` HttpOnly, Secure, SameSite=Lax cookie. API-key principals are joined through an active service account and active tenant membership; sessions are joined through an active OIDC identity and membership on every request. Expiration, credential revocation, membership revocation, identity disablement, service-account disablement, and tenant suspension therefore take effect without restarting the process. Tenant and role are always read from these joins. `X-Tenant-ID`, request body fields, and OIDC profile claims cannot assign either value; the optional OIDC `tenant` query parameter only selects a membership that must already exist server-side.
-
-OIDC login is `GET /auth/oidc/start?tenant=<membership-tenant>`, with callback at `GET /auth/oidc/callback`; logout is `POST /auth/logout`. The flow uses a one-time state digest, browser-bound HttpOnly cookie, nonce digest, and S256 PKCE. Provider discovery, token endpoints, redirect URLs, ID-token signatures, issuer, audience, expiry, issued-at, nonce, and allowed algorithms are validated. Configuration or discovery errors stop startup when OIDC is enabled.
-
-Keep bootstrap keys, OIDC client secrets, and the resume-token secret in a secret manager. Do not commit them, put them in images, or log connection strings, bearer keys, cookies, authorization codes, PKCE verifiers, or raw resume tokens. Only API-key/session/state/browser/nonce digests are durable credentials; the PKCE verifier is short-lived and atomically deleted before exchange.
+Keep the current/previous master-key files, resume-token secret, credential key, and connection strings in a secret manager. Do not commit them, put them in images, or log their values or file paths. During rotation, deploy the new current file while mounting the old file as previous, update Fenix, then remove previous after the bounded overlap.
 
 For local development only:
 
 ```bash
 docker compose up -d postgres
 export DATABASE_URL='postgres://supaflow:local-development-only@127.0.0.1:55432/supaflow?sslmode=disable'
-export SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED='true'
-export SUPAFLOW_BOOTSTRAP_API_KEYS_JSON='[{"key":"local-api-key-at-least-24-bytes","tenantId":"tenant-a","actorId":"local-admin","role":"admin"}]'
+umask 077
+printf '%s\n' 'local-master-key-at-least-32-random-bytes' > /tmp/supaflow-master-key
+export SUPAFLOW_MASTER_KEY_FILE='/tmp/supaflow-master-key'
 export SUPAFLOW_RESUME_TOKEN_SECRET='local-resume-token-secret-at-least-32-bytes'
 export SUPAFLOW_CREDENTIAL_MASTER_KEY='0707070707070707070707070707070707070707070707070707070707070707'
 export SUPAFLOW_CREDENTIAL_KEY_ID='local-key-1'
@@ -226,7 +204,7 @@ go test ./tests/e2e
 go test ./tests/deployment
 ```
 
-The E2E suite covers immutable publish, tenant-scoped idempotent start replay, `Start -> Human Approval -> End`, role-gated token delivery, lost-response approval replay and conflicting-key rejection, bounded worker advancement, success, cancellation, RBAC, two-tenant run/event/interrupt isolation, and SSE continuation through `Last-Event-ID` and `afterCursor`. It uses `httptest.ResponseRecorder` and a deadline-bound request context, so it is safe in sandboxes that prohibit binding network ports.
+The E2E suite covers immutable publish, tenant-scoped idempotent start replay, `Start -> Human Approval -> End`, organization-authenticated token delivery, lost-response approval replay and conflicting-key rejection, bounded worker advancement, success, cancellation, Fenix authorization-boundary behavior, two-tenant run/event/interrupt isolation, and SSE continuation through `Last-Event-ID` and `afterCursor`. It uses `httptest.ResponseRecorder` and a deadline-bound request context, so it is safe in sandboxes that prohibit binding network ports.
 
 Run the in-process authenticated API benchmark without any browser or listening socket:
 
@@ -235,7 +213,7 @@ go test -run '^$' -bench=. -benchmem ./tests/load/...
 go test -run '^$' -bench=BenchmarkStartRunHTTP -benchmem -benchtime=10s -count=5 -cpu=1,4,8 ./tests/load/...
 ```
 
-The benchmark drives concurrent JSON requests through the actual auth, RBAC, plan resolution, idempotency, runtime service, and HTTP response path. Each start request gets a unique idempotency key. Record `ns/op`, `B/op`, and `allocs/op` with the commit, Go version, CPU count, and `-benchtime`; compare results only on equivalent machines. This benchmark intentionally uses the memory adapters to isolate API overhead. Database throughput, lock contention, connection-pool sizing, SSE connection capacity, and worker saturation require a separate staging test against PostgreSQL with production-equivalent limits.
+The benchmark drives concurrent JSON requests through the actual master-key auth, organization scope, plan resolution, idempotency, runtime service, and HTTP response path. Each start request gets a unique idempotency key. Record `ns/op`, `B/op`, and `allocs/op` with the commit, Go version, CPU count, and `-benchtime`; compare results only on equivalent machines. This benchmark intentionally uses the memory adapters to isolate API overhead. Database throughput, lock contention, connection-pool sizing, SSE connection capacity, and worker saturation require a separate staging test against PostgreSQL with production-equivalent limits.
 
 Run the real-TCP PostgreSQL contention profile separately so its 1,000
 simultaneous clients do not distort unit-test timing:
@@ -261,7 +239,7 @@ find "$SUPAFLOW_RELEASE_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
 
 The database must be disposable and isolated from development and production
 data. The test applies the immutable migration chain, creates a unique tenant,
-database API key, service account and membership, uses a 32-connection pool,
+trusted master key and organization scope, uses a 32-connection pool,
 then releases 1,000 TCP starts simultaneously. It records p50/p95/p99 request
 latency. Eight independently identified workers then issue concurrent claims while
 performing exactly 2,000 successful advances under an 8,000-call bound. The
@@ -278,8 +256,7 @@ existing object for that commit. Keep those files and their
 
 There is no in-process substitute for ingress/TLS SSE capacity or a replicated
 outbox dispatcher. On production-equivalent staging, first choose a non-terminal
-Run that will remain open for the measurement and use an API key with at least the
-operator role, then exercise bounded SSE fan-out:
+Run that will remain open for the measurement and use the staging master key and target organization ID, then exercise bounded SSE fan-out:
 
 ```bash
 set -euo pipefail
@@ -296,21 +273,22 @@ mkdir "$SSE_EVIDENCE_DIR"
 chmod 700 "$SSE_EVIDENCE_DIR"
 printf '%s\n' "$SUPAFLOW_RELEASE_COMMIT" > "$SSE_EVIDENCE_DIR/deployed-commit.txt"
 export SUPAFLOW_URL='https://supaflow.staging.example'
-export SUPAFLOW_API_KEY='staging-secret-from-vault'
+export SUPAFLOW_MASTER_KEY='staging-master-key-from-vault'
+export SUPAFLOW_ORGANIZATION_ID='org-staging'
 export SUPAFLOW_RUN_ID='run_kept_non_terminal_for_profile'
 export SSE_CLIENTS=64
 export SSE_DURATION_SECONDS=30
-curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+curl --fail --silent --show-error -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" \
   "$SUPAFLOW_URL/ops/metrics" > "$SSE_EVIDENCE_DIR/metrics-before-sse.json"
 seq "$SSE_CLIENTS" | xargs -I{} -P "$SSE_CLIENTS" sh -c '
   curl --fail --silent --show-error --no-buffer --max-time "$SSE_DURATION_SECONDS" \
-    -H "X-API-Key: $SUPAFLOW_API_KEY" -H "Accept: text/event-stream" \
+    -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" -H "Accept: text/event-stream" \
     "$SUPAFLOW_URL/v1/runs/$SUPAFLOW_RUN_ID/events?afterCursor=0" \
     > "$SSE_EVIDENCE_DIR/client-{}.log"
   status=$?
   [ "$status" -eq 0 ] || [ "$status" -eq 28 ]
 '
-curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+curl --fail --silent --show-error -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" \
   "$SUPAFLOW_URL/ops/metrics" > "$SSE_EVIDENCE_DIR/metrics-after-sse.json"
 find "$SSE_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
   | xargs -0 shasum -a 256 \
@@ -325,7 +303,8 @@ dispatcher running, prepare a JSON Run request containing a valid immutable
 set -euo pipefail
 umask 077
 : "${SUPAFLOW_URL:?run the SSE preamble or export the staging URL}"
-: "${SUPAFLOW_API_KEY:?export a staging operator API key}"
+: "${SUPAFLOW_MASTER_KEY:?export the staging master key}"
+: "${SUPAFLOW_ORGANIZATION_ID:?export the Fenix organization ID}"
 : "${SUPAFLOW_RELEASE_COMMIT:?export the exact deployed commit SHA}"
 : "${SUPAFLOW_RELEASE_EVIDENCE_DIR:?run the SSE preamble or export an evidence directory}"
 source_run_request="$SUPAFLOW_RELEASE_EVIDENCE_DIR/run-request.json"
@@ -339,22 +318,22 @@ printf '%s\n' "$OUTBOX_PROFILE_ID" > "$OUTBOX_EVIDENCE_DIR/profile-id.txt"
 printf '%s\n' "$SUPAFLOW_RELEASE_COMMIT" > "$OUTBOX_EVIDENCE_DIR/deployed-commit.txt"
 cp "$source_run_request" "$OUTBOX_EVIDENCE_DIR/run-request.json"
 export RUN_REQUEST_JSON="$OUTBOX_EVIDENCE_DIR/run-request.json"
-curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+curl --fail --silent --show-error -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" \
   "$SUPAFLOW_URL/ops/metrics" > "$OUTBOX_EVIDENCE_DIR/metrics-before-outbox.json"
 (
   for sample in $(seq 0 "$OUTBOX_OBSERVATION_SECONDS"); do
-    curl --fail --silent --show-error -H "X-API-Key: $SUPAFLOW_API_KEY" \
+    curl --fail --silent --show-error -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" \
       "$SUPAFLOW_URL/ops/metrics" \
       > "$OUTBOX_EVIDENCE_DIR/capacity-${sample}.json"
     sleep 1
   done
 ) &
 metrics_sampler_pid=$!
-export RUN_REQUEST_JSON OUTBOX_PROFILE_ID OUTBOX_EVIDENCE_DIR SUPAFLOW_URL SUPAFLOW_API_KEY
+export RUN_REQUEST_JSON OUTBOX_PROFILE_ID OUTBOX_EVIDENCE_DIR SUPAFLOW_URL SUPAFLOW_MASTER_KEY SUPAFLOW_ORGANIZATION_ID
 seq 1000 | xargs -P 64 -n 1 sh -c '
   index=$1
   http_code=$(curl --fail --silent --show-error \
-    -H "X-API-Key: $SUPAFLOW_API_KEY" \
+    -H "Authorization: Bearer $SUPAFLOW_MASTER_KEY" -H "X-Fenix-Organization-Id: $SUPAFLOW_ORGANIZATION_ID" \
     -H "Idempotency-Key: staging-outbox-$OUTBOX_PROFILE_ID-$index" \
     -H "Content-Type: application/json" --data-binary "@$RUN_REQUEST_JSON" \
     --dump-header "$OUTBOX_EVIDENCE_DIR/run-start-$index.headers" \

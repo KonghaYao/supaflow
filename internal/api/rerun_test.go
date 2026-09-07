@@ -16,10 +16,7 @@ const rerunViewerKey = "rerun-viewer-test-api-key-at-least-24-bytes"
 
 func rerunFixture(t *testing.T) (http.Handler, *runtime.Service, *runtime.MemoryStore, platform.PublishedPlan) {
 	t.Helper()
-	auth, err := NewAuthenticator([]APIKey{
-		{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "operator-a", Role: RoleOperator}},
-		{Value: rerunViewerKey, Principal: Principal{TenantID: "tenant-a", ActorID: "viewer-a", Role: RoleViewer}},
-	})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +121,7 @@ func TestRerunHTTPFromNodeAndReplay(t *testing.T) {
 	}
 }
 
-// 验证 rerun 仅允许 operator/admin，且请求体拒绝未知字段与不存在节点。
+// 验证已认证组织上下文可以 rerun，且请求体拒绝未知字段与不存在节点。
 func TestRerunHTTPAuthorizationAndStrictBody(t *testing.T) {
 	handler, service, store, published := rerunFixture(t)
 	source := terminalRunWithEndInput(t, service, store, published)
@@ -134,7 +131,7 @@ func TestRerunHTTPAuthorizationAndStrictBody(t *testing.T) {
 	missing := requestJSON(t, handler, http.MethodPost, path, tenantAKey, "missing-rerun-key", map[string]any{"fromNodeId": "missing"})
 	nullBody := requestJSON(t, handler, http.MethodPost, path, tenantAKey, "null-rerun-key", nil)
 	nullNode := requestJSON(t, handler, http.MethodPost, path, tenantAKey, "null-node-key", map[string]any{"fromNodeId": nil})
-	if denied.Code != http.StatusForbidden || unknown.Code != http.StatusBadRequest || missing.Code != http.StatusBadRequest || nullBody.Code != http.StatusBadRequest || nullNode.Code != http.StatusBadRequest {
+	if denied.Code != http.StatusAccepted || unknown.Code != http.StatusBadRequest || missing.Code != http.StatusBadRequest || nullBody.Code != http.StatusBadRequest || nullNode.Code != http.StatusBadRequest {
 		t.Fatalf("denied=%d unknown=%d missing=%d null=%d nullNode=%d", denied.Code, unknown.Code, missing.Code, nullBody.Code, nullNode.Code)
 	}
 }

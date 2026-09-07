@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,13 +24,6 @@ import (
 	"github.com/pazhou/supaflow/internal/workflow"
 	studio "github.com/pazhou/supaflow/web"
 )
-
-type keyConfig struct {
-	Key      string   `json:"key"`
-	TenantID string   `json:"tenantId"`
-	ActorID  string   `json:"actorId"`
-	Role     api.Role `json:"role"`
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -68,7 +60,7 @@ func run() error {
 	if err := pool.Ping(ctx); err != nil {
 		return fmt.Errorf("database readiness check failed: %w", err)
 	}
-	auth, identityRoutes, err := configureIdentity(ctx, pool)
+	auth, identityRoutes, err := configureIdentity()
 	if err != nil {
 		return fmt.Errorf("configure identity: %w", err)
 	}
@@ -166,37 +158,5 @@ func run() error {
 			return nil
 		}
 		return fmt.Errorf("serve HTTP: %w", err)
-	}
-}
-
-func parseAPIKeys(value string) ([]api.APIKey, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, errors.New("bootstrap API key JSON is required")
-	}
-	var configured []keyConfig
-	if err := json.Unmarshal([]byte(value), &configured); err != nil {
-		return nil, errors.New("bootstrap API key JSON is invalid")
-	}
-	keys := make([]api.APIKey, 0, len(configured))
-	for _, item := range configured {
-		if !validRole(item.Role) {
-			return nil, errors.New("every API key requires a valid role")
-		}
-		keys = append(keys, api.APIKey{Value: item.Key, Principal: api.Principal{
-			TenantID: item.TenantID, ActorID: item.ActorID, Role: item.Role,
-		}})
-	}
-	if len(keys) == 0 {
-		return nil, errors.New("at least one API key is required")
-	}
-	return keys, nil
-}
-
-func validRole(role api.Role) bool {
-	switch role {
-	case api.RoleViewer, api.RoleEditor, api.RolePublisher, api.RoleOperator, api.RoleApprover, api.RoleAdmin:
-		return true
-	default:
-		return false
 	}
 }

@@ -3,7 +3,7 @@
 Supaflow is an independently versioned Go service. It must not import Fenix packages or rely on the parent repository at runtime.
 
 - Dependency direction: transport adapters -> application/domain ports <- infrastructure adapters.
-- Tenant identity comes only from authenticated request context; request bodies never select a tenant.
+- Organization scope comes only from a Fenix backend request authenticated with the platform master key; request bodies, query parameters, and browser-provided headers never select or override it. Fenix is the sole authority for users, organization membership, and business permissions; Supaflow retains organization ownership only for storage, execution, credentials, scheduling, and audit isolation.
 - Published workflow versions and execution plans are immutable.
 - Durable state transitions use PostgreSQL transactions, expected-state checks, leases, and fencing tokens.
 - Keep protocol DTOs, domain models, and database rows separate and convert at boundaries.

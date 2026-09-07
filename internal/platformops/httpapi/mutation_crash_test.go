@@ -27,17 +27,15 @@ func TestCredentialMutationTakeoverDoesNotDuplicateCommittedResource(t *testing.
 	}
 	ledger := &crashWindowLedger{operationID: "operation_crash_window", failCompletion: true}
 	handler := &Handler{services: Services{Credentials: credentials, Mutations: ledger}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{
-		Value:     "api-key-at-least-24-bytes",
-		Principal: api.Principal{TenantID: "tenant", ActorID: "admin", Role: api.RoleAdmin},
-	}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	serve := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(
 			`{"name":"signer","purpose":"webhook_signing","secret":"value"}`))
-		request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+		request.Header.Set("X-Fenix-Organization-Id", "tenant")
 		request.Header.Set("Idempotency-Key", "credential-crash-window")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)

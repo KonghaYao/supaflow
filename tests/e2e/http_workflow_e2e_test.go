@@ -20,7 +20,7 @@ import (
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
-const httpWorkflowAdminKey = "http-workflow-admin-key-for-e2e"
+const httpWorkflowAdminKey = "http-workflow-admin-master-key-for-e2e-32"
 
 type approvalInputRecorder struct {
 	delegate workflowruntime.Executor
@@ -68,10 +68,7 @@ func TestHTTPApprovalWorkflowThroughAPIWithoutListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authenticator, err := api.NewAuthenticator([]api.APIKey{{
-		Value:     httpWorkflowAdminKey,
-		Principal: api.Principal{TenantID: "tenant-http", ActorID: "admin-http", Role: api.RoleAdmin},
-	}})
+	authenticator, err := api.NewMasterKeyAuthenticator(httpWorkflowAdminKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +217,8 @@ func httpWorkflowRequest(t *testing.T, handler http.Handler, method, path, idemp
 		}
 	}
 	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(payload))
-	request.Header.Set("X-API-Key", httpWorkflowAdminKey)
+	request.Header.Set("Authorization", "Bearer "+httpWorkflowAdminKey)
+	request.Header.Set("X-Fenix-Organization-Id", "tenant-http")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

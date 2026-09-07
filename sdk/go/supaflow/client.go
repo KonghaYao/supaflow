@@ -18,19 +18,19 @@ import (
 
 const maxResponseBody = 4 << 20
 
-// Client authenticates every request with one opaque API key. Tenant identity
-// intentionally has no client option and is always derived by the server.
+// Client authenticates every organization-scoped request with the platform master key.
 type Client struct {
-	baseURL *url.URL
-	apiKey  string
-	http    *http.Client
+	baseURL        *url.URL
+	masterKey      string
+	organizationID string
+	http           *http.Client
 }
 
-// NewClient constructs a bounded API client.
-func NewClient(baseURL, apiKey string, httpClient *http.Client) (*Client, error) {
+// NewClient constructs a bounded organization-scoped API client.
+func NewClient(baseURL, masterKey, organizationID string, httpClient *http.Client) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
-	if err != nil || !safeBaseURL(parsed) || len(strings.TrimSpace(apiKey)) < 24 {
-		return nil, errors.New("valid base URL and API key are required")
+	if err != nil || !safeBaseURL(parsed) || len([]byte(strings.TrimSpace(masterKey))) < 32 || !validOrganizationID(organizationID) {
+		return nil, errors.New("valid base URL, master key, and organization ID are required")
 	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -39,7 +39,7 @@ func NewClient(baseURL, apiKey string, httpClient *http.Client) (*Client, error)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return errors.New("supaflow: redirects are disabled")
 	}
-	return &Client{baseURL: parsed, apiKey: strings.TrimSpace(apiKey), http: &client}, nil
+	return &Client{baseURL: parsed, masterKey: strings.TrimSpace(masterKey), organizationID: organizationID, http: &client}, nil
 }
 
 // APIError is a stable RFC 9457 response from the control plane.
@@ -62,6 +62,24 @@ func safeBaseURL(parsed *url.URL) bool {
 	host := strings.Trim(strings.ToLower(parsed.Hostname()), "[]")
 	ip := net.ParseIP(host)
 	return parsed.Scheme == "http" && (host == "localhost" || ip != nil && ip.IsLoopback())
+}
+
+func validOrganizationID(value string) bool {
+	if value == "" || len([]byte(value)) > 128 || strings.ContainsAny(value, "/\\") {
+		return false
+	}
+	for _, character := range value {
+		if character <= ' ' || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) setTrustedHeaders(request *http.Request) {
+	request.Header.Del("X-API-Key")
+	request.Header.Set("Authorization", "Bearer "+c.masterKey)
+	request.Header.Set("X-Fenix-Organization-Id", c.organizationID)
 }
 
 // VersionSummary resolves a workflow version to an immutable execution plan.
@@ -254,13 +272,13 @@ func (c *Client) request(ctx context.Context, method, path, idempotencyKey strin
 		return fmt.Errorf("supaflow: create request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("X-API-Key", c.apiKey)
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
+	c.setTrustedHeaders(request)
 	response, err := c.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("supaflow: send request: %w", err)

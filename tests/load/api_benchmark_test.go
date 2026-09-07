@@ -32,10 +32,7 @@ func benchmarkDefinition() workflow.WorkflowDefinition {
 
 func benchmarkHandler(tb testing.TB) (http.Handler, platform.PublishedPlan) {
 	tb.Helper()
-	auth, err := api.NewAuthenticator([]api.APIKey{{
-		Value:     benchmarkAPIKey,
-		Principal: api.Principal{TenantID: "benchmark-tenant", ActorID: "loadtest", Role: api.RoleAdmin},
-	}})
+	auth, err := api.NewMasterKeyAuthenticator(benchmarkAPIKey)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -74,7 +71,8 @@ func BenchmarkStartRunHTTP(b *testing.B) {
 		for pb.Next() {
 			id := sequence.Add(1)
 			req := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewReader(payload))
-			req.Header.Set("X-API-Key", benchmarkAPIKey)
+			req.Header.Set("Authorization", "Bearer "+benchmarkAPIKey)
+			req.Header.Set("X-Fenix-Organization-Id", "benchmark-tenant")
 			req.Header.Set("Idempotency-Key", fmt.Sprintf("load-%016d", id))
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)

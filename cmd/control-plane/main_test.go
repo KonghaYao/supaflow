@@ -6,20 +6,7 @@ import (
 	"encoding/hex"
 	"testing"
 	"time"
-
-	"github.com/pazhou/supaflow/internal/api"
 )
-
-// 验证 API key 配置将租户和角色绑定到服务端认证主体。
-func TestParseAPIKeys(t *testing.T) {
-	keys, err := parseAPIKeys(`[{"key":"a-key-that-is-at-least-24-bytes","tenantId":"tenant-a","actorId":"service-a","role":"admin"}]`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 1 || keys[0].Principal.TenantID != "tenant-a" || keys[0].Principal.Role != api.RoleAdmin {
-		t.Fatalf("keys=%+v", keys)
-	}
-}
 
 // 验证 supervisor 生产并发与单次 delivery deadline 只能配置为正的有限值。
 func TestSupervisorConfigFromEnv(t *testing.T) {
@@ -59,12 +46,5 @@ func TestDecodeKey(t *testing.T) {
 	}
 	if _, err := decodeKey("too-short"); err == nil {
 		t.Fatal("expected invalid master key rejection")
-	}
-}
-
-// 验证空 key 列表不会启动一个绕过认证或无法使用的服务。
-func TestParseAPIKeysRejectsEmptyList(t *testing.T) {
-	if _, err := parseAPIKeys(`[]`); err == nil {
-		t.Fatal("expected empty configuration to fail")
 	}
 }

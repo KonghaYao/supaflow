@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const testKey = "sdk-test-api-key-at-least-24-bytes"
+const testKey = "sdk-test-master-key-at-least-32-bytes-long"
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -17,11 +17,29 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 
 func testClient(t *testing.T, transport roundTripFunc) *Client {
 	t.Helper()
-	client, err := NewClient("https://supaflow.test", testKey, &http.Client{Transport: transport})
+	client, err := NewClient("https://supaflow.test", testKey, "org-a", &http.Client{Transport: transport})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client
+}
+
+// 验证 SDK 最后写入可信认证与组织 header，并删除旧 X-API-Key。
+func TestClientTrustedHeadersCannotBeOverridden(t *testing.T) {
+	client := testClient(t, func(*http.Request) (*http.Response, error) {
+		return response(http.StatusOK, "application/json", `{}`), nil
+	})
+	request, err := http.NewRequest(http.MethodGet, "https://supaflow.test/v1/runs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer attacker")
+	request.Header.Set("X-Fenix-Organization-Id", "org-b")
+	request.Header.Set("X-API-Key", "legacy")
+	client.setTrustedHeaders(request)
+	if request.Header.Get("Authorization") != "Bearer "+testKey || request.Header.Get("X-Fenix-Organization-Id") != "org-a" || request.Header.Get("X-API-Key") != "" {
+		t.Fatalf("headers=%v", request.Header)
+	}
 }
 
 func response(status int, contentType, body string) *http.Response {
@@ -35,7 +53,7 @@ func response(status int, contentType, body string) *http.Response {
 // 验证版本解析请求只携带 API key，不允许 SDK 注入 tenant 身份。
 func TestResolveLatestVersionContract(t *testing.T) {
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path != "/v1/workflows/flow/versions/latest" || request.Header.Get("X-API-Key") != testKey {
+		if request.URL.Path != "/v1/workflows/flow/versions/latest" || request.Header.Get("Authorization") != "Bearer "+testKey || request.Header.Get("X-Fenix-Organization-Id") != "org-a" || request.Header.Get("X-API-Key") != "" {
 			t.Fatalf("request=%s headers=%v", request.URL, request.Header)
 		}
 		if request.Header.Get("X-Tenant-ID") != "" || request.URL.Query().Has("tenantId") {
@@ -51,17 +69,17 @@ func TestResolveLatestVersionContract(t *testing.T) {
 
 // 验证 SDK 拒绝非本机明文地址，避免 tenant API key 在传输中泄漏。
 func TestClientRejectsPlaintextRemoteBaseURL(t *testing.T) {
-	if _, err := NewClient("http://supaflow.internal", testKey, nil); err == nil {
+	if _, err := NewClient("http://supaflow.internal", testKey, "org-a", nil); err == nil {
 		t.Fatal("plaintext remote base URL unexpectedly accepted")
 	}
-	if _, err := NewClient("http://127.0.0.1:8080", testKey, nil); err != nil {
+	if _, err := NewClient("http://127.0.0.1:8080", testKey, "org-a", nil); err != nil {
 		t.Fatalf("loopback development URL rejected: %v", err)
 	}
 }
 
 // 验证 SDK 覆盖调用方 client 的 redirect 策略，禁止 X-API-Key 跟随 Location 外泄。
 func TestClientDisablesRedirects(t *testing.T) {
-	client, err := NewClient("https://supaflow.test", testKey, &http.Client{})
+	client, err := NewClient("https://supaflow.test", testKey, "org-a", &http.Client{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +107,7 @@ func TestRunControlContracts(t *testing.T) {
 	requests := 0
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
 		requests++
-		if request.Header.Get("X-API-Key") != testKey {
+		if request.Header.Get("Authorization") != "Bearer "+testKey || request.Header.Get("X-Fenix-Organization-Id") != "org-a" || request.Header.Get("X-API-Key") != "" {
 			t.Fatal("missing API key")
 		}
 		if request.Method == http.MethodPost && request.Header.Get("Idempotency-Key") == "" {

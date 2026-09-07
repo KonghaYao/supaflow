@@ -35,8 +35,8 @@ services:
     environment:
       DATABASE_URL: postgres://supaflow:${SUPAFLOW_POSTGRES_PASSWORD:?required}@postgres:5432/supaflow?sslmode=disable
       SUPAFLOW_ADDR: 0.0.0.0:8080
-      SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED: ${SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED:-false}
-      SUPAFLOW_BOOTSTRAP_API_KEYS_JSON: ${SUPAFLOW_BOOTSTRAP_API_KEYS_JSON:-}
+      SUPAFLOW_MASTER_KEY_FILE: /run/secrets/supaflow_master_key
+      SUPAFLOW_PREVIOUS_MASTER_KEY_FILE: /run/secrets/supaflow_previous_master_key
       SUPAFLOW_RESUME_TOKEN_SECRET: ${SUPAFLOW_RESUME_TOKEN_SECRET:?required}
       SUPAFLOW_CREDENTIAL_MASTER_KEY: ${SUPAFLOW_CREDENTIAL_MASTER_KEY:?required}
       SUPAFLOW_CREDENTIAL_KEY_ID: ${SUPAFLOW_CREDENTIAL_KEY_ID:?required}
@@ -50,7 +50,9 @@ services:
     ports: ["8080:8080"]
     volumes:
       - object-data:/srv/supaflow/data
-    restart: unless-stopped
+    secrets:
+      - supaflow_master_key
+      - supaflow_previous_master_key
 
   worker:
     build:
@@ -93,3 +95,10 @@ services:
 volumes:
   postgres-data:
   object-data:
+
+secrets:
+  supaflow_master_key:
+    file: ${SUPAFLOW_MASTER_KEY_FILE:?required}
+  supaflow_previous_master_key:
+    # 未轮换时默认复用 current 文件；切换窗口内指向 previous secret 文件。
+    file: ${SUPAFLOW_PREVIOUS_MASTER_KEY_FILE:-${SUPAFLOW_MASTER_KEY_FILE:?required}}

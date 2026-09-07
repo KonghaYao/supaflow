@@ -77,7 +77,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	auth, err := api.NewDatabaseAuthenticator(identityStore)
+	auth, err := api.NewMasterKeyAuthenticator(apiKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,8 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 				failures <- requestErr.Error()
 				return
 			}
-			req.Header.Set("X-API-Key", apiKey)
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("X-Fenix-Organization-Id", tenantID)
 			req.Header.Set("Idempotency-Key", fmt.Sprintf("postgres-pressure-%08d", index))
 			requestStarted := time.Now()
 			response, requestErr := client.Do(req)

@@ -35,7 +35,7 @@ func (c *Client) DownloadRunOutput(ctx context.Context, runID string, maxBytes i
 		return OutputDownload{}, fmt.Errorf("supaflow: create output request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json, application/octet-stream")
-	request.Header.Set("X-API-Key", c.apiKey)
+	c.setTrustedHeaders(request)
 	response, err := c.http.Do(request)
 	if err != nil {
 		return OutputDownload{}, fmt.Errorf("supaflow: send output request: %w", err)

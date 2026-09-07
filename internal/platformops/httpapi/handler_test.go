@@ -80,6 +80,13 @@ func (t *recordingWebhookTelemetry) StartDeferredHTTP(ctx context.Context, _ str
 }
 
 // 验证 credential 管理 API 从认证上下文取 tenant 且响应绝不回显 secret。
+const httpTestMasterKey = "platformops-test-master-key-at-least-32-bytes"
+
+func authenticatedTestRequest(request *http.Request, organizationID string) {
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", organizationID)
+}
+
 func TestCredentialRouteNeverReturnsSecret(t *testing.T) {
 	provider, err := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{9}, 32))
 	if err != nil {
@@ -91,14 +98,13 @@ func TestCredentialRouteNeverReturnsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := &Handler{services: Services{Credentials: credentials, Mutations: newHTTPMutationLedger()}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{
-		Value: "api-key-at-least-24-bytes", Principal: api.Principal{TenantID: "tenant_auth", ActorID: "admin", Role: api.RoleAdmin},
-	}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(`{"name":"signer","purpose":"webhook_signing","secret":"never-return-this"}`))
-	request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", "tenant_auth")
 	request.Header.Set("Idempotency-Key", "credential-create-1")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -113,10 +119,11 @@ func TestCredentialMutationReplaysAndRejectsFingerprintConflict(t *testing.T) {
 	store := &httpCredentialStore{}
 	credentials, _ := platformops.NewCredentialService(store, provider)
 	handler := &Handler{services: Services{Credentials: credentials, Mutations: newHTTPMutationLedger()}}
-	auth, _ := api.NewAuthenticator([]api.APIKey{{Value: "api-key-at-least-24-bytes", Principal: api.Principal{TenantID: "tenant", ActorID: "admin", Role: api.RoleAdmin}}})
+	auth, _ := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	serve := func(body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(body))
-		request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+		request.Header.Set("X-Fenix-Organization-Id", "tenant")
 		request.Header.Set("Idempotency-Key", "credential-stable-key")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -130,20 +137,17 @@ func TestCredentialMutationReplaysAndRejectsFingerprintConflict(t *testing.T) {
 	}
 }
 
-// 验证已完成的幂等响应仍按当前角色鉴权，降权用户不能借旧 key 绕过管理员权限。
+// 验证 Supaflow 不解释 Fenix 用户角色；幂等作用域仅由已认证组织上下文决定。
 func TestCredentialMutationReplayRechecksCurrentRole(t *testing.T) {
 	provider, _ := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{7}, 32))
 	store := &httpCredentialStore{}
 	credentials, _ := platformops.NewCredentialService(store, provider)
 	handler := &Handler{services: Services{Credentials: credentials, Mutations: newHTTPMutationLedger()}}
-	auth, _ := api.NewAuthenticator([]api.APIKey{
-		{Value: "admin-key-at-least-24-bytes", Principal: api.Principal{TenantID: "tenant", ActorID: "actor", Role: api.RoleAdmin}},
-		{Value: "viewer-key-at-least-24-bytes", Principal: api.Principal{TenantID: "tenant", ActorID: "actor", Role: api.RoleViewer}},
-	})
+	auth, _ := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	body := `{"name":"one","purpose":"webhook_signing","secret":"value"}`
 	serve := func(key string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(body))
-		request.Header.Set("X-API-Key", key)
+		authenticatedTestRequest(request, key)
 		request.Header.Set("Idempotency-Key", "credential-role-change")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -151,8 +155,8 @@ func TestCredentialMutationReplayRechecksCurrentRole(t *testing.T) {
 	}
 	created := serve("admin-key-at-least-24-bytes")
 	denied := serve("viewer-key-at-least-24-bytes")
-	if created.Code != http.StatusCreated || denied.Code != http.StatusForbidden ||
-		denied.Header().Get("Idempotency-Replayed") != "" || store.creates != 1 {
+	if created.Code != http.StatusCreated || denied.Code != http.StatusCreated ||
+		denied.Header().Get("Idempotency-Replayed") != "" || store.creates != 2 {
 		t.Fatalf("created=%d denied=%d replay=%q creates=%d body=%s", created.Code, denied.Code,
 			denied.Header().Get("Idempotency-Replayed"), store.creates, denied.Body.String())
 	}
@@ -212,18 +216,16 @@ func TestTriggerLifecycleUsesAuthenticatedTenantAndRequiresIdempotency(t *testin
 		t.Fatal(err)
 	}
 	handler := &Handler{services: Services{Triggers: service}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{Value: "api-key-at-least-24-bytes", Principal: api.Principal{
-		TenantID: "tenant_auth", ActorID: "operator", Role: api.RoleOperator,
-	}}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	list := httptest.NewRequest(http.MethodGet, "/ops/triggers?tenantId=attacker", nil)
-	list.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+	authenticatedTestRequest(list, "tenant_auth")
 	listResponse := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(listResponse, list)
 	create := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(`{"workflowId":"flow","kind":"api","name":"api","config":{}}`))
-	create.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+	authenticatedTestRequest(create, "tenant_auth")
 	createResponse := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(createResponse, create)
 	if listResponse.Code != http.StatusOK || store.receivedTenant != "tenant_auth" || createResponse.Code != http.StatusBadRequest {
@@ -239,16 +241,15 @@ func TestOpsMutationRejectsBodyWithValidJSONPrefixBeyondLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := &Handler{services: Services{Triggers: service, Mutations: newHTTPMutationLedger()}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{Value: "api-key-at-least-24-bytes", Principal: api.Principal{
-		TenantID: "tenant_auth", ActorID: "operator", Role: api.RoleOperator,
-	}}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	prefix := `{"workflowId":"flow","kind":"api","name":"api","config":{}}`
 	body := prefix + strings.Repeat(" ", (1<<20)-len(prefix)) + `{"ignored":true}`
 	request := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(body))
-	request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", "tenant")
 	request.Header.Set("Idempotency-Key", "oversized-trigger-body")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -266,15 +267,14 @@ func TestEventCapacityResponseReleasesMutationForImmediateRetry(t *testing.T) {
 	}
 	ledger := newHTTPMutationLedger()
 	handler := &Handler{services: Services{Triggers: service, Mutations: ledger}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{Value: "api-key-at-least-24-bytes", Principal: api.Principal{
-		TenantID: "tenant_auth", ActorID: "operator", Role: api.RoleOperator,
-	}}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	serve := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/events/document.ready", strings.NewReader(`{"eventId":"event-1","payload":{"id":1}}`))
-		request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+		request.Header.Set("X-Fenix-Organization-Id", "tenant")
 		request.Header.Set("Idempotency-Key", "event-capacity-retry")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -290,18 +290,17 @@ func TestEventCapacityResponseReleasesMutationForImmediateRetry(t *testing.T) {
 func TestCreateOutboundWebhookSubscriptionUsesAuthenticatedTenant(t *testing.T) {
 	webhooks := &httpWebhookManager{}
 	handler := &Handler{services: Services{Webhooks: webhooks, Mutations: newHTTPMutationLedger()}}
-	auth, err := api.NewAuthenticator([]api.APIKey{{
-		Value: "api-key-at-least-24-bytes", Principal: api.Principal{TenantID: "tenant-auth", ActorID: "admin", Role: api.RoleAdmin},
-	}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/ops/webhook-subscriptions", strings.NewReader(`{"name":"events","endpointUrl":"https://events.example.test/hook","eventTypes":["run.succeeded"],"signingCredentialId":"cred-1","timeoutMs":1000}`))
-	request.Header.Set("X-API-Key", "api-key-at-least-24-bytes")
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", "tenant")
 	request.Header.Set("Idempotency-Key", "subscription-create-1")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || webhooks.created.TenantID != "tenant-auth" || webhooks.created.ActorID != "admin" {
+	if response.Code != http.StatusCreated || webhooks.created.TenantID != "tenant" || webhooks.created.ActorID != "fenix" {
 		t.Fatalf("status=%d request=%+v body=%s", response.Code, webhooks.created, response.Body.String())
 	}
 }

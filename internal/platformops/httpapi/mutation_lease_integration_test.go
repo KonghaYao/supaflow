@@ -41,15 +41,15 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 			writeProblem(w, http.StatusConflict, "lease_lost")
 		}
 	}))
-	auth, err := api.NewAuthenticator([]api.APIKey{{Value: "mutation-lease-api-key-at-least-24-bytes",
-		Principal: api.Principal{TenantID: tenantID, ActorID: "admin", Role: api.RoleAdmin}}})
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	responseDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		request := httptest.NewRequest(http.MethodPost, "/ops/quotas", bytes.NewReader([]byte(`{}`)))
-		request.Header.Set("X-API-Key", "mutation-lease-api-key-at-least-24-bytes")
+		request.Header.Set("Authorization", "Bearer mutation-lease-master-key-at-least-32-bytes")
+		request.Header.Set("X-Fenix-Organization-Id", "tenant")
 		request.Header.Set("Idempotency-Key", "mutation-lease-long-handler")
 		response := httptest.NewRecorder()
 		auth.Middleware(protected).ServeHTTP(response, request)

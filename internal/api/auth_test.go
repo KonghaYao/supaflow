@@ -1,172 +1,111 @@
 package api
 
 import (
-	"context"
-	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/pazhou/supaflow/internal/identity"
 )
 
-type resolverCredential struct {
-	digest    [sha256.Size]byte
-	principal Principal
-	expiresAt time.Time
-	revoked   bool
-}
+const testMasterKey = "test-platform-master-key-at-least-32-bytes"
 
-type testIdentityResolver struct{ apiKey, session resolverCredential }
-
-func (r *testIdentityResolver) ResolveAPIKey(_ context.Context, digest [sha256.Size]byte, now time.Time) (identity.Principal, error) {
-	return resolveCredential(r.apiKey, digest, now)
-}
-func (r *testIdentityResolver) ResolveSession(_ context.Context, digest [sha256.Size]byte, now time.Time) (identity.Principal, error) {
-	return resolveCredential(r.session, digest, now)
-}
-func resolveCredential(credential resolverCredential, digest [sha256.Size]byte, now time.Time) (Principal, error) {
-	if credential.revoked || credential.digest != digest || !credential.expiresAt.After(now) {
-		return Principal{}, identity.ErrUnauthenticated
+func authenticatedRequest(organizationID string) *http.Request {
+	request := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
+	request.Header.Set("Authorization", "Bearer "+testMasterKey)
+	if organizationID != "" {
+		request.Header.Set(organizationHeader, organizationID)
 	}
-	return credential.principal, nil
+	return request
 }
 
-// 验证认证上下文只使用服务端 API key 映射的租户，忽略调用方伪造的租户头。
-func TestAuthenticatorInjectsServerOwnedTenant(t *testing.T) {
-	auth, err := NewAuthenticator([]APIKey{{
-		Value:     "test-key-at-least-24-bytes-long",
-		Principal: Principal{TenantID: "tenant-a", ActorID: "service-a", Role: RoleOperator},
-	}})
+func testAuthenticator(t *testing.T) *Authenticator {
+	t.Helper()
+	authenticator, err := NewMasterKeyAuthenticator(testMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return authenticator
+}
 
+// 验证可信 Fenix master key 与兼容非 UUID 的组织 ID 会形成组织 Principal。
+func TestAuthenticatorInjectsFenixOrganization(t *testing.T) {
+	authenticator := testAuthenticator(t)
 	var received Principal
-	handler := auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received, _ = PrincipalFromContext(r.Context())
+	handler := authenticator.Middleware(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		received, _ = PrincipalFromContext(request.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	req.Header.Set("X-API-Key", "test-key-at-least-24-bytes-long")
-	req.Header.Set("X-Tenant-ID", "tenant-b")
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-
-	if res.Code != http.StatusNoContent || received.TenantID != "tenant-a" {
-		t.Fatalf("status=%d tenant=%q", res.Code, received.TenantID)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest("org_xxx"))
+	if response.Code != http.StatusNoContent || received.TenantID != "org_xxx" {
+		t.Fatalf("status=%d tenant=%q", response.Code, received.TenantID)
 	}
 }
 
-// 验证 identity-aware middleware 在成功认证后读取 principal，供 tenant 级观测使用。
-func TestAuthenticatorRunsRequestMiddlewareWithResolvedPrincipal(t *testing.T) {
-	auth, err := NewAuthenticator([]APIKey{{
-		Value:     "test-key-at-least-24-bytes-long",
-		Principal: Principal{TenantID: "tenant-a", ActorID: "service-a", Role: RoleOperator},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	observedTenant := ""
-	auth.SetRequestMiddleware(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			principal, _ := PrincipalFromContext(r.Context())
-			observedTenant = principal.TenantID
-			next.ServeHTTP(w, r)
-		})
-	})
-	handler := auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+// 验证缺失或错误 master key 均稳定返回 401，且旧 X-API-Key 不再 fallback。
+func TestAuthenticatorRejectsMissingWrongAndLegacyKeys(t *testing.T) {
+	handler := testAuthenticator(t).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unauthenticated request reached handler")
 	}))
-	request := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	request.Header.Set("X-API-Key", "test-key-at-least-24-bytes-long")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || observedTenant != "tenant-a" {
-		t.Fatalf("status=%d tenant=%q", response.Code, observedTenant)
+	for name, request := range map[string]*http.Request{
+		"missing": httptest.NewRequest(http.MethodGet, "/v1/runs", nil),
+		"wrong":   authenticatedRequest("org-a"),
+		"legacy":  httptest.NewRequest(http.MethodGet, "/v1/runs", nil),
+	} {
+		if name == "wrong" {
+			request.Header.Set("Authorization", "Bearer wrong-platform-master-key-at-least-32")
+		}
+		if name == "legacy" {
+			request.Header.Set("X-API-Key", testMasterKey)
+			request.Header.Set(organizationHeader, "org-a")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status=%d", name, response.Code)
+		}
 	}
 }
 
-// 验证未知凭据被拒绝且不会进入业务处理器。
-func TestAuthenticatorRejectsUnknownKey(t *testing.T) {
-	auth, err := NewAuthenticator([]APIKey{{
-		Value:     "test-key-at-least-24-bytes-long",
-		Principal: Principal{TenantID: "tenant-a", ActorID: "service-a", Role: RoleOperator},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	called := false
-	handler := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-	req := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	req.Header.Set("X-API-Key", "wrong-key-at-least-24-bytes")
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-
-	if res.Code != http.StatusUnauthorized || called {
-		t.Fatalf("status=%d called=%v", res.Code, called)
-	}
-}
-
-// 验证数据库 API key 解析只注入服务端角色和租户，调用方头不能覆盖身份。
-func TestDatabaseAuthenticatorUsesResolvedAPIKeyPrincipal(t *testing.T) {
-	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
-	resolver := &testIdentityResolver{apiKey: resolverCredential{
-		digest:    identity.DigestSecret("database-api-key-at-least-24-bytes"),
-		principal: Principal{TenantID: "tenant-a", ActorID: "service-a", Role: RoleViewer}, expiresAt: now.Add(time.Hour),
-	}}
-	auth, err := NewDatabaseAuthenticator(resolver)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auth.now = func() time.Time { return now }
-	var received Principal
-	handler := auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received, _ = PrincipalFromContext(r.Context())
-		w.WriteHeader(http.StatusNoContent)
+// 验证已认证请求缺失或携带非法组织 header 时稳定返回 400。
+func TestAuthenticatorRejectsInvalidOrganization(t *testing.T) {
+	handler := testAuthenticator(t).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("invalid organization reached handler")
 	}))
-	request := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	request.Header.Set("X-API-Key", "database-api-key-at-least-24-bytes")
-	request.Header.Set("X-Tenant-ID", "tenant-b")
-	request.Header.Set("X-Role", "admin")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || received.TenantID != "tenant-a" || received.Role != RoleViewer {
-		t.Fatalf("status=%d principal=%+v", response.Code, received)
+	invalid := []string{"", "org/a", `org\\a`, "org a", "org\ncontrol", strings.Repeat("a", maxOrganizationID+1)}
+	for _, organizationID := range invalid {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, authenticatedRequest(organizationID))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("organization=%q status=%d", organizationID, response.Code)
+		}
 	}
 }
 
-// 验证 HttpOnly session 可认证，而过期或撤销的 session 在 API 边界统一拒绝。
-func TestDatabaseAuthenticatorRejectsExpiredAndRevokedSessions(t *testing.T) {
-	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
-	credential := resolverCredential{digest: identity.DigestSecret("opaque-session"), principal: Principal{TenantID: "tenant-a", ActorID: "user-a", Role: RoleAdmin}, expiresAt: now.Add(time.Minute)}
-	resolver := &testIdentityResolver{session: credential}
-	auth, err := NewDatabaseAuthenticator(resolver)
+// 验证 current/previous 重叠轮换期间两把 master key 均可认证。
+func TestAuthenticatorAcceptsCurrentAndPreviousKeys(t *testing.T) {
+	previous := "previous-platform-master-key-at-least-32-bytes"
+	authenticator, err := NewMasterKeyAuthenticator(testMasterKey, previous)
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth.now = func() time.Time { return now }
-	handler := auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-	request := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
-	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "opaque-session", HttpOnly: true})
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("live session status=%d", response.Code)
+	handler := authenticator.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for _, key := range []string{testMasterKey, previous} {
+		request := authenticatedRequest("org-a")
+		request.Header.Set("Authorization", "Bearer "+key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status=%d", response.Code)
+		}
 	}
-	resolver.session.revoked = true
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked session status=%d", response.Code)
-	}
-	resolver.session.revoked = false
-	auth.now = func() time.Time { return now.Add(2 * time.Minute) }
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("expired session status=%d", response.Code)
+}
+
+// 验证 master key 配置至少包含 32 字节且错误不会回显 secret。
+func TestAuthenticatorValidatesAndRedactsMasterKey(t *testing.T) {
+	secret := "short-secret"
+	_, err := NewMasterKeyAuthenticator(secret)
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("err=%v", err)
 	}
 }

@@ -13,7 +13,7 @@ import (
 
 func studioAPIHandler(t *testing.T, assets fs.FS) http.Handler {
 	t.Helper()
-	auth, err := NewAuthenticator([]APIKey{{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "actor-a", Role: RoleAdmin}}})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}

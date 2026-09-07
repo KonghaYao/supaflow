@@ -55,10 +55,7 @@ func TestRunOutputDownloadIsTenantScopedAndAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, _ := NewAuthenticator([]APIKey{
-		{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "actor-a", Role: RoleAdmin}},
-		{Value: tenantBKey, Principal: Principal{TenantID: "tenant-b", ActorID: "actor-b", Role: RoleAdmin}},
-	})
+	auth, _ := NewMasterKeyAuthenticator(tenantAKey)
 	resume, _ := runtime.NewResumeTokenIssuer([]byte("test-resume-token-secret-32-bytes!"))
 	catalog := platform.NewMemoryCatalog(workflow.BuiltinRegistry(), workflow.CompilePolicy{})
 	handler, _ := NewHandler(service, catalog, auth, resume)
@@ -68,7 +65,7 @@ func TestRunOutputDownloadIsTenantScopedAndAudited(t *testing.T) {
 		ContentType: "application/json", Size: int64(len(value)), SHA256: hex.EncodeToString(digest[:]), Status: "active"}})
 	request := func(key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/v1/runs/"+started.Run.ID+"/output", nil)
-		req.Header.Set("X-API-Key", key)
+		authenticatedTestRequest(req, key)
 		res := httptest.NewRecorder()
 		handler.Routes().ServeHTTP(res, req)
 		return res

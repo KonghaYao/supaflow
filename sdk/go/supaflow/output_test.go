@@ -15,7 +15,7 @@ func TestDownloadRunOutputVerifiesBoundedStream(t *testing.T) {
 	value := []byte(`{"answer":42}`)
 	digest := sha256.Sum256(value)
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.EscapedPath() != "/v1/runs/run%2F1/output" || request.Header.Get("X-API-Key") == "" {
+		if request.URL.EscapedPath() != "/v1/runs/run%2F1/output" || request.Header.Get("Authorization") != "Bearer "+testKey || request.Header.Get("X-Fenix-Organization-Id") != "org-a" || request.Header.Get("X-API-Key") != "" {
 			t.Fatalf("request=%s headers=%v", request.URL, request.Header)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{

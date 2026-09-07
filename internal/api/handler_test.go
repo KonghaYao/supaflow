@@ -22,10 +22,7 @@ const (
 
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
-	auth, err := NewAuthenticator([]APIKey{
-		{Value: tenantAKey, Principal: Principal{TenantID: "tenant-a", ActorID: "actor-a", Role: RoleAdmin}},
-		{Value: tenantBKey, Principal: Principal{TenantID: "tenant-b", ActorID: "actor-b", Role: RoleAdmin}},
-	})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +54,18 @@ func minimalDefinition(id string) workflow.WorkflowDefinition {
 	}
 }
 
+func testOrganization(key string) string {
+	if key == tenantBKey {
+		return "tenant-b"
+	}
+	return "tenant-a"
+}
+
+func authenticatedTestRequest(request *http.Request, key string) {
+	request.Header.Set("Authorization", "Bearer "+tenantAKey)
+	request.Header.Set(organizationHeader, testOrganization(key))
+}
+
 func requestJSON(t *testing.T, handler http.Handler, method, path, key, idempotency string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -65,7 +74,7 @@ func requestJSON(t *testing.T, handler http.Handler, method, path, key, idempote
 	}
 	req := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(payload))
 	if key != "" {
-		req.Header.Set("X-API-Key", key)
+		authenticatedTestRequest(req, key)
 	}
 	if idempotency != "" {
 		req.Header.Set("Idempotency-Key", idempotency)
@@ -93,9 +102,7 @@ func TestAuthenticatedResponsesArePrivateAndNotStored(t *testing.T) {
 
 // 验证依赖不可用时 readiness 失败且不泄露底层错误。
 func TestReadinessReportsDependencyFailure(t *testing.T) {
-	auth, err := NewAuthenticator([]APIKey{{Value: tenantAKey, Principal: Principal{
-		TenantID: "tenant-a", ActorID: "actor-a", Role: RoleAdmin,
-	}}})
+	auth, err := NewMasterKeyAuthenticator(tenantAKey)
 	if err != nil {
 		t.Fatal(err)
 	}

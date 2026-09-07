@@ -25,7 +25,7 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, afterCursor uin
 		return fmt.Errorf("supaflow: create event request: %w", err)
 	}
 	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("X-API-Key", c.apiKey)
+	c.setTrustedHeaders(request)
 	response, err := c.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("supaflow: open event stream: %w", err)
