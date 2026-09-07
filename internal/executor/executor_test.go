@@ -57,7 +57,7 @@ func TestPlanExecutorStartHTTPApprovalEnd(t *testing.T) {
 	}
 	planRef := workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash}
 	request := workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: planRef, NodeID: "begin",
+		OrganizationID: "organization_a", RunID: "run_1", Plan: planRef, NodeID: "begin",
 		AttemptID: "attempt_1", Attempt: 1, Executor: "builtin.start", Input: json.RawMessage(`{"order":42}`), FencingToken: 1,
 	}
 
@@ -117,7 +117,7 @@ func TestPlanExecutorRejectsCredentialOverPlaintextHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "request", AttemptID: "attempt_1", Attempt: 1, Executor: "http.request", Input: json.RawMessage(`{}`), FencingToken: 1,
 	})
 	assertExecutionError(t, err, "plaintext_credential", false)
@@ -149,7 +149,7 @@ func TestPlanExecutorApprovalRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "approval", AttemptID: "attempt_1", Attempt: 1, Executor: "builtin.human-approval",
 		Input: json.RawMessage(`{"message":"ready"}`), ResumeData: json.RawMessage(`{"approved":false,"decidedBy":"user_1"}`), FencingToken: 1,
 	})
@@ -164,12 +164,12 @@ func TestPlanExecutorRejectsBindingMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "untrusted.executor", Input: json.RawMessage(`null`), FencingToken: 1,
 	})
 	assertExecutionError(t, err, "executor_binding_mismatch", false)
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_2", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_2", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "request", AttemptID: "attempt_2", Executor: "shadow-v1:http.request", Input: json.RawMessage(`null`), FencingToken: 1,
 	})
 	assertExecutionError(t, err, "executor_binding_mismatch", false)
@@ -195,7 +195,7 @@ func TestPlanExecutorShadowModeStubsSideEffectsDurably(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_shadow", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_shadow", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Attempt: 1, Executor: "shadow-v1:builtin.start",
 		Input: json.RawMessage(`{"secret":"must-not-copy"}`), FencingToken: 1,
 	}
@@ -238,7 +238,7 @@ func TestPlanExecutorAuthorizesPinnedNodeCredentialsBeforeExecution(t *testing.T
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "request", AttemptID: "attempt_1", Attempt: 1, Executor: "http.request", Input: json.RawMessage(`{}`), FencingToken: 7,
 	})
 	if !called {
@@ -259,7 +259,7 @@ func TestPlanExecutorResolvesSuccessorBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "builtin.start", Input: json.RawMessage(`{"original":true}`), FencingToken: 1,
 	})
 	if err != nil || len(result.Next) != 1 || string(result.Next[0].Input) != `{"fixed":true}` {
@@ -276,7 +276,7 @@ func TestPlanExecutorResolvesSuccessorBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_2", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_2", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_2", Executor: "builtin.start", Input: json.RawMessage(`{"original":true}`), FencingToken: 1,
 	})
 	if err != nil || len(result.Next) != 1 || string(result.Next[0].Input) != `{"original":true}` {
@@ -320,7 +320,7 @@ func TestPlanExecutorDescribesNonLinearPlans(t *testing.T) {
 				t.Fatal(err)
 			}
 			result, err := executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-				TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+				OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 				NodeID: "begin", AttemptID: "attempt_1", Executor: "builtin.start", Input: json.RawMessage(`null`), FencingToken: 1,
 			})
 			if err != nil || len(result.Next) != 2 {
@@ -346,7 +346,7 @@ func publishPlan(t *testing.T, definition workflow.WorkflowDefinition) published
 		AllowedCapabilities: workflow.CapabilitySet{Streaming: true, Cancellable: true, Interruptible: true, Idempotent: true},
 		AllowedPermissions:  workflow.PermissionSet{Network: true, Credentials: true},
 	})
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", definition.ID, definition, "publication_1")
+	published, _, err := catalog.Publish(context.Background(), "organization_a", definition.ID, definition, "publication_1")
 	if err != nil {
 		t.Fatal(err)
 	}

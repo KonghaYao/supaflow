@@ -64,20 +64,20 @@ func TestEinoRegistryContract(t *testing.T) {
 	if err := registry.RegisterModel("chat", chatModel); err != nil {
 		t.Fatal(err)
 	}
-	output, err := registry.Generate(context.Background(), AttemptScope{TenantID: "tenant", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "chat", "system", json.RawMessage(`{"prompt":"hi"}`))
+	output, err := registry.Generate(context.Background(), AttemptScope{OrganizationID: "organization", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "chat", "system", json.RawMessage(`{"prompt":"hi"}`))
 	if err != nil || len(chatModel.input) != 2 || chatModel.input[0].Role != schema.System || !json.Valid(output) {
 		t.Fatalf("model output=%s input=%+v err=%v", output, chatModel.input, err)
 	}
 	if err = registry.RegisterTool("echo", proofTool{}); err != nil {
 		t.Fatal(err)
 	}
-	output, err = registry.Invoke(context.Background(), AttemptScope{TenantID: "tenant", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "echo", json.RawMessage(`{"value":1}`))
+	output, err = registry.Invoke(context.Background(), AttemptScope{OrganizationID: "organization", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "echo", json.RawMessage(`{"value":1}`))
 	if err != nil || string(output) != `{"value":1}` {
 		t.Fatalf("tool output=%s err=%v", output, err)
 	}
 }
 
-// 验证生产 provider 模板按 tenant/attempt grant 动态取密钥，且取消时不伪造模型成功。
+// 验证生产 provider 模板按 organization/attempt grant 动态取密钥，且取消时不伪造模型成功。
 func TestEinoProviderUsesAttemptScopedCredential(t *testing.T) {
 	credentials := &proofProviderCredentials{}
 	registry, err := NewCredentialEinoRegistry(credentials)
@@ -91,8 +91,8 @@ func TestEinoProviderUsesAttemptScopedCredential(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = registry.Generate(ctx, AttemptScope{TenantID: "tenant", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "chat", "", json.RawMessage(`"hello"`))
-	if err == nil || credentials.tenant != "tenant" || credentials.attempt != "attempt" || credentials.reference != "credential" {
+	_, err = registry.Generate(ctx, AttemptScope{OrganizationID: "organization", RunID: "run", AttemptID: "attempt", FencingToken: 1}, "chat", "", json.RawMessage(`"hello"`))
+	if err == nil || credentials.organization != "organization" || credentials.attempt != "attempt" || credentials.reference != "credential" {
 		t.Fatalf("credential scope = %+v, err = %v", credentials, err)
 	}
 }
@@ -176,13 +176,13 @@ func (*proofChatModel) Stream(context.Context, []*schema.Message, ...model.Optio
 type proofTool struct{}
 
 type proofProviderCredentials struct {
-	tenant    workflowruntime.TenantID
-	attempt   string
-	reference string
+	organization workflowruntime.OrganizationID
+	attempt      string
+	reference    string
 }
 
 func (r *proofProviderCredentials) ResolveProviderCredential(_ context.Context, scope AttemptScope, reference string) ([]byte, error) {
-	r.tenant, r.attempt, r.reference = scope.TenantID, scope.AttemptID, reference
+	r.organization, r.attempt, r.reference = scope.OrganizationID, scope.AttemptID, reference
 	return []byte("provider-key"), nil
 }
 

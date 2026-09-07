@@ -20,13 +20,13 @@ type recordingOutputManager struct {
 	blockDiscard bool
 }
 
-func (m *recordingOutputManager) StoreOutput(_ context.Context, _ workflowruntime.TenantID, _, _ string, value []byte) (ExternalOutput, error) {
+func (m *recordingOutputManager) StoreOutput(_ context.Context, _ workflowruntime.OrganizationID, _, _ string, value []byte) (ExternalOutput, error) {
 	m.stored = append([]byte(nil), value...)
 	digest := sha256.Sum256(value)
 	return ExternalOutput{ObjectRef: "obj_safe_reference", Size: int64(len(value)), SHA256: hex.EncodeToString(digest[:])}, nil
 }
 
-func (m *recordingOutputManager) DiscardOutput(ctx context.Context, _ workflowruntime.TenantID, objectRef string) error {
+func (m *recordingOutputManager) DiscardOutput(ctx context.Context, _ workflowruntime.OrganizationID, objectRef string) error {
 	if m.blockDiscard {
 		<-ctx.Done()
 		return ctx.Err()
@@ -35,7 +35,7 @@ func (m *recordingOutputManager) DiscardOutput(ctx context.Context, _ workflowru
 	return nil
 }
 
-func (m *recordingOutputManager) ReadRunOutput(_ context.Context, _ workflowruntime.TenantID, _ string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
+func (m *recordingOutputManager) ReadRunOutput(_ context.Context, _ workflowruntime.OrganizationID, _ string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), expected.Inline...), nil
 }
 
@@ -49,7 +49,7 @@ func TestPlanExecutorExternalizesOversizedOutput(t *testing.T) {
 	}
 	input := json.RawMessage(`"` + strings.Repeat("x", (1<<20)+1) + `"`)
 	result, err := executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "builtin.start", Input: input, FencingToken: 1,
 	})
 	if err != nil {
@@ -74,7 +74,7 @@ func TestPlanExecutorExternalizesSensitiveOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "builtin.start", Input: json.RawMessage(`{"secret":"value"}`), FencingToken: 1,
 	})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestPlanExecutorFailsClosedWithoutExternalOutputStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "begin", AttemptID: "attempt_1", Executor: "builtin.start", Input: json.RawMessage(`{"secret":"value"}`), FencingToken: 1,
 	})
 	assertExecutionError(t, err, "sensitive_output_unavailable", false)
@@ -138,7 +138,7 @@ func TestPlanExecutorSuppressesSensitiveStreamChunks(t *testing.T) {
 	}
 	emitted := 0
 	result, err := executor.ExecuteStream(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "model", AttemptID: "attempt_1", Executor: "eino.llm", Input: json.RawMessage(`{"prompt":"hello"}`), FencingToken: 1,
 	}, func(json.RawMessage) error {
 		emitted++
@@ -159,7 +159,7 @@ type failingCompletionStore struct {
 }
 
 func (s failingCompletionStore) CompleteAttempt(_ context.Context, req workflowruntime.CompleteAttemptRequest) (workflowruntime.Run, error) {
-	return workflowruntime.Run{TenantID: req.TenantID, ID: req.RunID, Status: s.status}, s.err
+	return workflowruntime.Run{OrganizationID: req.OrganizationID, ID: req.RunID, Status: s.status}, s.err
 }
 
 // 验证对象写入成功但 runtime 原子提交失败时立即补偿删除，避免不可达对象泄漏。
@@ -170,7 +170,7 @@ func TestManagedOutputStoreCompensatesFailedCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
+		OrganizationID: "organization_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
 	})
 	if err == nil || len(manager.discarded) != 1 || manager.discarded[0] != "obj_safe_reference" {
 		t.Fatalf("error=%v discarded=%v", err, manager.discarded)
@@ -186,7 +186,7 @@ func TestManagedOutputStorePreservesObjectWhenCommitOutcomeIsUnknown(t *testing.
 		t.Fatal(err)
 	}
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_maybe_committed"},
+		OrganizationID: "organization_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_maybe_committed"},
 	})
 	if !workflowruntime.IsCommitOutcomeUnknown(err) || len(manager.discarded) != 0 {
 		t.Fatalf("error=%v discarded=%v", err, manager.discarded)
@@ -201,7 +201,7 @@ func TestManagedOutputStoreDiscardsCancelledCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
+		OrganizationID: "organization_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
 	})
 	if err != nil || len(manager.discarded) != 1 {
 		t.Fatalf("error=%v discarded=%v", err, manager.discarded)
@@ -218,7 +218,7 @@ func TestManagedOutputStoreBoundsCompensation(t *testing.T) {
 	store.cleanupWait = 20 * time.Millisecond
 	started := time.Now()
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
+		OrganizationID: "organization_a", RunID: "run_1", Output: &workflowruntime.Output{ObjectRef: "obj_safe_reference"},
 	})
 	if err == nil || time.Since(started) > 250*time.Millisecond {
 		t.Fatalf("output compensation was not bounded: elapsed=%s err=%v", time.Since(started), err)

@@ -25,12 +25,12 @@ func TestSupervisorConfigFromEnv(t *testing.T) {
 // 验证 SSE 生产配额、退避和写 deadline 可由环境显式收紧。
 func TestEventStreamConfigFromEnv(t *testing.T) {
 	t.Setenv("SUPAFLOW_SSE_GLOBAL_LIMIT", "20")
-	t.Setenv("SUPAFLOW_SSE_TENANT_LIMIT", "5")
+	t.Setenv("SUPAFLOW_SSE_ORGANIZATION_LIMIT", "5")
 	t.Setenv("SUPAFLOW_SSE_POLL_MIN_MS", "100")
 	t.Setenv("SUPAFLOW_SSE_POLL_MAX_MS", "800")
 	t.Setenv("SUPAFLOW_SSE_WRITE_TIMEOUT_MS", "1500")
 	config, err := eventStreamConfigFromEnv()
-	if err != nil || config.GlobalLimit != 20 || config.TenantLimit != 5 || config.PollMax != 800*time.Millisecond || config.WriteTimeout != 1500*time.Millisecond {
+	if err != nil || config.GlobalLimit != 20 || config.OrganizationLimit != 5 || config.PollMax != 800*time.Millisecond || config.WriteTimeout != 1500*time.Millisecond {
 		t.Fatalf("config=%+v err=%v", config, err)
 	}
 }

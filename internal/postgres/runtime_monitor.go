@@ -10,8 +10,8 @@ import (
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
 
-// ListRuns reads a bounded recent-run projection using tenant in every join and predicate.
-func (s *RuntimeStore) ListRuns(ctx context.Context, tenantID workflowruntime.TenantID, filter workflowruntime.RunFilter) ([]workflowruntime.RunSummary, error) {
+// ListRuns reads a bounded recent-run projection using organization in every join and predicate.
+func (s *RuntimeStore) ListRuns(ctx context.Context, organizationID workflowruntime.OrganizationID, filter workflowruntime.RunFilter) ([]workflowruntime.RunSummary, error) {
 	rows, err := s.repository.pool.Query(ctx, `
 		SELECT r.id,r.execution_plan_id,r.plan_hash,r.plan_entry_node_id,r.plan_executor,
 		       encode(r.request_hash,'hex'),r.input,r.idempotency_key,r.status,r.priority,r.deadline_at,r.cancel_requested_at,
@@ -20,17 +20,17 @@ func (s *RuntimeStore) ListRuns(ctx context.Context, tenantID workflowruntime.Te
 		       o.sensitivity,(o.object_ref IS NOT NULL),o.retention_status,
 		       l.source_run_id,l.from_node_id,l.created_at
 		FROM runs r
-		LEFT JOIN node_outputs o ON o.tenant_id=r.tenant_id AND o.id=r.output_id
-		LEFT JOIN run_rerun_lineage l ON l.tenant_id=r.tenant_id AND l.run_id=r.id
-		WHERE r.tenant_id=$1 AND ($2='' OR r.workflow_id=$2) AND ($3='' OR r.status=$3)
-		ORDER BY r.created_at DESC,r.id DESC LIMIT $4`, string(tenantID), filter.WorkflowID, dbRunStatus(filter.Status), filter.Limit)
+		LEFT JOIN node_outputs o ON o.organization_id=r.organization_id AND o.id=r.output_id
+		LEFT JOIN run_rerun_lineage l ON l.organization_id=r.organization_id AND l.run_id=r.id
+		WHERE r.organization_id=$1 AND ($2='' OR r.workflow_id=$2) AND ($3='' OR r.status=$3)
+		ORDER BY r.created_at DESC,r.id DESC LIMIT $4`, string(organizationID), filter.WorkflowID, dbRunStatus(filter.Status), filter.Limit)
 	if err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not list runs", err)
 	}
 	defer rows.Close()
 	items := make([]workflowruntime.RunSummary, 0)
 	for rows.Next() {
-		item, scanErr := scanRuntimeRunSummary(rows, tenantID)
+		item, scanErr := scanRuntimeRunSummary(rows, organizationID)
 		if scanErr != nil {
 			return nil, runtimeError(workflowruntime.CodeConflict, "could not decode run", scanErr)
 		}
@@ -42,7 +42,7 @@ func (s *RuntimeStore) ListRuns(ctx context.Context, tenantID workflowruntime.Te
 	return items, nil
 }
 
-func scanRuntimeRunSummary(row rowScanner, tenantID workflowruntime.TenantID) (workflowruntime.RunSummary, error) {
+func scanRuntimeRunSummary(row rowScanner, organizationID workflowruntime.OrganizationID) (workflowruntime.RunSummary, error) {
 	var item workflowruntime.RunSummary
 	var status string
 	var outputID, contentType, outputHash, sensitivity, retentionStatus *string
@@ -56,7 +56,7 @@ func scanRuntimeRunSummary(row rowScanner, tenantID workflowruntime.TenantID) (w
 		&status, &item.Run.Priority, &item.Run.DeadlineAt, &item.Run.CancelRequestedAt, &item.Run.CreatedAt, &item.Run.UpdatedAt, &item.Run.Version,
 		&item.WorkflowID, &outputID, &inline, &contentType, &outputSize, &outputHash, &sensitivity,
 		&external, &retentionStatus, &sourceRunID, &fromNodeID, &rerunCreatedAt)
-	item.Run.TenantID, item.Run.Status = tenantID, runtimeRunStatus(status)
+	item.Run.OrganizationID, item.Run.Status = organizationID, runtimeRunStatus(status)
 	if err == nil && outputID != nil {
 		item.Run.Output = &workflowruntime.RunOutput{Inline: inline, ContentType: *contentType, Size: *outputSize,
 			SHA256: *outputHash, Sensitive: *sensitivity == "sensitive", External: *external, RetentionStatus: *retentionStatus}
@@ -71,8 +71,8 @@ func scanRuntimeRunSummary(row rowScanner, tenantID workflowruntime.TenantID) (w
 }
 
 // GetRunDetails reads node states, ordered attempts, and safe output values for one run.
-func (s *RuntimeStore) GetRunDetails(ctx context.Context, tenantID workflowruntime.TenantID, runID string) (workflowruntime.RunDetails, error) {
-	run, err := s.GetRun(ctx, tenantID, runID)
+func (s *RuntimeStore) GetRunDetails(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string) (workflowruntime.RunDetails, error) {
+	run, err := s.GetRun(ctx, organizationID, runID)
 	if err != nil {
 		return workflowruntime.RunDetails{}, err
 	}
@@ -83,10 +83,10 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, tenantID workflowrunti
 		       o.id,o.inline_value,o.content_type,o.size_bytes,encode(o.content_hash,'hex'),
 		       o.sensitivity,(o.object_ref IS NOT NULL),o.retention_status
 		FROM node_states n
-		LEFT JOIN node_attempts a ON a.tenant_id=n.tenant_id AND a.run_id=n.run_id AND a.node_state_id=n.id
-		LEFT JOIN node_outputs o ON o.tenant_id=n.tenant_id AND o.run_id=n.run_id AND o.id=n.output_id
-		WHERE n.tenant_id=$1 AND n.run_id=$2
-		ORDER BY n.created_at,n.node_id,a.attempt_number`, string(tenantID), runID)
+		LEFT JOIN node_attempts a ON a.organization_id=n.organization_id AND a.run_id=n.run_id AND a.node_state_id=n.id
+		LEFT JOIN node_outputs o ON o.organization_id=n.organization_id AND o.run_id=n.run_id AND o.id=n.output_id
+		WHERE n.organization_id=$1 AND n.run_id=$2
+		ORDER BY n.created_at,n.node_id,a.attempt_number`, string(organizationID), runID)
 	if err != nil {
 		return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not read run diagnostics", err)
 	}
@@ -114,7 +114,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, tenantID workflowrunti
 		}
 		node := byNode[nodeID]
 		if node == nil {
-			node = &workflowruntime.NodeDiagnostic{Node: workflowruntime.NodeState{TenantID: tenantID, RunID: runID,
+			node = &workflowruntime.NodeDiagnostic{Node: workflowruntime.NodeState{OrganizationID: organizationID, RunID: runID,
 				NodeID: nodeID, Status: runtimeNodeStatus(nodeStatus), AttemptCount: attemptCount,
 				LatestAttemptID: latestAttempt, UpdatedAt: nodeUpdatedAt}, Attempts: []workflowruntime.AttemptDiagnostic{}}
 			if outputID != nil {
@@ -124,7 +124,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, tenantID workflowrunti
 			byNode[nodeID], order = node, append(order, nodeID)
 		}
 		if attemptID != nil {
-			attempt := workflowruntime.Attempt{TenantID: tenantID, ID: *attemptID, RunID: runID, NodeID: nodeID,
+			attempt := workflowruntime.Attempt{OrganizationID: organizationID, ID: *attemptID, RunID: runID, NodeID: nodeID,
 				Executor: *executor, Number: *attemptNumber, Status: runtimeAttemptStatus(*attemptStatus), Input: input,
 				NextAttemptAt: availableAt, StartedAt: startedAt, FinishedAt: finishedAt,
 				ErrorCode: *errorCode, CreatedAt: attemptCreatedAt, UpdatedAt: attemptUpdatedAt}
@@ -139,7 +139,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, tenantID workflowrunti
 		nodes = append(nodes, *byNode[nodeID])
 	}
 	var cursor uint64
-	if err = s.repository.pool.QueryRow(ctx, `SELECT next_event_sequence FROM runs WHERE tenant_id=$1 AND id=$2`, string(tenantID), runID).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err = s.repository.pool.QueryRow(ctx, `SELECT next_event_sequence FROM runs WHERE organization_id=$1 AND id=$2`, string(organizationID), runID).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not read event cursor", err)
 	}
 	return workflowruntime.RunDetails{Run: run, Nodes: nodes, LastEventCursor: cursor}, nil

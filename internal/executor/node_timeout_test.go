@@ -43,7 +43,7 @@ func TestPlanExecutorEnforcesPinnedNodeTimeout(t *testing.T) {
 	catalog := platform.NewMemoryCatalog(registry, workflow.CompilePolicy{
 		AllowedCapabilities: workflow.CapabilitySet{Cancellable: true, Idempotent: true},
 	})
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", "timeout_flow", workflow.WorkflowDefinition{
+	published, _, err := catalog.Publish(context.Background(), "organization_a", "timeout_flow", workflow.WorkflowDefinition{
 		SchemaVersion: workflow.DefinitionSchemaV1, ID: "timeout_flow",
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
@@ -64,7 +64,7 @@ func TestPlanExecutorEnforcesPinnedNodeTimeout(t *testing.T) {
 	}
 	started := time.Now()
 	_, err = executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_timeout", Plan: workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash},
+		OrganizationID: "organization_a", RunID: "run_timeout", Plan: workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash},
 		NodeID: "slow", AttemptID: "attempt_timeout", Attempt: 1, Executor: "eino.tool",
 		Input: json.RawMessage(`null`), FencingToken: 1,
 	})

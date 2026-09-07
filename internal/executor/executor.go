@@ -24,7 +24,7 @@ const (
 	defaultDialTimeout   = 10 * time.Second
 )
 
-// CredentialResolver resolves an opaque tenant-scoped credential reference to
+// CredentialResolver resolves an opaque organization-scoped credential reference to
 // HTTP headers. Implementations must never return secrets in error messages.
 type CredentialResolver interface {
 	ResolveHTTPHeaders(context.Context, AttemptScope, string) (http.Header, error)
@@ -67,7 +67,7 @@ type Config struct {
 	Outputs              OutputManager
 }
 
-// PlanExecutor dispatches nodes from a tenant-owned immutable execution plan.
+// PlanExecutor dispatches nodes from a organization-owned immutable execution plan.
 // It is safe for concurrent use.
 type PlanExecutor struct {
 	catalog     platform.PlanCatalog
@@ -143,7 +143,7 @@ func (e *PlanExecutor) execute(ctx context.Context, req workflowruntime.Executio
 	}
 	defer release()
 
-	published, err := e.catalog.Resolve(ctx, string(req.TenantID), req.Plan.ID, req.Plan.Hash)
+	published, err := e.catalog.Resolve(ctx, string(req.OrganizationID), req.Plan.ID, req.Plan.Hash)
 	if err != nil {
 		retryable := !errors.Is(err, platform.ErrPlanNotFound)
 		return workflowruntime.ExecutionResult{}, executionError("plan_unavailable", retryable, errors.New("immutable plan could not be resolved"))
@@ -269,7 +269,7 @@ func applyRetrySafety(node workflow.PlanNode, err error) error {
 }
 
 // Cancel best-effort cancels an active attempt. It is idempotent and does not
-// affect attempts belonging to another tenant or run.
+// affect attempts belonging to another organization or run.
 func (e *PlanExecutor) Cancel(_ context.Context, req workflowruntime.ExecutionRequest) error {
 	key := attemptKey(req)
 	e.mu.Lock()
@@ -282,7 +282,7 @@ func (e *PlanExecutor) Cancel(_ context.Context, req workflowruntime.ExecutionRe
 }
 
 func (e *PlanExecutor) register(parent context.Context, req workflowruntime.ExecutionRequest) (context.Context, func(), error) {
-	if strings.TrimSpace(string(req.TenantID)) == "" || req.RunID == "" || req.AttemptID == "" || req.FencingToken == 0 {
+	if strings.TrimSpace(string(req.OrganizationID)) == "" || req.RunID == "" || req.AttemptID == "" || req.FencingToken == 0 {
 		return nil, nil, executionError("invalid_execution_request", false, errors.New("attempt scope is incomplete"))
 	}
 	key := attemptKey(req)
@@ -377,7 +377,7 @@ func executionError(code string, retryable bool, cause error) *workflowruntime.E
 }
 
 func attemptKey(req workflowruntime.ExecutionRequest) string {
-	return string(req.TenantID) + "\x00" + req.RunID + "\x00" + req.AttemptID
+	return string(req.OrganizationID) + "\x00" + req.RunID + "\x00" + req.AttemptID
 }
 
 func cloneJSON(value json.RawMessage) json.RawMessage {

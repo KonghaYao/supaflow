@@ -26,7 +26,7 @@ func main() {
 
 func run() error {
 	action := flag.String("action", "capacity", "capacity, alerts, backup, or restore")
-	tenantID := flag.String("tenant", "", "tenant ID for capacity and alerts")
+	organizationID := flag.String("organization", "", "organization ID for capacity and alerts")
 	artifact := flag.String("artifact", "", "validated backup artifact name")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -64,15 +64,15 @@ func run() error {
 			return tool.RestoreDrill(ctx, scratchURL, *artifact, archiveSHA256, scratch, production)
 		})
 	case "capacity", "alerts":
-		if strings.TrimSpace(*tenantID) == "" {
-			return errors.New("-tenant is required")
+		if strings.TrimSpace(*organizationID) == "" {
+			return errors.New("-organization is required")
 		}
 		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
 			return errors.New("database connection configuration is invalid")
 		}
 		defer pool.Close()
-		snapshot, err := platformops.NewCapacityMonitor(pool).Snapshot(ctx, *tenantID, time.Now().UTC())
+		snapshot, err := platformops.NewCapacityMonitor(pool).Snapshot(ctx, *organizationID, time.Now().UTC())
 		if err != nil {
 			return err
 		}

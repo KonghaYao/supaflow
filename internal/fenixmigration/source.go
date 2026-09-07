@@ -43,7 +43,7 @@ type SourceVersion struct {
 	SourceHash string
 }
 
-// SourceWorkflow is one tenant-owned legacy workflow and its ordered history.
+// SourceWorkflow is one organization-owned legacy workflow and its ordered history.
 type SourceWorkflow struct {
 	ID             string
 	OrganizationID string

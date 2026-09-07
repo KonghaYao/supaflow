@@ -15,7 +15,7 @@ import (
 
 // Mapping contains explicit cross-system identities and pre-created credentials.
 type Mapping struct {
-	Tenants             map[string]string            `json:"tenants"`
+	Organizations       map[string]string            `json:"organizations"`
 	HTTPNodeCredentials map[string]map[string]string `json:"httpNodeCredentials,omitempty"`
 	Subworkflows        map[string]PlanReference     `json:"subworkflows,omitempty"`
 	TriggerCredentials  map[string]string            `json:"triggerCredentials,omitempty"`
@@ -82,17 +82,16 @@ func (e *PreflightError) Error() string {
 
 type preparedVersion struct {
 	organizationID string
-	tenantID       string
 	workflowID     string
 	version        SourceVersion
 	definition     workflow.WorkflowDefinition
 }
 
 type preparedWorkflow struct {
-	source   SourceWorkflow
-	tenantID string
-	versions []preparedVersion
-	draft    *preparedVersion
+	source         SourceWorkflow
+	organizationID string
+	versions       []preparedVersion
+	draft          *preparedVersion
 }
 
 // Migrate runs preflight over the complete snapshot before making idempotent writes.
@@ -125,20 +124,20 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 	}
 	ensured := make(map[string]bool)
 	for _, organizationID := range sourceOrganizations(snapshot) {
-		tenantID := mapping.Tenants[organizationID]
-		if ensured[tenantID] {
+		organizationID := mapping.Organizations[organizationID]
+		if ensured[organizationID] {
 			continue
 		}
-		if err := target.EnsureTenant(ctx, tenantID, "Migrated Fenix tenant "+organizationID); err != nil {
+		if err := target.EnsureOrganization(ctx, organizationID, "Migrated Fenix organization "+organizationID); err != nil {
 			return report, err
 		}
-		ensured[tenantID] = true
+		ensured[organizationID] = true
 	}
 	versions := make(map[string]ImportedVersion)
 	latest := make(map[string]ImportedVersion)
 	for _, item := range prepared {
 		created, err := target.ImportWorkflow(ctx, platformops.ImportWorkflowRequest{
-			TenantID: item.tenantID, ActorID: options.ActorID, SourceSystem: "fenix",
+			OrganizationID: item.organizationID, ActorID: options.ActorID, SourceSystem: "fenix",
 			SourceWorkflowID: item.source.ID, WorkflowID: item.source.ID,
 			Name: item.source.Name, Description: item.source.Description,
 		})
@@ -152,7 +151,7 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 		}
 		for _, version := range item.versions {
 			key := migrationKey("version", version.organizationID, version.workflowID, fmt.Sprint(version.version.Version), version.version.SourceHash)
-			imported, created, err := target.ImportVersion(ctx, version.tenantID, version.workflowID, version.version.Version, version.definition, key)
+			imported, created, err := target.ImportVersion(ctx, version.organizationID, version.workflowID, version.version.Version, version.definition, key)
 			if err != nil {
 				return report, fmt.Errorf("import workflow %s version %d: %w", version.workflowID, version.version.Version, err)
 			}
@@ -161,12 +160,12 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 			} else {
 				report.ReplayedDefinitions++
 			}
-			versions[versionKey(version.tenantID, version.workflowID, version.version.Version)] = imported
-			latest[workflowKey(version.tenantID, version.workflowID)] = imported
+			versions[versionKey(version.organizationID, version.workflowID, version.version.Version)] = imported
+			latest[workflowKey(version.organizationID, version.workflowID)] = imported
 		}
 		if item.draft != nil {
 			key := migrationKey("draft", item.source.OrganizationID, item.source.ID, item.draft.version.SourceHash)
-			created, err := target.ImportDraft(ctx, item.tenantID, item.source.ID, options.ActorID, item.draft.definition, key)
+			created, err := target.ImportDraft(ctx, item.organizationID, item.source.ID, options.ActorID, item.draft.definition, key)
 			if err != nil {
 				return report, fmt.Errorf("import workflow %s draft: %w", item.source.ID, err)
 			}
@@ -178,8 +177,8 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 		}
 	}
 	for _, source := range snapshot.Triggers {
-		tenantID := mapping.Tenants[source.OrganizationID]
-		request, err := triggerRequest(source, tenantID, mapping.TriggerCredentials[source.ID], options.ActorID)
+		organizationID := mapping.Organizations[source.OrganizationID]
+		request, err := triggerRequest(source, organizationID, mapping.TriggerCredentials[source.ID], options.ActorID)
 		if err != nil {
 			return report, err
 		}
@@ -194,12 +193,12 @@ func Migrate(ctx context.Context, snapshot Snapshot, mapping Mapping, target Tar
 		}
 	}
 	for _, source := range snapshot.Runs {
-		tenantID := mapping.Tenants[source.OrganizationID]
-		imported := latest[workflowKey(tenantID, source.WorkflowID)]
+		organizationID := mapping.Organizations[source.OrganizationID]
+		imported := latest[workflowKey(organizationID, source.WorkflowID)]
 		if source.Version != nil {
-			imported = versions[versionKey(tenantID, source.WorkflowID, *source.Version)]
+			imported = versions[versionKey(organizationID, source.WorkflowID, *source.Version)]
 		}
-		request, err := runRequest(source, tenantID, imported, options.ActorID)
+		request, err := runRequest(source, organizationID, imported, options.ActorID)
 		if err != nil {
 			return report, fmt.Errorf("classify run %s output: %w", source.ID, err)
 		}
@@ -246,17 +245,17 @@ func preflight(snapshot Snapshot, mapping Mapping) ([]preparedWorkflow, []Workfl
 	knownLatest := make(map[string]bool)
 	knownWorkflowTargets := make(map[string]string)
 	for _, source := range snapshot.Workflows {
-		tenantID := mapping.Tenants[source.OrganizationID]
-		if tenantID == "" {
-			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "tenant_mapping", Message: "organization requires an explicit target tenant"}))
+		organizationID := mapping.Organizations[source.OrganizationID]
+		if organizationID == "" {
+			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "organization_mapping", Message: "organization requires an explicit target organization"}))
 			continue
 		}
-		item := preparedWorkflow{source: source, tenantID: tenantID}
+		item := preparedWorkflow{source: source, organizationID: organizationID}
 		if strings.TrimSpace(source.ID) == "" || len(source.ID) > 255 || strings.TrimSpace(source.Name) == "" ||
 			len(source.Name) > 255 || len(source.Description) > 4096 {
 			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "workflow_metadata", Message: "workflow identity, name, or description is invalid"}))
 		}
-		targetKey := workflowKey(tenantID, source.ID)
+		targetKey := workflowKey(organizationID, source.ID)
 		if previousOrganization, exists := knownWorkflowTargets[targetKey]; exists {
 			blockers = append(blockers, workflowBlock(source, 0, Blocker{Code: "workflow_identity", Message: "multiple source workflows map to the same target identity as organization " + previousOrganization}))
 		} else {
@@ -289,38 +288,38 @@ func preflight(snapshot Snapshot, mapping Mapping) ([]preparedWorkflow, []Workfl
 				blockers = append(blockers, workflowBlock(source, version.Version, Blocker{Code: "compile", Message: err.Error()}))
 				continue
 			}
-			value := preparedVersion{organizationID: source.OrganizationID, tenantID: tenantID, workflowID: source.ID, version: version, definition: converted.Definition}
+			value := preparedVersion{organizationID: organizationID, workflowID: source.ID, version: version, definition: converted.Definition}
 			if version.Version == 0 {
 				item.draft = &value
 			} else {
 				item.versions = append(item.versions, value)
 				expected++
-				knownVersions[versionKey(tenantID, source.ID, version.Version)] = true
+				knownVersions[versionKey(organizationID, source.ID, version.Version)] = true
 			}
 		}
 		prepared = append(prepared, item)
 		if len(item.versions) > 0 {
-			knownLatest[workflowKey(tenantID, source.ID)] = true
+			knownLatest[workflowKey(organizationID, source.ID)] = true
 		}
 	}
 	for _, trigger := range snapshot.Triggers {
-		tenantID := mapping.Tenants[trigger.OrganizationID]
-		if tenantID == "" {
-			blockers = append(blockers, WorkflowBlocker{OrganizationID: trigger.OrganizationID, WorkflowID: trigger.WorkflowID, Blocker: Blocker{NodeID: trigger.ID, Code: "tenant_mapping", Message: "organization requires an explicit target tenant"}})
+		organizationID := mapping.Organizations[trigger.OrganizationID]
+		if organizationID == "" {
+			blockers = append(blockers, WorkflowBlocker{OrganizationID: trigger.OrganizationID, WorkflowID: trigger.WorkflowID, Blocker: Blocker{NodeID: trigger.ID, Code: "organization_mapping", Message: "organization requires an explicit target organization"}})
 			continue
 		}
-		if _, err := triggerRequest(trigger, tenantID, mapping.TriggerCredentials[trigger.ID], "preflight"); err != nil {
+		if _, err := triggerRequest(trigger, organizationID, mapping.TriggerCredentials[trigger.ID], "preflight"); err != nil {
 			blockers = append(blockers, WorkflowBlocker{OrganizationID: trigger.OrganizationID, WorkflowID: trigger.WorkflowID, Blocker: Blocker{NodeID: trigger.ID, Code: "trigger", Message: err.Error()}})
 		}
 	}
 	for _, run := range snapshot.Runs {
-		tenantID := mapping.Tenants[run.OrganizationID]
-		if tenantID == "" {
-			blockers = append(blockers, WorkflowBlocker{OrganizationID: run.OrganizationID, WorkflowID: run.WorkflowID, Blocker: Blocker{NodeID: run.ID, Code: "tenant_mapping", Message: "organization requires an explicit target tenant"}})
+		organizationID := mapping.Organizations[run.OrganizationID]
+		if organizationID == "" {
+			blockers = append(blockers, WorkflowBlocker{OrganizationID: run.OrganizationID, WorkflowID: run.WorkflowID, Blocker: Blocker{NodeID: run.ID, Code: "organization_mapping", Message: "organization requires an explicit target organization"}})
 			continue
 		}
-		versionMissing := run.Version != nil && !knownVersions[versionKey(tenantID, run.WorkflowID, *run.Version)]
-		if run.Version == nil && !knownLatest[workflowKey(tenantID, run.WorkflowID)] {
+		versionMissing := run.Version != nil && !knownVersions[versionKey(organizationID, run.WorkflowID, *run.Version)]
+		if run.Version == nil && !knownLatest[workflowKey(organizationID, run.WorkflowID)] {
 			versionMissing = true
 		}
 		if versionMissing {
@@ -371,9 +370,9 @@ func sourceOrganizations(snapshot Snapshot) []string {
 	return organizations
 }
 
-func triggerRequest(source SourceTrigger, tenantID, credentialID, actorID string) (platformops.ImportTriggerRequest, error) {
+func triggerRequest(source SourceTrigger, organizationID, credentialID, actorID string) (platformops.ImportTriggerRequest, error) {
 	kind := platformops.TriggerKind(strings.ToLower(source.Kind))
-	request := platformops.ImportTriggerRequest{TenantID: tenantID, ActorID: actorID, SourceSystem: "fenix", TriggerID: source.ID, PublicHash: source.PublicHash, WorkflowID: source.WorkflowID, Kind: kind, Name: "fenix-" + source.ID, Enabled: source.Enabled, Config: source.Config, SigningCredentialID: credentialID}
+	request := platformops.ImportTriggerRequest{OrganizationID: organizationID, ActorID: actorID, SourceSystem: "fenix", TriggerID: source.ID, PublicHash: source.PublicHash, WorkflowID: source.WorkflowID, Kind: kind, Name: "fenix-" + source.ID, Enabled: source.Enabled, Config: source.Config, SigningCredentialID: credentialID}
 	if kind == platformops.TriggerWebhook && credentialID == "" {
 		return request, errors.New("webhook trigger requires a pre-created signing credential mapping")
 	}
@@ -401,7 +400,7 @@ func triggerRequest(source SourceTrigger, tenantID, credentialID, actorID string
 	return request, nil
 }
 
-func runRequest(source SourceRun, tenantID string, version ImportedVersion, actorID string) (platformops.ImportRunProjectionRequest, error) {
+func runRequest(source SourceRun, organizationID string, version ImportedVersion, actorID string) (platformops.ImportRunProjectionRequest, error) {
 	output, err := classifyLegacyOutput(source.Output)
 	if err != nil {
 		return platformops.ImportRunProjectionRequest{}, err
@@ -409,9 +408,9 @@ func runRequest(source SourceRun, tenantID string, version ImportedVersion, acto
 	payload, _ := json.Marshal(map[string]any{"triggeredBy": source.TriggeredBy, "outputMetadata": map[string]any{
 		"contentType": output.ContentType, "size": output.Size, "sha256": output.SHA256, "sensitive": output.Sensitive,
 	}})
-	event := platformops.ImportedRunEvent{ID: migrationKey("event", tenantID, source.ID), Sequence: 1, Type: "run.migrated", Payload: payload, CreatedAt: source.FinishedAt}
+	event := platformops.ImportedRunEvent{ID: migrationKey("event", organizationID, source.ID), Sequence: 1, Type: "run.migrated", Payload: payload, CreatedAt: source.FinishedAt}
 	started := source.StartedAt
-	return platformops.ImportRunProjectionRequest{TenantID: tenantID, ActorID: actorID, SourceSystem: "fenix", RunID: source.ID, WorkflowID: source.WorkflowID, WorkflowVersionID: version.VersionID, ExecutionPlanID: version.PlanID, PlanHash: version.PlanHash, Status: normalizeRunStatus(source.Status), Input: source.Input, Output: output, CreatedAt: source.CreatedAt, StartedAt: &started, FinishedAt: source.FinishedAt, Events: []platformops.ImportedRunEvent{event}}, nil
+	return platformops.ImportRunProjectionRequest{OrganizationID: organizationID, ActorID: actorID, SourceSystem: "fenix", RunID: source.ID, WorkflowID: source.WorkflowID, WorkflowVersionID: version.VersionID, ExecutionPlanID: version.PlanID, PlanHash: version.PlanHash, Status: normalizeRunStatus(source.Status), Input: source.Input, Output: output, CreatedAt: source.CreatedAt, StartedAt: &started, FinishedAt: source.FinishedAt, Events: []platformops.ImportedRunEvent{event}}, nil
 }
 
 func normalizeRunStatus(value string) string {
@@ -422,9 +421,9 @@ func normalizeRunStatus(value string) string {
 		return ""
 	}
 }
-func workflowKey(tenant, workflowID string) string { return tenant + "\x00" + workflowID }
-func versionKey(tenant, workflowID string, version uint64) string {
-	return fmt.Sprintf("%s\x00%d", workflowKey(tenant, workflowID), version)
+func workflowKey(organization, workflowID string) string { return organization + "\x00" + workflowID }
+func versionKey(organization, workflowID string, version uint64) string {
+	return fmt.Sprintf("%s\x00%d", workflowKey(organization, workflowID), version)
 }
 func workflowBlock(source SourceWorkflow, version uint64, blocker Blocker) WorkflowBlocker {
 	return WorkflowBlocker{OrganizationID: source.OrganizationID, WorkflowID: source.ID, Version: version, Blocker: blocker}

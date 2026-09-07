@@ -32,7 +32,7 @@ func (h *Handler) startShadowRun(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, string(shadowrun.CodeInvalidShadowStubBinding), "stubBindings must be an object")
 		return
 	}
-	result, err := h.shadowRuns.Start(r.Context(), principal.TenantID, shadowrun.StartRequest{
+	result, err := h.shadowRuns.Start(r.Context(), principal.OrganizationID, shadowrun.StartRequest{
 		PlanID: body.PlanID, PlanHash: body.PlanHash, Input: body.Input,
 		StubBindings: body.StubBindings, IdempotencyKey: idempotencyKey,
 		Priority: body.Priority, Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,

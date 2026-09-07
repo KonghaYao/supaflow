@@ -13,7 +13,7 @@ import (
 
 // RunStarter is the narrow durable-runtime seam used by trigger delivery.
 type RunStarter interface {
-	StartRun(context.Context, workflowruntime.TenantID, workflowruntime.StartRunRequest) (workflowruntime.CreateRunResult, error)
+	StartRun(context.Context, workflowruntime.OrganizationID, workflowruntime.StartRunRequest) (workflowruntime.CreateRunResult, error)
 }
 
 // TriggerRunDelivery turns a committed trigger.fired outbox message into one idempotent run.
@@ -34,7 +34,7 @@ func NewTriggerRunDelivery(pool *pgxpool.Pool, catalog platform.PlanCatalog, run
 // Deliver resolves the immutable plan bound by the acceptance transaction and
 // creates a run keyed by firing ID. It never consults mutable trigger state.
 func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessage) error {
-	if message.Topic != "trigger.fired" || message.TenantID == "" {
+	if message.Topic != "trigger.fired" || message.OrganizationID == "" {
 		return ErrInvalidArgument
 	}
 	var envelope struct {
@@ -51,7 +51,7 @@ func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessag
 		envelope.PlanHash == "" || !json.Valid(envelope.Payload) {
 		return ErrInvalidArgument
 	}
-	published, err := d.catalog.Resolve(ctx, message.TenantID, envelope.ExecutionPlanID, envelope.PlanHash)
+	published, err := d.catalog.Resolve(ctx, message.OrganizationID, envelope.ExecutionPlanID, envelope.PlanHash)
 	if err != nil {
 		return fmt.Errorf("resolve trigger execution plan: %w", err)
 	}
@@ -66,7 +66,7 @@ func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessag
 	if !found {
 		return errors.New("trigger execution plan entry is unavailable")
 	}
-	_, err = d.runs.StartRun(ctx, workflowruntime.TenantID(message.TenantID), workflowruntime.StartRunRequest{
+	_, err = d.runs.StartRun(ctx, workflowruntime.OrganizationID(message.OrganizationID), workflowruntime.StartRunRequest{
 		Plan:  workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash, WorkflowID: published.WorkflowID, EntryNodeID: entry.ID, Executor: entry.Executor.Kind},
 		Input: envelope.Payload, IdempotencyKey: "trigger:" + envelope.FiringID,
 	})
@@ -74,8 +74,8 @@ func (d *TriggerRunDelivery) Deliver(ctx context.Context, message DeliveryMessag
 		return fmt.Errorf("start trigger run: %w", err)
 	}
 	_, err = d.pool.Exec(ctx, `UPDATE trigger_firings SET status='dispatched'
-		WHERE tenant_id=$1 AND id=$2 AND trigger_id=$3 AND workflow_version_id=$4 AND execution_plan_id=$5 AND plan_hash=$6`,
-		message.TenantID, envelope.FiringID, envelope.TriggerID, envelope.WorkflowVersionID, envelope.ExecutionPlanID, envelope.PlanHash)
+		WHERE organization_id=$1 AND id=$2 AND trigger_id=$3 AND workflow_version_id=$4 AND execution_plan_id=$5 AND plan_hash=$6`,
+		message.OrganizationID, envelope.FiringID, envelope.TriggerID, envelope.WorkflowVersionID, envelope.ExecutionPlanID, envelope.PlanHash)
 	if err != nil {
 		return fmt.Errorf("mark trigger firing dispatched: %w", err)
 	}

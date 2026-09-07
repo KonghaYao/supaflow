@@ -20,14 +20,14 @@ type eventTriggerTarget struct {
 }
 
 // FireEvent fans out through bounded independently committed pages. A full
-// tenant applies backpressure without holding an unbounded trigger result set
+// organization applies backpressure without holding an unbounded trigger result set
 // or one transaction open across the complete fanout.
-func (s *PostgresTriggerStore) FireEvent(ctx context.Context, tenantID, eventType, eventID string, payload json.RawMessage, at time.Time) ([]Firing, error) {
+func (s *PostgresTriggerStore) FireEvent(ctx context.Context, organizationID, eventType, eventID string, payload json.RawMessage, at time.Time) ([]Firing, error) {
 	firings := make([]Firing, 0, eventFanoutPageSize)
 	var cursorTime *time.Time
 	cursorID := ""
 	for len(firings) < maxEventFanout {
-		page, nextTime, nextID, done, err := s.fireEventPage(ctx, tenantID, eventType, eventID, payload, at, cursorTime, cursorID, maxEventFanout-len(firings))
+		page, nextTime, nextID, done, err := s.fireEventPage(ctx, organizationID, eventType, eventID, payload, at, cursorTime, cursorID, maxEventFanout-len(firings))
 		if err != nil {
 			return firings, err
 		}
@@ -37,7 +37,7 @@ func (s *PostgresTriggerStore) FireEvent(ctx context.Context, tenantID, eventTyp
 		}
 		cursorTime, cursorID = &nextTime, nextID
 	}
-	remaining, err := s.hasEventTargetsAfter(ctx, tenantID, eventType, cursorTime, cursorID)
+	remaining, err := s.hasEventTargetsAfter(ctx, organizationID, eventType, cursorTime, cursorID)
 	if err != nil {
 		return firings, err
 	}
@@ -49,7 +49,7 @@ func (s *PostgresTriggerStore) FireEvent(ctx context.Context, tenantID, eventTyp
 
 func (s *PostgresTriggerStore) fireEventPage(
 	ctx context.Context,
-	tenantID, eventType, eventID string,
+	organizationID, eventType, eventID string,
 	payload json.RawMessage,
 	at time.Time,
 	cursorTime *time.Time,
@@ -62,7 +62,7 @@ func (s *PostgresTriggerStore) fireEventPage(
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	pageLimit := min(eventFanoutPageSize, remaining)
-	targets, err := selectEventTriggerTargets(ctx, tx, tenantID, eventType, eventID, cursorTime, cursorID, pageLimit)
+	targets, err := selectEventTriggerTargets(ctx, tx, organizationID, eventType, eventID, cursorTime, cursorID, pageLimit)
 	if err != nil {
 		return nil, time.Time{}, "", false, err
 	}
@@ -79,7 +79,7 @@ func (s *PostgresTriggerStore) fireEventPage(
 		}
 		return nil, time.Time{}, "", true, nil
 	}
-	available, err := tenantTriggerIngressCapacityTx(ctx, tx, tenantID)
+	available, err := organizationTriggerIngressCapacityTx(ctx, tx, organizationID)
 	if err != nil {
 		return nil, time.Time{}, "", false, err
 	}
@@ -100,7 +100,7 @@ func (s *PostgresTriggerStore) fireEventPage(
 	firings := make([]Firing, 0, len(selected))
 	for _, target := range selected {
 		firing, _, fireErr := insertFiringTx(ctx, tx, FireRequest{
-			TenantID: tenantID, TriggerID: target.id, ExpectedKind: TriggerEvent,
+			OrganizationID: organizationID, TriggerID: target.id, ExpectedKind: TriggerEvent,
 			DeduplicationKey: "event:" + eventID, SourceTime: &at, Payload: payload,
 			StableReplaySourceTime: true,
 		})
@@ -124,14 +124,14 @@ func (s *PostgresTriggerStore) fireEventPage(
 	return firings, last.created, last.id, done, nil
 }
 
-func (s *PostgresTriggerStore) hasEventTargetsAfter(ctx context.Context, tenantID, eventType string, cursorTime *time.Time, cursorID string) (bool, error) {
+func (s *PostgresTriggerStore) hasEventTargetsAfter(ctx context.Context, organizationID, eventType string, cursorTime *time.Time, cursorID string) (bool, error) {
 	var found bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM triggers trigger
-		WHERE trigger.tenant_id=$1 AND trigger.kind='event' AND trigger.status='enabled'
+		WHERE trigger.organization_id=$1 AND trigger.kind='event' AND trigger.status='enabled'
 		  AND trigger.event_type=$2
 		  AND ($3::timestamptz IS NULL OR (trigger.created_at,trigger.id)>($3,CAST($4 AS text)))
-	)`, tenantID, eventType, cursorTime, cursorID).Scan(&found)
+	)`, organizationID, eventType, cursorTime, cursorID).Scan(&found)
 	if err != nil {
 		return false, triggerError("check remaining event triggers", err)
 	}
@@ -141,7 +141,7 @@ func (s *PostgresTriggerStore) hasEventTargetsAfter(ctx context.Context, tenantI
 func selectEventTriggerTargets(
 	ctx context.Context,
 	tx pgx.Tx,
-	tenantID, eventType, eventID string,
+	organizationID, eventType, eventID string,
 	cursorTime *time.Time,
 	cursorID string,
 	limit int,
@@ -150,13 +150,13 @@ func selectEventTriggerTargets(
 		SELECT trigger.id,trigger.created_at,(firing.id IS NOT NULL)
 		FROM triggers trigger
 		LEFT JOIN trigger_firings firing
-		  ON firing.tenant_id=trigger.tenant_id AND firing.trigger_id=trigger.id
+		  ON firing.organization_id=trigger.organization_id AND firing.trigger_id=trigger.id
 		 AND firing.deduplication_key=$3
-		WHERE trigger.tenant_id=$1 AND trigger.kind='event' AND trigger.status='enabled'
+		WHERE trigger.organization_id=$1 AND trigger.kind='event' AND trigger.status='enabled'
 		  AND trigger.event_type=$2
 		  AND ($4::timestamptz IS NULL OR (trigger.created_at,trigger.id)>($4,CAST($5 AS text)))
 		ORDER BY trigger.created_at,trigger.id FOR UPDATE OF trigger LIMIT $6`,
-		tenantID, eventType, "event:"+eventID, cursorTime, cursorID, limit)
+		organizationID, eventType, "event:"+eventID, cursorTime, cursorID, limit)
 	if err != nil {
 		return nil, triggerError("select event trigger page", err)
 	}

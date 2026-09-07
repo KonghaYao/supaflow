@@ -9,24 +9,24 @@ import (
 
 // ClaimAttempt atomically claims pending work or takes over an expired lease.
 func (m *MemoryStore) ClaimAttempt(ctx context.Context, req ClaimAttemptRequest) (*WorkItem, error) {
-	if _, err := m.ExpireRuns(ctx, req.TenantID, req.Now, 100); err != nil {
+	if _, err := m.ExpireRuns(ctx, req.OrganizationID, req.Now, 100); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := validateTenant(req.TenantID); err != nil {
+	if err := validateOrganization(req.OrganizationID); err != nil {
 		return nil, err
 	}
 	if req.WorkerID == "" || req.LeaseDuration <= 0 {
 		return nil, errorf(CodeInvalidArgument, "worker id and positive lease duration are required")
 	}
-	m.resumeDueTimersLocked(req.TenantID, req.Now)
+	m.resumeDueTimersLocked(req.OrganizationID, req.Now)
 	for _, attemptKey := range m.attemptOrder {
 		attempt := m.attempts[attemptKey]
-		if attempt.TenantID != req.TenantID {
+		if attempt.OrganizationID != req.OrganizationID {
 			continue
 		}
-		runKey := scoped(req.TenantID, attempt.RunID)
+		runKey := scoped(req.OrganizationID, attempt.RunID)
 		run := m.runs[runKey]
 		if run.Status != RunPending && run.Status != RunRunning && run.Status != RunCancelling {
 			continue
@@ -41,7 +41,7 @@ func (m *MemoryStore) ClaimAttempt(ctx context.Context, req ClaimAttemptRequest)
 		}
 		tookOver := attempt.Status == AttemptRunning
 		lease = Lease{
-			TenantID: req.TenantID, RunID: run.ID, AttemptID: attempt.ID,
+			OrganizationID: req.OrganizationID, RunID: run.ID, AttemptID: attempt.ID,
 			WorkerID: req.WorkerID, FencingToken: lease.FencingToken + 1,
 			ExpiresAt: req.Now.Add(req.LeaseDuration), UpdatedAt: req.Now,
 		}
@@ -52,7 +52,7 @@ func (m *MemoryStore) ClaimAttempt(ctx context.Context, req ClaimAttemptRequest)
 		}
 		attempt.UpdatedAt = req.Now
 		m.attempts[attemptKey] = attempt
-		nodeKey := nodeScoped(req.TenantID, run.ID, attempt.NodeID)
+		nodeKey := nodeScoped(req.OrganizationID, run.ID, attempt.NodeID)
 		node := m.nodes[nodeKey]
 		node.Status = NodeRunning
 		node.UpdatedAt = req.Now
@@ -70,28 +70,28 @@ func (m *MemoryStore) ClaimAttempt(ctx context.Context, req ClaimAttemptRequest)
 			run.UpdatedAt = req.Now
 			m.runs[runKey] = run
 			if firstStart {
-				m.appendEventLocked(req.TenantID, run.ID, Event{Type: "run.started", At: req.Now})
+				m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "run.started", At: req.Now})
 			}
 		}
-		m.appendEventLocked(req.TenantID, run.ID, Event{Type: "attempt.claimed", At: req.Now})
+		m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "attempt.claimed", At: req.Now})
 		if tookOver {
-			m.appendEventLocked(req.TenantID, run.ID, Event{Type: "attempt.lease_taken_over", At: req.Now})
+			m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "attempt.lease_taken_over", At: req.Now})
 		}
 		return &WorkItem{
 			Run: cloneRun(run), Node: node, Attempt: cloneAttempt(attempt), Lease: lease,
-			Snapshot: m.latestSnapshotLocked(req.TenantID, run.ID, attempt.ID),
+			Snapshot: m.latestSnapshotLocked(req.OrganizationID, run.ID, attempt.ID),
 			Takeover: tookOver,
 		}, nil
 	}
 	return nil, nil
 }
 
-func (m *MemoryStore) resumeDueTimersLocked(tenantID TenantID, now time.Time) {
+func (m *MemoryStore) resumeDueTimersLocked(organizationID OrganizationID, now time.Time) {
 	for key, interrupt := range m.interrupts {
-		if interrupt.TenantID != tenantID || interrupt.Status != InterruptPending || !interrupt.AutoResume || now.Before(interrupt.ExpiresAt) {
+		if interrupt.OrganizationID != organizationID || interrupt.Status != InterruptPending || !interrupt.AutoResume || now.Before(interrupt.ExpiresAt) {
 			continue
 		}
-		attemptKey := scoped(tenantID, interrupt.AttemptID)
+		attemptKey := scoped(organizationID, interrupt.AttemptID)
 		attempt, exists := m.attempts[attemptKey]
 		if !exists || attempt.Status != AttemptSuspended {
 			continue
@@ -101,15 +101,15 @@ func (m *MemoryStore) resumeDueTimersLocked(tenantID TenantID, now time.Time) {
 		m.interrupts[key] = interrupt
 		attempt.Status, attempt.ResumeData, attempt.NextAttemptAt, attempt.UpdatedAt = AttemptPending, cloneJSON(interrupt.Decision), now, now
 		m.attempts[attemptKey] = attempt
-		nodeKey := nodeScoped(tenantID, attempt.RunID, attempt.NodeID)
+		nodeKey := nodeScoped(organizationID, attempt.RunID, attempt.NodeID)
 		node := m.nodes[nodeKey]
 		node.Status, node.UpdatedAt = NodePending, now
 		m.nodes[nodeKey] = node
-		runKey := scoped(tenantID, attempt.RunID)
+		runKey := scoped(organizationID, attempt.RunID)
 		run := m.runs[runKey]
 		run.Status, run.UpdatedAt, run.Version = RunRunning, now, run.Version+1
 		m.runs[runKey] = run
-		m.appendEventLocked(tenantID, attempt.RunID, Event{Type: "wait.resumed", At: now})
+		m.appendEventLocked(organizationID, attempt.RunID, Event{Type: "wait.resumed", At: now})
 	}
 }
 
@@ -120,13 +120,13 @@ func (m *MemoryStore) RenewLease(_ context.Context, req RenewLeaseRequest) (Leas
 	if req.LeaseDuration <= 0 {
 		return Lease{}, errorf(CodeInvalidArgument, "lease duration must be positive")
 	}
-	lease, _, _, err := m.requireLeaseLocked(req.TenantID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
+	lease, _, _, err := m.requireLeaseLocked(req.OrganizationID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
 	if err != nil {
 		return Lease{}, err
 	}
 	lease.ExpiresAt = req.Now.Add(req.LeaseDuration)
 	lease.UpdatedAt = req.Now
-	m.leases[scoped(req.TenantID, req.AttemptID)] = lease
+	m.leases[scoped(req.OrganizationID, req.AttemptID)] = lease
 	return lease, nil
 }
 
@@ -134,7 +134,7 @@ func (m *MemoryStore) RenewLease(_ context.Context, req RenewLeaseRequest) (Leas
 func (m *MemoryStore) CompleteAttempt(_ context.Context, req CompleteAttemptRequest) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, attempt, run, err := m.requireLeaseLocked(req.TenantID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
+	_, attempt, run, err := m.requireLeaseLocked(req.OrganizationID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
 	if err != nil {
 		return Run{}, err
 	}
@@ -164,8 +164,8 @@ func (m *MemoryStore) CompleteAttempt(_ context.Context, req CompleteAttemptRequ
 			return Run{}, err
 		}
 	}
-	attemptKey := scoped(req.TenantID, attempt.ID)
-	nodeKey := nodeScoped(req.TenantID, run.ID, attempt.NodeID)
+	attemptKey := scoped(req.OrganizationID, attempt.ID)
+	nodeKey := nodeScoped(req.OrganizationID, run.ID, attempt.NodeID)
 	node := m.nodes[nodeKey]
 	if req.RunStatus == RunCancelled {
 		attempt.Status = AttemptCancelled
@@ -187,13 +187,13 @@ func (m *MemoryStore) CompleteAttempt(_ context.Context, req CompleteAttemptRequ
 		if output.ID == "" {
 			output.ID = memoryID("out", m.nextID)
 		}
-		output.TenantID, output.RunID = req.TenantID, run.ID
+		output.OrganizationID, output.RunID = req.OrganizationID, run.ID
 		output.NodeID, output.AttemptID, output.CreatedAt = attempt.NodeID, attempt.ID, req.Now
-		m.outputs[scoped(req.TenantID, output.ID)] = output
+		m.outputs[scoped(req.OrganizationID, output.ID)] = output
 		completionOutput = &output
 	}
 	if req.Snapshot != nil {
-		m.storeSnapshotLocked(req.TenantID, run.ID, attempt.ID, req.Now, *req.Snapshot)
+		m.storeSnapshotLocked(req.OrganizationID, run.ID, attempt.ID, req.Now, *req.Snapshot)
 	}
 	for _, next := range req.Next {
 		if err := m.enqueueSuccessorLocked(run, next, req.Now); err != nil {
@@ -201,10 +201,10 @@ func (m *MemoryStore) CompleteAttempt(_ context.Context, req CompleteAttemptRequ
 		}
 	}
 	if effectiveStatus != RunCancelled {
-		effectiveStatus = m.remainingRunStatusLocked(req.TenantID, run.ID)
+		effectiveStatus = m.remainingRunStatusLocked(req.OrganizationID, run.ID)
 	}
 	if effectiveStatus == RunCancelled {
-		m.cancelIdleAttemptsLocked(req.TenantID, run.ID, req.Now)
+		m.cancelIdleAttemptsLocked(req.OrganizationID, run.ID, req.Now)
 	}
 	if run.Status != effectiveStatus {
 		run.Status = effectiveStatus
@@ -214,10 +214,10 @@ func (m *MemoryStore) CompleteAttempt(_ context.Context, req CompleteAttemptRequ
 	}
 	run.Version++
 	run.UpdatedAt = req.Now
-	m.runs[scoped(req.TenantID, run.ID)] = run
-	m.appendEventLocked(req.TenantID, run.ID, Event{Type: completionEventType(effectiveStatus), At: req.Now})
+	m.runs[scoped(req.OrganizationID, run.ID)] = run
+	m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: completionEventType(effectiveStatus), At: req.Now})
 	for _, event := range req.Events {
-		m.appendEventLocked(req.TenantID, run.ID, event)
+		m.appendEventLocked(req.OrganizationID, run.ID, event)
 	}
 	return cloneRun(run), nil
 }
@@ -234,7 +234,7 @@ func projectRunOutput(output Output) *RunOutput {
 func (m *MemoryStore) SuspendAttempt(_ context.Context, req SuspendAttemptRequest) (Interrupt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, attempt, run, err := m.requireLeaseLocked(req.TenantID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
+	_, attempt, run, err := m.requireLeaseLocked(req.OrganizationID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
 	if err != nil {
 		return Interrupt{}, err
 	}
@@ -248,44 +248,44 @@ func (m *MemoryStore) SuspendAttempt(_ context.Context, req SuspendAttemptReques
 	if interrupt.TokenDigest == ([32]byte{}) {
 		return Interrupt{}, errorf(CodeInvalidArgument, "interrupt token digest is required")
 	}
-	if _, exists := m.interrupts[scoped(req.TenantID, interrupt.ID)]; exists {
+	if _, exists := m.interrupts[scoped(req.OrganizationID, interrupt.ID)]; exists {
 		return Interrupt{}, errorf(CodeConflict, "interrupt id already exists")
 	}
-	interrupt.TenantID, interrupt.RunID = req.TenantID, run.ID
+	interrupt.OrganizationID, interrupt.RunID = req.OrganizationID, run.ID
 	interrupt.NodeID, interrupt.AttemptID = attempt.NodeID, attempt.ID
 	interrupt.Status = InterruptPending
 	interrupt.CreatedAt = req.Now
 	attempt.Status = AttemptSuspended
 	attempt.UpdatedAt = req.Now
-	m.attempts[scoped(req.TenantID, attempt.ID)] = attempt
-	leaseKey := scoped(req.TenantID, attempt.ID)
+	m.attempts[scoped(req.OrganizationID, attempt.ID)] = attempt
+	leaseKey := scoped(req.OrganizationID, attempt.ID)
 	lease := m.leases[leaseKey]
 	lease.WorkerID = ""
 	lease.ExpiresAt = req.Now
 	lease.UpdatedAt = req.Now
 	m.leases[leaseKey] = lease
-	nodeKey := nodeScoped(req.TenantID, run.ID, attempt.NodeID)
+	nodeKey := nodeScoped(req.OrganizationID, run.ID, attempt.NodeID)
 	node := m.nodes[nodeKey]
 	node.Status = NodeSuspended
 	node.UpdatedAt = req.Now
 	m.nodes[nodeKey] = node
-	if m.hasRunnableWorkLocked(req.TenantID, run.ID, attempt.ID) {
+	if m.hasRunnableWorkLocked(req.OrganizationID, run.ID, attempt.ID) {
 		run.Status = RunRunning
 	} else {
 		run.Status = RunSuspended
 	}
 	run.Version++
 	run.UpdatedAt = req.Now
-	m.runs[scoped(req.TenantID, run.ID)] = run
-	m.interrupts[scoped(req.TenantID, interrupt.ID)] = cloneInterrupt(interrupt)
+	m.runs[scoped(req.OrganizationID, run.ID)] = run
+	m.interrupts[scoped(req.OrganizationID, interrupt.ID)] = cloneInterrupt(interrupt)
 	if req.Snapshot != nil {
-		m.storeSnapshotLocked(req.TenantID, run.ID, attempt.ID, req.Now, *req.Snapshot)
+		m.storeSnapshotLocked(req.OrganizationID, run.ID, attempt.ID, req.Now, *req.Snapshot)
 	}
 	if run.Status == RunSuspended {
-		m.appendEventLocked(req.TenantID, run.ID, Event{Type: "run.suspended", At: req.Now})
+		m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "run.suspended", At: req.Now})
 	}
 	for _, event := range req.Events {
-		m.appendEventLocked(req.TenantID, run.ID, event)
+		m.appendEventLocked(req.OrganizationID, run.ID, event)
 	}
 	return cloneInterrupt(interrupt), nil
 }
@@ -294,7 +294,7 @@ func (m *MemoryStore) SuspendAttempt(_ context.Context, req SuspendAttemptReques
 func (m *MemoryStore) FailAttempt(_ context.Context, req FailAttemptRequest) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, attempt, run, err := m.requireLeaseLocked(req.TenantID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
+	_, attempt, run, err := m.requireLeaseLocked(req.OrganizationID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now)
 	if err != nil {
 		return Run{}, err
 	}
@@ -323,16 +323,16 @@ func (m *MemoryStore) FailAttempt(_ context.Context, req FailAttemptRequest) (Ru
 	attempt.ErrorCode = req.ErrorCode
 	attempt.FinishedAt = timePointer(req.Now)
 	attempt.UpdatedAt = req.Now
-	m.attempts[scoped(req.TenantID, attempt.ID)] = attempt
-	delete(m.leases, scoped(req.TenantID, attempt.ID))
+	m.attempts[scoped(req.OrganizationID, attempt.ID)] = attempt
+	delete(m.leases, scoped(req.OrganizationID, attempt.ID))
 	if req.RetryAt != nil {
 		retry := m.createAttemptLocked(run, attempt.NodeID, attempt.Executor, attempt.Input, *req.RetryAt, attempt.Number+1, attempt.ExecutionID)
 		retry.ResumeData = cloneJSON(attempt.ResumeData)
-		m.attempts[scoped(req.TenantID, retry.ID)] = retry
-		m.appendEventLocked(req.TenantID, run.ID, Event{Type: "attempt.retry_scheduled", At: req.Now})
+		m.attempts[scoped(req.OrganizationID, retry.ID)] = retry
+		m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "attempt.retry_scheduled", At: req.Now})
 	} else {
 		run.Status = req.TerminalStatus
-		nodeKey := nodeScoped(req.TenantID, run.ID, attempt.NodeID)
+		nodeKey := nodeScoped(req.OrganizationID, run.ID, attempt.NodeID)
 		node := m.nodes[nodeKey]
 		if req.TerminalStatus == RunError {
 			node.Status = NodeError
@@ -349,19 +349,19 @@ func (m *MemoryStore) FailAttempt(_ context.Context, req FailAttemptRequest) (Ru
 		} else if req.TerminalStatus == RunCancelled {
 			eventType = "run.cancelled"
 		}
-		m.appendEventLocked(req.TenantID, run.ID, Event{Type: eventType, At: req.Now})
+		m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: eventType, At: req.Now})
 	}
 	run.Version++
 	run.UpdatedAt = req.Now
-	m.runs[scoped(req.TenantID, run.ID)] = run
+	m.runs[scoped(req.OrganizationID, run.ID)] = run
 	for _, event := range req.Events {
-		m.appendEventLocked(req.TenantID, run.ID, event)
+		m.appendEventLocked(req.OrganizationID, run.ID, event)
 	}
 	return cloneRun(run), nil
 }
 
-func (m *MemoryStore) requireLeaseLocked(tenantID TenantID, runID, attemptID, workerID string, token uint64, now time.Time) (Lease, Attempt, Run, error) {
-	attemptKey := scoped(tenantID, attemptID)
+func (m *MemoryStore) requireLeaseLocked(organizationID OrganizationID, runID, attemptID, workerID string, token uint64, now time.Time) (Lease, Attempt, Run, error) {
+	attemptKey := scoped(organizationID, attemptID)
 	attempt, ok := m.attempts[attemptKey]
 	if !ok || attempt.RunID != runID {
 		return Lease{}, Attempt{}, Run{}, errorf(CodeNotFound, "attempt not found")
@@ -382,23 +382,23 @@ func (m *MemoryStore) requireLeaseLocked(tenantID TenantID, runID, attemptID, wo
 	if attempt.Status != AttemptRunning {
 		return Lease{}, Attempt{}, Run{}, errorf(CodeConflict, "attempt is not running")
 	}
-	run, ok := m.runs[scoped(tenantID, runID)]
+	run, ok := m.runs[scoped(organizationID, runID)]
 	if !ok {
 		return Lease{}, Attempt{}, Run{}, errorf(CodeNotFound, "run not found")
 	}
 	return lease, attempt, run, nil
 }
 
-func (m *MemoryStore) storeSnapshotLocked(tenantID TenantID, runID, attemptID string, now time.Time, snapshot Snapshot) {
+func (m *MemoryStore) storeSnapshotLocked(organizationID OrganizationID, runID, attemptID string, now time.Time, snapshot Snapshot) {
 	m.nextID++
 	if snapshot.ID == "" {
 		snapshot.ID = memoryID("snap", m.nextID)
 	}
-	snapshot.TenantID, snapshot.RunID, snapshot.AttemptID = tenantID, runID, attemptID
-	snapshot.Sequence = uint64(len(m.snapshots[scoped(tenantID, runID)]) + 1)
+	snapshot.OrganizationID, snapshot.RunID, snapshot.AttemptID = organizationID, runID, attemptID
+	snapshot.Sequence = uint64(len(m.snapshots[scoped(organizationID, runID)]) + 1)
 	snapshot.Data = cloneJSON(snapshot.Data)
 	snapshot.CreatedAt = now
-	m.snapshots[scoped(tenantID, runID)] = append(m.snapshots[scoped(tenantID, runID)], snapshot)
+	m.snapshots[scoped(organizationID, runID)] = append(m.snapshots[scoped(organizationID, runID)], snapshot)
 }
 
 func completionEventType(status RunStatus) string {
@@ -428,8 +428,8 @@ func cloneAttempt(attempt Attempt) Attempt {
 	return attempt
 }
 
-func (m *MemoryStore) latestSnapshotLocked(tenantID TenantID, runID, attemptID string) *Snapshot {
-	stored := m.snapshots[scoped(tenantID, runID)]
+func (m *MemoryStore) latestSnapshotLocked(organizationID OrganizationID, runID, attemptID string) *Snapshot {
+	stored := m.snapshots[scoped(organizationID, runID)]
 	for i := len(stored) - 1; i >= 0; i-- {
 		if stored[i].AttemptID != attemptID {
 			continue

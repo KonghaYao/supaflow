@@ -17,7 +17,7 @@ func TestRunRequestProjectsOutputWithoutEmbeddingItInEvent(t *testing.T) {
 	request, err := runRequest(SourceRun{
 		ID: "run", WorkflowID: "flow", Status: "success", Input: json.RawMessage(`{}`),
 		Output: raw, CreatedAt: now, StartedAt: now, FinishedAt: now,
-	}, "tenant", ImportedVersion{VersionID: "version", PlanID: "plan", PlanHash: strings.Repeat("a", 64)}, "admin")
+	}, "organization", ImportedVersion{VersionID: "version", PlanID: "plan", PlanHash: strings.Repeat("a", 64)}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestUnsafeLegacyOutputBlocksMigrationBeforeWrites(t *testing.T) {
 			CreatedAt: now, StartedAt: now, FinishedAt: now}},
 	}
 	target := newFakeTarget()
-	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	_, err := Migrate(context.Background(), snapshot, Mapping{Organizations: map[string]string{"org": "organization"}}, target, RunOptions{ActorID: "admin"})
 	var preflight *PreflightError
 	hasOutputBlocker := false
 	if errors.As(err, &preflight) {

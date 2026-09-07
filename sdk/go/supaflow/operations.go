@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// CapacitySnapshot reports tenant-owned runtime pressure and delivery backlog.
+// CapacitySnapshot reports organization-owned runtime pressure and delivery backlog.
 type CapacitySnapshot struct {
 	ActiveRuns, QueuedRuns, ActiveWorkers, TriggerCount, PendingTriggerFirings int
 	OutboxBacklog, MaxTriggers, MaxPendingTriggerFirings                       int
@@ -16,7 +16,7 @@ type CapacitySnapshot struct {
 	OldestOutboxAge                                                            time.Duration
 }
 
-// Quota configures hard tenant execution and trigger-ingress bounds.
+// Quota configures hard organization execution and trigger-ingress bounds.
 type Quota struct {
 	MaxActiveRuns            int `json:"maxActiveRuns"`
 	MaxActiveWorkers         int `json:"maxActiveWorkers"`
@@ -26,7 +26,7 @@ type Quota struct {
 	MaxPendingOutboxMessages int `json:"maxPendingOutboxMessages,omitempty"`
 }
 
-// Credential is secret-free tenant credential metadata.
+// Credential is secret-free organization credential metadata.
 type Credential struct {
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
@@ -46,15 +46,15 @@ type WriteCredential struct {
 	Secret  string `json:"secret"`
 }
 
-// RetentionPolicy configures tenant event/output horizons.
+// RetentionPolicy configures organization event/output horizons.
 type RetentionPolicy struct {
 	EventDays           int  `json:"eventDays"`
 	OutputDays          int  `json:"outputDays"`
 	ArchiveBeforeDelete bool `json:"archiveBeforeDelete"`
 }
 
-// TenantExport is safe metadata for a point-in-time tenant export.
-type TenantExport struct {
+// OrganizationExport is safe metadata for a point-in-time organization export.
+type OrganizationExport struct {
 	ID          string     `json:"id"`
 	Status      string     `json:"status"`
 	ObjectID    string     `json:"objectId,omitempty"`
@@ -79,26 +79,26 @@ type DeadLetter struct {
 	RequeuedAt                                                          *time.Time
 }
 
-// Capacity reads tenant-scoped operational pressure.
+// Capacity reads organization-scoped operational pressure.
 func (c *Client) Capacity(ctx context.Context) (CapacitySnapshot, error) {
 	var result CapacitySnapshot
 	err := c.request(ctx, http.MethodGet, "/ops/capacity", "", nil, &result)
 	return result, err
 }
 
-// ConfigureQuota updates tenant concurrency and queue limits.
+// ConfigureQuota updates organization concurrency and queue limits.
 func (c *Client) ConfigureQuota(ctx context.Context, quota Quota, idempotencyKey string) error {
 	return c.request(ctx, http.MethodPost, "/ops/quotas", idempotencyKey, quota, nil)
 }
 
-// ListAudit returns bounded tenant audit records.
+// ListAudit returns bounded organization audit records.
 func (c *Client) ListAudit(ctx context.Context) ([]AuditRecord, error) {
 	var result []AuditRecord
 	err := c.request(ctx, http.MethodGet, "/ops/audit", "", nil, &result)
 	return result, err
 }
 
-// ListDeadLetters returns bounded tenant dead letters.
+// ListDeadLetters returns bounded organization dead letters.
 func (c *Client) ListDeadLetters(ctx context.Context) ([]DeadLetter, error) {
 	var result []DeadLetter
 	err := c.request(ctx, http.MethodGet, "/ops/dlq", "", nil, &result)
@@ -136,14 +136,14 @@ func (c *Client) RevokeCredential(ctx context.Context, credentialID, idempotency
 	return result, err
 }
 
-// ConfigureRetention updates tenant event/output retention horizons.
+// ConfigureRetention updates organization event/output retention horizons.
 func (c *Client) ConfigureRetention(ctx context.Context, policy RetentionPolicy, idempotencyKey string) error {
 	return c.request(ctx, http.MethodPost, "/ops/retention", idempotencyKey, policy, nil)
 }
 
-// ExportTenant requests a secret-free tenant export.
-func (c *Client) ExportTenant(ctx context.Context, idempotencyKey string) (TenantExport, error) {
-	var result TenantExport
+// ExportOrganization requests a secret-free organization export.
+func (c *Client) ExportOrganization(ctx context.Context, idempotencyKey string) (OrganizationExport, error) {
+	var result OrganizationExport
 	err := c.request(ctx, http.MethodPost, "/ops/exports", idempotencyKey, nil, &result)
 	return result, err
 }

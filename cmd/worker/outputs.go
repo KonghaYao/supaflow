@@ -57,30 +57,30 @@ func configureWorkerOutputs(pool *pgxpool.Pool) (*managedOutputs, error) {
 	return &managedOutputs{manager: manager, maximum: maximum}, nil
 }
 
-func (m *managedOutputs) StoreOutput(ctx context.Context, tenantID workflowruntime.TenantID, runID, contentType string, value []byte) (executor.ExternalOutput, error) {
-	managed, err := m.manager.Store(ctx, string(tenantID), runID, contentType, nil, bytes.NewReader(value))
+func (m *managedOutputs) StoreOutput(ctx context.Context, organizationID workflowruntime.OrganizationID, runID, contentType string, value []byte) (executor.ExternalOutput, error) {
+	managed, err := m.manager.Store(ctx, string(organizationID), runID, contentType, nil, bytes.NewReader(value))
 	if err != nil {
 		return executor.ExternalOutput{}, err
 	}
 	return executor.ExternalOutput{ObjectRef: managed.ID, Size: managed.Size, SHA256: managed.SHA256}, nil
 }
 
-func (m *managedOutputs) DiscardOutput(ctx context.Context, tenantID workflowruntime.TenantID, objectRef string) error {
-	return m.manager.Discard(ctx, string(tenantID), objectRef)
+func (m *managedOutputs) DiscardOutput(ctx context.Context, organizationID workflowruntime.OrganizationID, objectRef string) error {
+	return m.manager.Discard(ctx, string(organizationID), objectRef)
 }
 
-// ReadRunOutput resolves an external value only through the tenant/run
+// ReadRunOutput resolves an external value only through the organization/run
 // relation and checks both projections before exposing bounded JSON bytes.
-func (m *managedOutputs) ReadRunOutput(ctx context.Context, tenantID workflowruntime.TenantID, runID string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
-	if m == nil || m.manager == nil || tenantID == "" || runID == "" || !expected.External || expected.ContentType != "application/json" || expected.Size < 0 || expected.Size > m.maximum {
+func (m *managedOutputs) ReadRunOutput(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
+	if m == nil || m.manager == nil || organizationID == "" || runID == "" || !expected.External || expected.ContentType != "application/json" || expected.Size < 0 || expected.Size > m.maximum {
 		return nil, errors.New("invalid external run output request")
 	}
-	reader, metadata, err := m.manager.OpenRunOutput(ctx, string(tenantID), runID)
+	reader, metadata, err := m.manager.OpenRunOutput(ctx, string(organizationID), runID)
 	if err != nil {
 		return nil, fmt.Errorf("open managed run output: %w", err)
 	}
 	defer reader.Close()
-	if metadata.TenantID != string(tenantID) || metadata.RunID != runID || metadata.Kind != "output" || metadata.Status != "active" ||
+	if metadata.OrganizationID != string(organizationID) || metadata.RunID != runID || metadata.Kind != "output" || metadata.Status != "active" ||
 		metadata.ContentType != expected.ContentType || metadata.Size != expected.Size || metadata.SHA256 != expected.SHA256 {
 		return nil, errors.New("managed run output metadata mismatch")
 	}

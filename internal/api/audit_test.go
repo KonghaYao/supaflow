@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/pazhou/supaflow/internal/identity"
+	"github.com/pazhou/supaflow/internal/organization"
 	"github.com/pazhou/supaflow/internal/platformops"
 )
 
@@ -24,10 +24,10 @@ func TestMutationAuditOutcomes(t *testing.T) {
 	}
 	for _, item := range tests {
 		request := httptest.NewRequest(http.MethodPost, "/v1/runs/run-1/cancel", nil)
-		request = request.WithContext(identity.ContextWithPrincipal(request.Context(), Principal{TenantID: "tenant-a", ActorID: "operator-a", Role: RoleOperator}))
+		request = request.WithContext(organization.ContextWithPrincipal(request.Context(), Principal{OrganizationID: "organization-a", ActorID: "operator-a"}))
 		response := httptest.NewRecorder()
 		handler.auditMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(item.status) })).ServeHTTP(response, request)
-		if got := recorder.records[len(recorder.records)-1]; got.Outcome != item.outcome || got.TenantID != "tenant-a" || got.ResourceID != "run-1" {
+		if got := recorder.records[len(recorder.records)-1]; got.Outcome != item.outcome || got.OrganizationID != "organization-a" || got.ResourceID != "run-1" {
 			t.Fatalf("record=%+v", got)
 		}
 	}

@@ -25,38 +25,38 @@ func (w *boundedJSONWriter) Write(value []byte) (int, error) {
 	return written, err
 }
 
-type tenantExportSection struct {
+type organizationExportSection struct {
 	name  string
 	query string
 }
 
-func tenantExportSections() []tenantExportSection {
-	return []tenantExportSection{
-		{name: "workflows", query: `SELECT id,slug,name,description,status,created_by,created_at,updated_at FROM workflows WHERE tenant_id=$1 ORDER BY id`},
-		{name: "versions", query: `SELECT id,workflow_id,version,definition,encode(definition_hash,'hex'),published_by,published_at FROM workflow_versions WHERE tenant_id=$1 ORDER BY workflow_id,version`},
-		{name: "runs", query: `SELECT id,workflow_id,workflow_version_id,execution_plan_id,status,created_at,updated_at,finished_at FROM runs WHERE tenant_id=$1 ORDER BY created_at,id`},
-		{name: "events", query: `SELECT id,run_id,sequence,event_type,payload,created_at FROM run_events WHERE tenant_id=$1 ORDER BY run_id,sequence`},
-		{name: "credentials", query: `SELECT id,name,provider,purpose,status,current_version,created_by,created_at,updated_at,revoked_at FROM credential_refs WHERE tenant_id=$1 ORDER BY id`},
-		{name: "audit", query: `SELECT id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at FROM audit_records WHERE tenant_id=$1 ORDER BY created_at,id`},
+func organizationExportSections() []organizationExportSection {
+	return []organizationExportSection{
+		{name: "workflows", query: `SELECT id,slug,name,description,status,created_by,created_at,updated_at FROM workflows WHERE organization_id=$1 ORDER BY id`},
+		{name: "versions", query: `SELECT id,workflow_id,version,definition,encode(definition_hash,'hex'),published_by,published_at FROM workflow_versions WHERE organization_id=$1 ORDER BY workflow_id,version`},
+		{name: "runs", query: `SELECT id,workflow_id,workflow_version_id,execution_plan_id,status,created_at,updated_at,finished_at FROM runs WHERE organization_id=$1 ORDER BY created_at,id`},
+		{name: "events", query: `SELECT id,run_id,sequence,event_type,payload,created_at FROM run_events WHERE organization_id=$1 ORDER BY run_id,sequence`},
+		{name: "credentials", query: `SELECT id,name,provider,purpose,status,current_version,created_by,created_at,updated_at,revoked_at FROM credential_refs WHERE organization_id=$1 ORDER BY id`},
+		{name: "audit", query: `SELECT id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at FROM audit_records WHERE organization_id=$1 ORDER BY created_at,id`},
 	}
 }
 
-func streamTenantExport(ctx context.Context, tx pgx.Tx, writer io.Writer, maxBytes int64, tenantID string, exportedAt time.Time) error {
+func streamOrganizationExport(ctx context.Context, tx pgx.Tx, writer io.Writer, maxBytes int64, organizationID string, exportedAt time.Time) error {
 	bounded := &boundedJSONWriter{writer: writer, remaining: maxBytes}
-	header, err := json.Marshal(map[string]any{"schemaVersion": 1, "tenantId": tenantID, "exportedAt": exportedAt})
+	header, err := json.Marshal(map[string]any{"schemaVersion": 1, "organizationId": organizationID, "exportedAt": exportedAt})
 	if err != nil {
-		return fmt.Errorf("encode tenant export header: %w", err)
+		return fmt.Errorf("encode organization export header: %w", err)
 	}
 	header = header[:len(header)-1]
 	if _, err = bounded.Write(header); err != nil {
 		return err
 	}
-	for _, section := range tenantExportSections() {
+	for _, section := range organizationExportSections() {
 		prefix, _ := json.Marshal(section.name)
 		if _, err = bounded.Write(append(append([]byte{','}, prefix...), ':', '[')); err != nil {
 			return err
 		}
-		if err = streamExportRows(ctx, tx, bounded, section.query, tenantID); err != nil {
+		if err = streamExportRows(ctx, tx, bounded, section.query, organizationID); err != nil {
 			return err
 		}
 		if _, err = bounded.Write([]byte{']'}); err != nil {
@@ -67,10 +67,10 @@ func streamTenantExport(ctx context.Context, tx pgx.Tx, writer io.Writer, maxByt
 	return err
 }
 
-func streamExportRows(ctx context.Context, tx pgx.Tx, writer io.Writer, query, tenantID string) error {
-	rows, err := tx.Query(ctx, query, tenantID)
+func streamExportRows(ctx context.Context, tx pgx.Tx, writer io.Writer, query, organizationID string) error {
+	rows, err := tx.Query(ctx, query, organizationID)
 	if err != nil {
-		return fmt.Errorf("query tenant export: %w", err)
+		return fmt.Errorf("query organization export: %w", err)
 	}
 	defer rows.Close()
 	fields := rows.FieldDescriptions()
@@ -78,7 +78,7 @@ func streamExportRows(ctx context.Context, tx pgx.Tx, writer io.Writer, query, t
 	for rows.Next() {
 		values, valuesErr := rows.Values()
 		if valuesErr != nil {
-			return fmt.Errorf("read tenant export row: %w", valuesErr)
+			return fmt.Errorf("read organization export row: %w", valuesErr)
 		}
 		record := make(map[string]any, len(values))
 		for index, value := range values {
@@ -86,11 +86,11 @@ func streamExportRows(ctx context.Context, tx pgx.Tx, writer io.Writer, query, t
 		}
 		encoded, encodeErr := json.Marshal(record)
 		if encodeErr != nil {
-			return fmt.Errorf("encode tenant export row: %w", encodeErr)
+			return fmt.Errorf("encode organization export row: %w", encodeErr)
 		}
 		encoded, encodeErr = redactJSON(encoded)
 		if encodeErr != nil {
-			return fmt.Errorf("redact tenant export row: %w", encodeErr)
+			return fmt.Errorf("redact organization export row: %w", encodeErr)
 		}
 		if !first {
 			if _, encodeErr = writer.Write([]byte{','}); encodeErr != nil {
@@ -103,7 +103,7 @@ func streamExportRows(ctx context.Context, tx pgx.Tx, writer io.Writer, query, t
 		first = false
 	}
 	if err = rows.Err(); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("iterate tenant export: %w", err)
+		return fmt.Errorf("iterate organization export: %w", err)
 	}
 	return err
 }

@@ -64,7 +64,7 @@ func TestOutputManagerDoesNotWriteBeforeIntentFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = manager.Store(context.Background(), "tenant", "run", "application/json", nil, strings.NewReader(`{"value":true}`))
+	_, err = manager.Store(context.Background(), "organization", "run", "application/json", nil, strings.NewReader(`{"value":true}`))
 	if err == nil || len(objects.staged) != 0 || len(objects.deleted) != 0 {
 		t.Fatalf("error=%v staged=%v deleted=%v", err, objects.staged, objects.deleted)
 	}

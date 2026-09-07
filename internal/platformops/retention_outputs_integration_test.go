@@ -32,11 +32,11 @@ func TestPostgresInlineOutputRetentionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenantID, workflowID := "retention_"+suffix, "workflow_"+suffix
-	if err = seedPlatformTenant(ctx, pool, tenantID, workflowID); err != nil {
+	organizationID, workflowID := "retention_"+suffix, "workflow_"+suffix
+	if err = seedPlatformOrganization(ctx, pool, organizationID, workflowID); err != nil {
 		t.Fatal(err)
 	}
-	attemptID, runID, err := seedRunningAttempt(ctx, pool, tenantID, workflowID, suffix)
+	attemptID, runID, err := seedRunningAttempt(ctx, pool, organizationID, workflowID, suffix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +46,8 @@ func TestPostgresInlineOutputRetentionLifecycle(t *testing.T) {
 	outputID := "output_" + suffix
 	if _, err = pool.Exec(ctx, `
 		INSERT INTO node_outputs
-		(id,tenant_id,run_id,node_state_id,attempt_id,content_type,inline_value,size_bytes,content_hash,retention_until)
-		VALUES ($1,$2,$3,$4,$5,'application/json',$6,$7,$8,$9)`, outputID, tenantID, runID,
+		(id,organization_id,run_id,node_state_id,attempt_id,content_type,inline_value,size_bytes,content_hash,retention_until)
+		VALUES ($1,$2,$3,$4,$5,'application/json',$6,$7,$8,$9)`, outputID, organizationID, runID,
 		"node_"+suffix, attemptID, value, len(value), digest[:], now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -59,23 +59,23 @@ func TestPostgresInlineOutputRetentionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count, archiveErr := retention.ArchiveNodeOutputs(ctx, tenantID, "retention-worker", 10); archiveErr != nil || count != 1 {
+	if count, archiveErr := retention.ArchiveNodeOutputs(ctx, organizationID, "retention-worker", 10); archiveErr != nil || count != 1 {
 		t.Fatalf("archive count=%d err=%v", count, archiveErr)
 	}
-	if count, deleteErr := retention.DeleteArchivedNodeOutputs(ctx, tenantID, "retention-worker", 0, 10); deleteErr != nil || count != 1 {
+	if count, deleteErr := retention.DeleteArchivedNodeOutputs(ctx, organizationID, "retention-worker", 0, 10); deleteErr != nil || count != 1 {
 		t.Fatalf("delete count=%d err=%v", count, deleteErr)
 	}
 	var status string
 	var inlineValue []byte
 	var archivedAt, deletedAt *time.Time
-	if err = pool.QueryRow(ctx, `SELECT retention_status,inline_value,archived_at,deleted_at FROM node_outputs WHERE tenant_id=$1 AND id=$2`, tenantID, outputID).Scan(&status, &inlineValue, &archivedAt, &deletedAt); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT retention_status,inline_value,archived_at,deleted_at FROM node_outputs WHERE organization_id=$1 AND id=$2`, organizationID, outputID).Scan(&status, &inlineValue, &archivedAt, &deletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if status != "deleted" || inlineValue != nil || archivedAt == nil || deletedAt == nil {
 		t.Fatalf("status=%q inline=%q archived=%v deleted=%v", status, inlineValue, archivedAt, deletedAt)
 	}
 	var audits int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_records WHERE tenant_id=$1 AND action IN ('retention.outputs.archive','retention.outputs.delete')`, tenantID).Scan(&audits); err != nil || audits != 2 {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_records WHERE organization_id=$1 AND action IN ('retention.outputs.archive','retention.outputs.delete')`, organizationID).Scan(&audits); err != nil || audits != 2 {
 		t.Fatalf("audits=%d err=%v", audits, err)
 	}
 }

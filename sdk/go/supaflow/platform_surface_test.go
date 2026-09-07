@@ -13,8 +13,8 @@ import (
 func TestPlatformSurfacePathsAndIdempotency(t *testing.T) {
 	requests := make([]string, 0)
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.Query().Has("tenantId") || request.Header.Get("X-Tenant-ID") != "" {
-			t.Fatal("SDK must never accept or forward tenant identity")
+		if request.URL.Query().Has("organizationId") || request.Header.Get("X-Organization-ID") != "" {
+			t.Fatal("SDK must never accept or forward organization identity")
 		}
 		requests = append(requests, request.Method+" "+request.URL.Path)
 		if (request.URL.Path == "/v1/workflows" || strings.Contains(request.URL.Path, "/ops/triggers")) &&

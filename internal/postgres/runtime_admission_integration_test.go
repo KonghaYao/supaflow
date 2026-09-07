@@ -18,77 +18,77 @@ import (
 // 验证真实 PostgreSQL 中创建、排队、取消、终态释放、优先级晋升和租户隔离属于一个生命周期。
 func TestPostgresRunAdmissionLifecycle(t *testing.T) {
 	ctx, pool := admissionTestPool(t)
-	tenantA, serviceA, planA := admissionTestTenant(t, ctx, pool, "a")
-	tenantB, serviceB, planB := admissionTestTenant(t, ctx, pool, "b")
+	organizationA, serviceA, planA := admissionTestOrganization(t, ctx, pool, "a")
+	organizationB, serviceB, planB := admissionTestOrganization(t, ctx, pool, "b")
 	controller, err := platformops.NewAdmission(pool, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tenantID := range []string{tenantA, tenantB} {
+	for _, organizationID := range []string{organizationA, organizationB} {
 		if err = controller.ConfigureQuota(ctx, platformops.Quota{
-			TenantID: tenantID, MaxActiveRuns: 1, MaxActiveWorkers: 2, MaxQueueDepth: 2,
+			OrganizationID: organizationID, MaxActiveRuns: 1, MaxActiveWorkers: 2, MaxQueueDepth: 2,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	first := startAdmissionRun(t, ctx, serviceA, tenantA, planA, "admission-first", 0)
-	second := startAdmissionRun(t, ctx, serviceA, tenantA, planA, "admission-second", 10)
-	third := startAdmissionRun(t, ctx, serviceA, tenantA, planA, "admission-third", 20)
-	replay, err := serviceA.StartRun(ctx, workflowruntime.TenantID(tenantA), workflowruntime.StartRunRequest{
+	first := startAdmissionRun(t, ctx, serviceA, organizationA, planA, "admission-first", 0)
+	second := startAdmissionRun(t, ctx, serviceA, organizationA, planA, "admission-second", 10)
+	third := startAdmissionRun(t, ctx, serviceA, organizationA, planA, "admission-third", 20)
+	replay, err := serviceA.StartRun(ctx, workflowruntime.OrganizationID(organizationA), workflowruntime.StartRunRequest{
 		Plan: planA, Input: json.RawMessage(`{}`), IdempotencyKey: "admission-second", Priority: 10,
 	})
 	if err != nil || replay.Created || replay.Run.ID != second.ID {
 		t.Fatalf("idempotent replay=%+v err=%v", replay, err)
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantA, 1, 2)
+	assertAdmissionCounters(t, ctx, pool, organizationA, 1, 2)
 
 	store := NewRuntimeStore(pool)
 	now := time.Now().UTC()
 	work, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantA), WorkerID: "worker-a", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationA), WorkerID: "worker-a", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || work == nil || work.Run.ID != first.ID {
 		t.Fatalf("first claim=%+v err=%v", work, err)
 	}
-	if _, err = serviceA.CancelRun(ctx, workflowruntime.TenantID(tenantA), second.ID); err != nil {
+	if _, err = serviceA.CancelRun(ctx, workflowruntime.OrganizationID(organizationA), second.ID); err != nil {
 		t.Fatal(err)
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantA, 1, 1)
+	assertAdmissionCounters(t, ctx, pool, organizationA, 1, 1)
 	if _, err = store.CompleteAttempt(ctx, workflowruntime.CompleteAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantA), RunID: first.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: workflowruntime.OrganizationID(organizationA), RunID: first.ID, AttemptID: work.Attempt.ID,
 		WorkerID: "worker-a", FencingToken: work.Lease.FencingToken, Now: now.Add(time.Second),
 		RunStatus: workflowruntime.RunRunning,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantA, 1, 0)
+	assertAdmissionCounters(t, ctx, pool, organizationA, 1, 0)
 	promoted, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantA), WorkerID: "worker-a", Now: now.Add(2 * time.Second), LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationA), WorkerID: "worker-a", Now: now.Add(2 * time.Second), LeaseDuration: time.Minute,
 	})
 	if err != nil || promoted == nil || promoted.Run.ID != third.ID {
 		t.Fatalf("promoted claim=%+v err=%v", promoted, err)
 	}
 
-	other := startAdmissionRun(t, ctx, serviceB, tenantB, planB, "admission-other", 0)
+	other := startAdmissionRun(t, ctx, serviceB, organizationB, planB, "admission-other", 0)
 	otherWork, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantB), WorkerID: "worker-b", Now: time.Now().UTC(), LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationB), WorkerID: "worker-b", Now: time.Now().UTC(), LeaseDuration: time.Minute,
 	})
 	if err != nil || otherWork == nil || otherWork.Run.ID != other.ID {
-		t.Fatalf("tenant-isolated claim=%+v err=%v", otherWork, err)
+		t.Fatalf("organization-isolated claim=%+v err=%v", otherWork, err)
 	}
 }
 
 // 验证并发创建严格受 active+queue 上限约束，重放不会重复消耗计数。
 func TestPostgresRunAdmissionConcurrentBoundAndReplay(t *testing.T) {
 	ctx, pool := admissionTestPool(t)
-	tenantID, service, plan := admissionTestTenant(t, ctx, pool, "concurrent")
+	organizationID, service, plan := admissionTestOrganization(t, ctx, pool, "concurrent")
 	controller, err := platformops.NewAdmission(pool, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = controller.ConfigureQuota(ctx, platformops.Quota{
-		TenantID: tenantID, MaxActiveRuns: 1, MaxActiveWorkers: 1, MaxQueueDepth: 2,
+		OrganizationID: organizationID, MaxActiveRuns: 1, MaxActiveWorkers: 1, MaxQueueDepth: 2,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPostgresRunAdmissionConcurrentBoundAndReplay(t *testing.T) {
 			defer group.Done()
 			key := fmt.Sprintf("concurrent-admission-%02d", index)
 			priority := index
-			result, startErr := service.StartRun(ctx, workflowruntime.TenantID(tenantID), workflowruntime.StartRunRequest{
+			result, startErr := service.StartRun(ctx, workflowruntime.OrganizationID(organizationID), workflowruntime.StartRunRequest{
 				Plan: plan, Input: json.RawMessage(`{}`), IdempotencyKey: key, Priority: priority,
 			})
 			results <- outcome{key: key, priority: priority, result: result, err: startErr}
@@ -130,37 +130,37 @@ func TestPostgresRunAdmissionConcurrentBoundAndReplay(t *testing.T) {
 	if len(accepted) != 3 || limited != 13 {
 		t.Fatalf("accepted=%d limited=%d", len(accepted), limited)
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantID, 1, 2)
+	assertAdmissionCounters(t, ctx, pool, organizationID, 1, 2)
 	for _, item := range accepted {
-		replay, replayErr := service.StartRun(ctx, workflowruntime.TenantID(tenantID), workflowruntime.StartRunRequest{
+		replay, replayErr := service.StartRun(ctx, workflowruntime.OrganizationID(organizationID), workflowruntime.StartRunRequest{
 			Plan: plan, Input: json.RawMessage(`{}`), IdempotencyKey: item.key, Priority: item.priority,
 		})
 		if replayErr != nil || replay.Created || replay.Run.ID != item.result.Run.ID {
 			t.Fatalf("replay=%+v err=%v", replay, replayErr)
 		}
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantID, 1, 2)
+	assertAdmissionCounters(t, ctx, pool, organizationID, 1, 2)
 }
 
 // 验证 runtime 终态释放在动态下调配额后先自然收敛，低于新上限前不晋升排队 run。
 func TestRuntimeAdmissionReleaseHonorsDownscaledQuota(t *testing.T) {
 	ctx, pool := admissionTestPool(t)
-	tenantID, service, plan := admissionTestTenant(t, ctx, pool, "downscale")
+	organizationID, service, plan := admissionTestOrganization(t, ctx, pool, "downscale")
 	controller, _ := platformops.NewAdmission(pool, 5*time.Second)
 	if err := controller.ConfigureQuota(ctx, platformops.Quota{
-		TenantID: tenantID, MaxActiveRuns: 10, MaxActiveWorkers: 1, MaxQueueDepth: 10,
+		OrganizationID: organizationID, MaxActiveRuns: 10, MaxActiveWorkers: 1, MaxQueueDepth: 10,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	activeIDs := make([]string, 0, 10)
 	for index := 0; index < 15; index++ {
-		run := startAdmissionRun(t, ctx, service, tenantID, plan, fmt.Sprintf("downscale-run-%02d", index), index)
+		run := startAdmissionRun(t, ctx, service, organizationID, plan, fmt.Sprintf("downscale-run-%02d", index), index)
 		if index < 10 {
 			activeIDs = append(activeIDs, run.ID)
 		}
 	}
 	if err := controller.ConfigureQuota(ctx, platformops.Quota{
-		TenantID: tenantID, MaxActiveRuns: 5, MaxActiveWorkers: 1, MaxQueueDepth: 10,
+		OrganizationID: organizationID, MaxActiveRuns: 5, MaxActiveWorkers: 1, MaxQueueDepth: 10,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestRuntimeAdmissionReleaseHonorsDownscaledQuota(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		promoted, releaseErr := releaseRunAdmissionTx(ctx, tx, workflowruntime.TenantID(tenantID), runID, time.Now().UTC())
+		promoted, releaseErr := releaseRunAdmissionTx(ctx, tx, workflowruntime.OrganizationID(organizationID), runID, time.Now().UTC())
 		if releaseErr != nil || promoted != "" {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("release run=%s promoted=%s err=%v", runID, promoted, releaseErr)
@@ -178,12 +178,12 @@ func TestRuntimeAdmissionReleaseHonorsDownscaledQuota(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantID, 5, 5)
+	assertAdmissionCounters(t, ctx, pool, organizationID, 5, 5)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	promoted, err := releaseRunAdmissionTx(ctx, tx, workflowruntime.TenantID(tenantID), activeIDs[5], time.Now().UTC())
+	promoted, err := releaseRunAdmissionTx(ctx, tx, workflowruntime.OrganizationID(organizationID), activeIDs[5], time.Now().UTC())
 	if err != nil || promoted == "" {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("release at quota promoted=%s err=%v", promoted, err)
@@ -191,7 +191,7 @@ func TestRuntimeAdmissionReleaseHonorsDownscaledQuota(t *testing.T) {
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	assertAdmissionCounters(t, ctx, pool, tenantID, 5, 4)
+	assertAdmissionCounters(t, ctx, pool, organizationID, 5, 4)
 }
 
 func admissionTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
@@ -216,13 +216,10 @@ func admissionTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	return ctx, pool
 }
 
-func admissionTestTenant(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label string) (string, *workflowruntime.Service, workflowruntime.PlanRef) {
+func admissionTestOrganization(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label string) (string, *workflowruntime.Service, workflowruntime.PlanRef) {
 	t.Helper()
 	suffix := fmt.Sprintf("%s_%d", label, time.Now().UTC().UnixNano())
-	tenantID, workflowID := "tenant_"+suffix, "workflow_"+suffix
-	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1, $1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
+	organizationID, workflowID := "organization_"+suffix, "workflow_"+suffix
 	definition := workflow.WorkflowDefinition{
 		SchemaVersion: workflow.DefinitionSchemaV1, ID: workflowID,
 		Nodes: []workflow.NodeDefinition{
@@ -232,7 +229,7 @@ func admissionTestTenant(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		Edges: []workflow.EdgeDefinition{{ID: "edge", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}},
 	}
 	catalog := NewPlanCatalog(pool, workflow.BuiltinRegistry(), workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}})
-	published, created, err := catalog.Publish(ctx, tenantID, workflowID, definition, "publish_"+suffix)
+	published, created, err := catalog.Publish(ctx, organizationID, workflowID, definition, "publish_"+suffix)
 	if err != nil || !created {
 		t.Fatalf("publish created=%v err=%v", created, err)
 	}
@@ -240,14 +237,14 @@ func admissionTestTenant(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	if !ok {
 		t.Fatal("published plan has no start node")
 	}
-	return tenantID, workflowruntime.NewService(NewRuntimeStore(pool), nil, nil), workflowruntime.PlanRef{
+	return organizationID, workflowruntime.NewService(NewRuntimeStore(pool), nil, nil), workflowruntime.PlanRef{
 		ID: published.ID, Hash: published.Hash, EntryNodeID: entry.ID, Executor: entry.Executor.Kind,
 	}
 }
 
-func startAdmissionRun(t *testing.T, ctx context.Context, service *workflowruntime.Service, tenantID string, plan workflowruntime.PlanRef, key string, priority int) workflowruntime.Run {
+func startAdmissionRun(t *testing.T, ctx context.Context, service *workflowruntime.Service, organizationID string, plan workflowruntime.PlanRef, key string, priority int) workflowruntime.Run {
 	t.Helper()
-	result, err := service.StartRun(ctx, workflowruntime.TenantID(tenantID), workflowruntime.StartRunRequest{
+	result, err := service.StartRun(ctx, workflowruntime.OrganizationID(organizationID), workflowruntime.StartRunRequest{
 		Plan: plan, Input: json.RawMessage(`{}`), IdempotencyKey: key, Priority: priority,
 	})
 	if err != nil || !result.Created {
@@ -256,10 +253,10 @@ func startAdmissionRun(t *testing.T, ctx context.Context, service *workflowrunti
 	return result.Run
 }
 
-func assertAdmissionCounters(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID string, active, queued int) {
+func assertAdmissionCounters(t *testing.T, ctx context.Context, pool *pgxpool.Pool, organizationID string, active, queued int) {
 	t.Helper()
 	var gotActive, gotQueued int
-	err := pool.QueryRow(ctx, `SELECT active_runs, queued_runs FROM tenant_quota_counters WHERE tenant_id = $1`, tenantID).Scan(&gotActive, &gotQueued)
+	err := pool.QueryRow(ctx, `SELECT active_runs, queued_runs FROM organization_quota_counters WHERE organization_id = $1`, organizationID).Scan(&gotActive, &gotQueued)
 	if err != nil || gotActive != active || gotQueued != queued {
 		t.Fatalf("counters active=%d queued=%d want=%d/%d err=%v", gotActive, gotQueued, active, queued, err)
 	}

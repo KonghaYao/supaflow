@@ -43,7 +43,7 @@ func (e *cancellableSideEffect) Deliver(ctx context.Context, _ DeliveryMessage) 
 func TestOutboxDispatcherCancelsDeliveryImmediatelyAfterLeaseLoss(t *testing.T) {
 	now := time.Now().UTC()
 	base := &deliveryTestStore{message: DeliveryMessage{
-		ID: "out_lease_loss", TenantID: "tenant_a", Attempts: 1, MaxAttempts: 2,
+		ID: "out_lease_loss", OrganizationID: "organization_a", Attempts: 1, MaxAttempts: 2,
 	}}
 	store := &leaseLossStore{deliveryTestStore: base, lost: make(chan struct{})}
 	effect := &cancellableSideEffect{started: make(chan struct{}), stopped: make(chan struct{})}
@@ -52,7 +52,7 @@ func TestOutboxDispatcherCancelsDeliveryImmediatelyAfterLeaseLoss(t *testing.T) 
 		t.Fatal(err)
 	}
 	dispatcher.now = func() time.Time { return time.Now().UTC() }
-	result, err := dispatcher.DispatchOne(context.Background(), "tenant_a", now)
+	result, err := dispatcher.DispatchOne(context.Background(), "organization_a", now)
 	if !errors.Is(err, ErrStaleLease) || result.MessageID != "out_lease_loss" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}

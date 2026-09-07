@@ -23,7 +23,7 @@ func TestProcessIsolationRunnerRejectsFailedCapabilityProbe(t *testing.T) {
 	}
 }
 
-// 验证控制面仅通过独立 helper 进程传递 tenant/attempt/fencing 协议。
+// 验证控制面仅通过独立 helper 进程传递 organization/attempt/fencing 协议。
 func TestProcessIsolationRunnerUsesFencedIPC(t *testing.T) {
 	t.Setenv("SUPAFLOW_ISOLATION_HELPER", "respond")
 	runner, err := NewProcessIsolationRunner(ProcessIsolationConfig{
@@ -34,7 +34,7 @@ func TestProcessIsolationRunnerUsesFencedIPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := runner.Run(context.Background(), IsolationRequest{
-		TenantID: "tenant", RunID: "run", NodeID: "node", AttemptID: "attempt", FencingToken: 9,
+		OrganizationID: "organization", RunID: "run", NodeID: "node", AttemptID: "attempt", FencingToken: 9,
 		Language: "shell", Source: "printf null", Input: json.RawMessage(`null`),
 	})
 	if err != nil || string(output) != `{"attemptId":"attempt","fencingToken":9}` {
@@ -51,7 +51,7 @@ func TestProcessIsolationRunnerPropagatesCancellation(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := runner.Run(ctx, IsolationRequest{TenantID: workflowruntime.TenantID("tenant"), RunID: "run", NodeID: "node", AttemptID: "attempt", FencingToken: 1, Language: "shell", Source: "x", Input: json.RawMessage(`null`)})
+	_, err := runner.Run(ctx, IsolationRequest{OrganizationID: workflowruntime.OrganizationID("organization"), RunID: "run", NodeID: "node", AttemptID: "attempt", FencingToken: 1, Language: "shell", Source: "x", Input: json.RawMessage(`null`)})
 	if err == nil {
 		t.Fatal("Run() error = nil")
 	}

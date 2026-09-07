@@ -7,7 +7,7 @@ import (
 )
 
 // ResumeWebhookCommand is the unauthenticated transport input authorized by a
-// signed, expiring token. Tenant and run scope never come from the body.
+// signed, expiring token. Organization and run scope never come from the body.
 type ResumeWebhookCommand struct {
 	InterruptID    string
 	ResumeToken    string
@@ -43,7 +43,7 @@ func (s *Service) ResumeWebhook(ctx context.Context, command ResumeWebhookComman
 		return ResumeWebhookResult{}, err
 	}
 	return s.store.ResumeWebhook(ctx, ResumeWebhookRequest{
-		TenantID: claims.TenantID, InterruptID: claims.InterruptID, RunID: claims.RunID,
+		OrganizationID: claims.OrganizationID, InterruptID: claims.InterruptID, RunID: claims.RunID,
 		NodeID: claims.NodeID, AttemptID: claims.AttemptID, TokenDigest: digest,
 		IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash,
 		Data: cloneJSON(command.Data), Now: s.clock.Now(),

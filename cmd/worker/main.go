@@ -40,9 +40,9 @@ func run() error {
 	if err != nil {
 		return errors.New("SUPAFLOW_RESUME_TOKEN_SECRET must contain at least 32 bytes")
 	}
-	tenants := parseList(os.Getenv("SUPAFLOW_WORKER_TENANTS"))
-	if len(tenants) == 0 {
-		return errors.New("SUPAFLOW_WORKER_TENANTS requires at least one tenant")
+	organizations := parseList(os.Getenv("SUPAFLOW_WORKER_TENANTS"))
+	if len(organizations) == 0 {
+		return errors.New("SUPAFLOW_WORKER_TENANTS requires at least one organization")
 	}
 	allowedHosts := parseList(os.Getenv("SUPAFLOW_HTTP_ALLOWED_HOSTS"))
 	if len(allowedHosts) == 0 {
@@ -135,7 +135,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	operations, err := configureWorkerOperations(ctx, pool, workerID, tenants)
+	operations, err := configureWorkerOperations(ctx, pool, workerID, organizations)
 	if err != nil {
 		return err
 	}
@@ -154,30 +154,30 @@ func run() error {
 		stopHeartbeat()
 		<-heartbeatDone
 	}()
-	slog.Info("worker started", "workerId", workerID, "tenantCount", len(tenants))
+	slog.Info("worker started", "workerId", workerID, "organizationCount", len(organizations))
 	idle := time.NewTicker(100 * time.Millisecond)
 	defer idle.Stop()
 	for {
 		worked := false
-		for _, tenant := range tenants {
+		for _, organization := range organizations {
 			if ctx.Err() != nil {
 				slog.Info("worker drained", "workerId", workerID)
 				return nil
 			}
-			if !operations.mayClaim(ctx, tenant) {
+			if !operations.mayClaim(ctx, organization) {
 				continue
 			}
 			operations.setActive(1)
-			operations.heartbeatTenant(ctx, tenant, 1)
+			operations.heartbeatOrganization(ctx, organization, 1)
 			executionCtx := ctx
 			completeTelemetry := func(error) {}
 			if telemetry != nil {
-				executionCtx, completeTelemetry = telemetry.Start(ctx, "worker.execution", tenant)
+				executionCtx, completeTelemetry = telemetry.Start(ctx, "worker.execution", organization)
 			}
-			result, advanceErr := orchestrator.Advance(executionCtx, workflowruntime.TenantID(tenant))
+			result, advanceErr := orchestrator.Advance(executionCtx, workflowruntime.OrganizationID(organization))
 			completeTelemetry(advanceErr)
 			operations.setActive(0)
-			operations.heartbeatTenant(ctx, tenant, 0)
+			operations.heartbeatOrganization(ctx, organization, 0)
 			if advanceErr != nil {
 				slog.Error("attempt advance failed", "error", advanceErr)
 				continue

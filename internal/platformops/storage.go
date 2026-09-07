@@ -52,17 +52,17 @@ func NewFileObjectStore(root string) (*FileObjectStore, error) {
 
 // Put provides the basic ObjectStore API. Production managers use the owned
 // staging methods below so database fencing surrounds publication.
-func (s *FileObjectStore) Put(ctx context.Context, tenantID, key string, source io.Reader, maxBytes int64) (StoredObject, error) {
+func (s *FileObjectStore) Put(ctx context.Context, organizationID, key string, source io.Reader, maxBytes int64) (StoredObject, error) {
 	ownerToken, err := newID("direct")
 	if err != nil {
 		return StoredObject{}, err
 	}
-	stored, err := s.StageUpload(ctx, tenantID, key, ownerToken, source, maxBytes)
+	stored, err := s.StageUpload(ctx, organizationID, key, ownerToken, source, maxBytes)
 	if err != nil {
 		return StoredObject{}, err
 	}
-	if err = s.PublishUpload(ctx, tenantID, key, ownerToken); err != nil {
-		_ = s.AbortUpload(context.WithoutCancel(ctx), tenantID, key, ownerToken, false)
+	if err = s.PublishUpload(ctx, organizationID, key, ownerToken); err != nil {
+		_ = s.AbortUpload(context.WithoutCancel(ctx), organizationID, key, ownerToken, false)
 		return StoredObject{}, err
 	}
 	return stored, nil
@@ -70,13 +70,13 @@ func (s *FileObjectStore) Put(ctx context.Context, tenantID, key string, source 
 
 // StageUpload writes one owner-scoped temporary payload without making it
 // visible as the final object.
-func (s *FileObjectStore) StageUpload(ctx context.Context, tenantID, key, ownerToken string, source io.Reader, maxBytes int64) (StoredObject, error) {
-	path, err := s.path(tenantID, key)
+func (s *FileObjectStore) StageUpload(ctx context.Context, organizationID, key, ownerToken string, source io.Reader, maxBytes int64) (StoredObject, error) {
+	path, err := s.path(organizationID, key)
 	if err != nil || !objectPathPart.MatchString(ownerToken) || source == nil || maxBytes <= 0 {
 		return StoredObject{}, ErrInvalidArgument
 	}
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return StoredObject{}, fmt.Errorf("create tenant object directory: %w", err)
+		return StoredObject{}, fmt.Errorf("create organization object directory: %w", err)
 	}
 	temporaryPath := path + ".upload." + ownerToken
 	temporary, err := os.OpenFile(temporaryPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -115,8 +115,8 @@ func (s *FileObjectStore) StageUpload(ctx context.Context, tenantID, key, ownerT
 
 // PublishUpload atomically renames only the named owner's stage. Callers must
 // hold the matching database intent row lock while invoking it.
-func (s *FileObjectStore) PublishUpload(_ context.Context, tenantID, key, ownerToken string) error {
-	path, err := s.path(tenantID, key)
+func (s *FileObjectStore) PublishUpload(_ context.Context, organizationID, key, ownerToken string) error {
+	path, err := s.path(organizationID, key)
 	if err != nil || !objectPathPart.MatchString(ownerToken) {
 		return ErrInvalidArgument
 	}
@@ -129,9 +129,9 @@ func (s *FileObjectStore) PublishUpload(_ context.Context, tenantID, key, ownerT
 	return nil
 }
 
-// Open returns a tenant-scoped object stream.
-func (s *FileObjectStore) Open(_ context.Context, tenantID, key string) (io.ReadCloser, error) {
-	path, err := s.path(tenantID, key)
+// Open returns a organization-scoped object stream.
+func (s *FileObjectStore) Open(_ context.Context, organizationID, key string) (io.ReadCloser, error) {
+	path, err := s.path(organizationID, key)
 	if err != nil {
 		return nil, ErrInvalidArgument
 	}
@@ -145,9 +145,9 @@ func (s *FileObjectStore) Open(_ context.Context, tenantID, key string) (io.Read
 	return file, nil
 }
 
-// Delete removes exactly one validated tenant object.
-func (s *FileObjectStore) Delete(_ context.Context, tenantID, key string) error {
-	path, err := s.path(tenantID, key)
+// Delete removes exactly one validated organization object.
+func (s *FileObjectStore) Delete(_ context.Context, organizationID, key string) error {
+	path, err := s.path(organizationID, key)
 	if err != nil {
 		return ErrInvalidArgument
 	}
@@ -163,8 +163,8 @@ func (s *FileObjectStore) Delete(_ context.Context, tenantID, key string) error 
 
 // AbortUpload always removes only the named owner's stage. The final object is
 // removed only after the database coordinator proves this owner may do so.
-func (s *FileObjectStore) AbortUpload(_ context.Context, tenantID, key, ownerToken string, removeFinal bool) error {
-	path, err := s.path(tenantID, key)
+func (s *FileObjectStore) AbortUpload(_ context.Context, organizationID, key, ownerToken string, removeFinal bool) error {
+	path, err := s.path(organizationID, key)
 	if err != nil || !objectPathPart.MatchString(ownerToken) {
 		return ErrInvalidArgument
 	}
@@ -198,12 +198,12 @@ func syncDirectory(path string) error {
 	return directory.Sync()
 }
 
-func (s *FileObjectStore) path(tenantID, key string) (string, error) {
-	if !objectPathPart.MatchString(tenantID) || !objectPathPart.MatchString(key) {
+func (s *FileObjectStore) path(organizationID, key string) (string, error) {
+	if !objectPathPart.MatchString(organizationID) || !objectPathPart.MatchString(key) {
 		return "", ErrInvalidArgument
 	}
-	path := filepath.Join(s.root, tenantID, key)
-	prefix := filepath.Join(s.root, tenantID) + string(filepath.Separator)
+	path := filepath.Join(s.root, organizationID, key)
+	prefix := filepath.Join(s.root, organizationID) + string(filepath.Separator)
 	if !strings.HasPrefix(path, prefix) {
 		return "", ErrInvalidArgument
 	}
@@ -226,7 +226,7 @@ func (r *contextReader) Read(buffer []byte) (int, error) {
 
 // ManagedObject is safe database metadata for one large object.
 type ManagedObject struct {
-	TenantID       string     `json:"-"`
+	OrganizationID string     `json:"-"`
 	ID             string     `json:"id"`
 	RunID          string     `json:"runId,omitempty"`
 	Kind           string     `json:"kind"`
@@ -255,8 +255,8 @@ func NewOutputManager(pool *pgxpool.Pool, objects ObjectStore, maxBytes int64) (
 }
 
 // Store persists bytes and metadata; metadata failure compensates by deleting the object.
-func (m *OutputManager) Store(ctx context.Context, tenantID, runID, contentType string, retentionUntil *time.Time, source io.Reader) (ManagedObject, error) {
-	if tenantID == "" || runID == "" || contentType == "" {
+func (m *OutputManager) Store(ctx context.Context, organizationID, runID, contentType string, retentionUntil *time.Time, source io.Reader) (ManagedObject, error) {
+	if organizationID == "" || runID == "" || contentType == "" {
 		return ManagedObject{}, ErrInvalidArgument
 	}
 	id, err := newID("obj")
@@ -264,7 +264,7 @@ func (m *OutputManager) Store(ctx context.Context, tenantID, runID, contentType 
 		return ManagedObject{}, err
 	}
 	upload, err := beginObjectUpload(ctx, m.pool, m.objects, objectUploadSpec{
-		tenantID: tenantID, id: id, runID: runID, kind: "output", key: id,
+		organizationID: organizationID, id: id, runID: runID, kind: "output", key: id,
 		contentType: contentType, retentionUntil: retentionUntil,
 	})
 	if err != nil {
@@ -287,26 +287,26 @@ func (m *OutputManager) Store(ctx context.Context, tenantID, runID, contentType 
 		return ManagedObject{}, fmt.Errorf("begin managed output registration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err = lockTenantRetention(ctx, tx, tenantID); err != nil {
+	if err = lockOrganizationRetention(ctx, tx, organizationID); err != nil {
 		return ManagedObject{}, err
 	}
 	if err = upload.publishTx(ctx, tx); err != nil {
 		return ManagedObject{}, err
 	}
-	metadata := ManagedObject{TenantID: tenantID, ID: id, RunID: runID, Kind: "output", ObjectKey: stored.Key, ContentType: contentType, Size: stored.Size, SHA256: stored.SHA256, RetentionUntil: retentionUntil, Status: "active"}
+	metadata := ManagedObject{OrganizationID: organizationID, ID: id, RunID: runID, Kind: "output", ObjectKey: stored.Key, ContentType: contentType, Size: stored.Size, SHA256: stored.SHA256, RetentionUntil: retentionUntil, Status: "active"}
 	digest, _ := hex.DecodeString(stored.SHA256)
 	err = tx.QueryRow(ctx, `
-		INSERT INTO managed_objects (tenant_id,id,run_id,kind,object_key,content_type,size_bytes,content_hash,retention_until)
+		INSERT INTO managed_objects (organization_id,id,run_id,kind,object_key,content_type,size_bytes,content_hash,retention_until)
 		VALUES ($1,$2,$3,'output',$4,$5,$6,$7,
 		        LEAST(
 		            COALESCE($8, now() + COALESCE(
-		                (SELECT output_days FROM retention_policies WHERE tenant_id=$1), 30
+		                (SELECT output_days FROM retention_policies WHERE organization_id=$1), 30
 		            ) * interval '1 day'),
 		            now() + COALESCE(
-		                (SELECT output_days FROM retention_policies WHERE tenant_id=$1), 30
+		                (SELECT output_days FROM retention_policies WHERE organization_id=$1), 30
 		            ) * interval '1 day'
 		        ))
-		RETURNING created_at,retention_until`, tenantID, id, runID,
+		RETURNING created_at,retention_until`, organizationID, id, runID,
 		stored.Key, contentType, stored.Size, digest, retentionUntil).Scan(&metadata.CreatedAt, &metadata.RetentionUntil)
 	if err != nil {
 		return ManagedObject{}, fmt.Errorf("register managed output: %w", err)
@@ -322,20 +322,20 @@ func (m *OutputManager) Store(ctx context.Context, tenantID, runID, contentType 
 }
 
 // Open verifies stored bytes against immutable size and hash metadata.
-func (m *OutputManager) Open(ctx context.Context, tenantID, objectID string) (io.ReadCloser, ManagedObject, error) {
+func (m *OutputManager) Open(ctx context.Context, organizationID, objectID string) (io.ReadCloser, ManagedObject, error) {
 	var metadata ManagedObject
 	var digest []byte
 	err := m.pool.QueryRow(ctx, `
-		SELECT tenant_id,id,COALESCE(run_id,''),kind,object_key,content_type,size_bytes,content_hash,
+		SELECT organization_id,id,COALESCE(run_id,''),kind,object_key,content_type,size_bytes,content_hash,
 		       retention_until,status,created_at
-		FROM managed_objects WHERE tenant_id=$1 AND id=$2 AND status IN ('active','archived')`, tenantID, objectID).Scan(
-		&metadata.TenantID, &metadata.ID, &metadata.RunID, &metadata.Kind, &metadata.ObjectKey,
+		FROM managed_objects WHERE organization_id=$1 AND id=$2 AND status IN ('active','archived')`, organizationID, objectID).Scan(
+		&metadata.OrganizationID, &metadata.ID, &metadata.RunID, &metadata.Kind, &metadata.ObjectKey,
 		&metadata.ContentType, &metadata.Size, &digest, &metadata.RetentionUntil, &metadata.Status, &metadata.CreatedAt)
 	if err != nil {
 		return nil, ManagedObject{}, ErrNotFound
 	}
 	metadata.SHA256 = hex.EncodeToString(digest)
-	reader, err := m.objects.Open(ctx, tenantID, metadata.ObjectKey)
+	reader, err := m.objects.Open(ctx, organizationID, metadata.ObjectKey)
 	if err != nil {
 		return nil, ManagedObject{}, err
 	}
@@ -343,32 +343,32 @@ func (m *OutputManager) Open(ctx context.Context, tenantID, objectID string) (io
 	return &verifyingReadCloser{reader: reader, hash: sha256.New(), expected: expected, expectedSize: metadata.Size}, metadata, nil
 }
 
-// OpenRunOutput resolves an opaque object only through a tenant-owned run's
+// OpenRunOutput resolves an opaque object only through a organization-owned run's
 // final output relation; callers never receive or supply an object-store key.
-func (m *OutputManager) OpenRunOutput(ctx context.Context, tenantID, runID string) (io.ReadCloser, ManagedObject, error) {
+func (m *OutputManager) OpenRunOutput(ctx context.Context, organizationID, runID string) (io.ReadCloser, ManagedObject, error) {
 	var objectID string
 	err := m.pool.QueryRow(ctx, `
 		SELECT managed.id
 		FROM runs run
-		JOIN node_outputs output ON output.tenant_id=run.tenant_id AND output.id=run.output_id
-		JOIN managed_objects managed ON managed.tenant_id=output.tenant_id AND managed.id=output.object_ref
-		WHERE run.tenant_id=$1 AND run.id=$2 AND output.retention_status='active'
+		JOIN node_outputs output ON output.organization_id=run.organization_id AND output.id=run.output_id
+		JOIN managed_objects managed ON managed.organization_id=output.organization_id AND managed.id=output.object_ref
+		WHERE run.organization_id=$1 AND run.id=$2 AND output.retention_status='active'
 		  AND managed.status='active'
 		  AND (output.retention_until IS NULL OR output.retention_until > now())
-		  AND (managed.retention_until IS NULL OR managed.retention_until > now())`, tenantID, runID).Scan(&objectID)
+		  AND (managed.retention_until IS NULL OR managed.retention_until > now())`, organizationID, runID).Scan(&objectID)
 	if err != nil {
 		return nil, ManagedObject{}, ErrNotFound
 	}
-	return m.Open(ctx, tenantID, objectID)
+	return m.Open(ctx, organizationID, objectID)
 }
 
-// Discard durably hides one tenant-scoped output before deleting its bytes.
+// Discard durably hides one organization-scoped output before deleting its bytes.
 // Interrupted physical deletion is retried by object recovery.
-func (m *OutputManager) Discard(ctx context.Context, tenantID, objectID string) error {
-	if tenantID == "" || objectID == "" {
+func (m *OutputManager) Discard(ctx context.Context, organizationID, objectID string) error {
+	if organizationID == "" || objectID == "" {
 		return ErrInvalidArgument
 	}
-	_, err := deleteManagedObject(ctx, m.pool, m.objects, tenantID, objectID, "output", nil)
+	_, err := deleteManagedObject(ctx, m.pool, m.objects, organizationID, objectID, "output", nil)
 	return err
 }
 

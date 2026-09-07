@@ -17,7 +17,7 @@ const maxOutboundWebhookBody = 1 << 20
 
 // OutboundWebhookSubscription is safe management metadata for one event sink.
 type OutboundWebhookSubscription struct {
-	TenantID            string        `json:"-"`
+	OrganizationID      string        `json:"-"`
 	ID                  string        `json:"id"`
 	Name                string        `json:"name"`
 	EndpointURL         string        `json:"endpointUrl"`
@@ -77,12 +77,12 @@ func NewOutboundWebhookDelivery(store OutboundWebhookStore, secrets OutboundWebh
 	return &OutboundWebhookDelivery{store: store, secrets: secrets, client: client, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-// Deliver sends one outbox event to every matching tenant subscription.
+// Deliver sends one outbox event to every matching organization subscription.
 func (d *OutboundWebhookDelivery) Deliver(ctx context.Context, message DeliveryMessage) error {
-	if message.ID == "" || message.TenantID == "" || message.Topic == "" || !json.Valid(message.Payload) {
+	if message.ID == "" || message.OrganizationID == "" || message.Topic == "" || !json.Valid(message.Payload) {
 		return ErrInvalidArgument
 	}
-	subscriptions, err := d.store.ListEnabled(ctx, message.TenantID, message.Topic)
+	subscriptions, err := d.store.ListEnabled(ctx, message.OrganizationID, message.Topic)
 	if err != nil {
 		return fmt.Errorf("list outbound webhook subscriptions: %w", err)
 	}
@@ -98,7 +98,7 @@ func (d *OutboundWebhookDelivery) Deliver(ctx context.Context, message DeliveryM
 func (d *OutboundWebhookDelivery) deliverSubscription(ctx context.Context, subscription OutboundWebhookSubscription, message DeliveryMessage) error {
 	now := d.now().UTC()
 	requestID := outboundRequestID(subscription.ID, message.ID)
-	delivered, err := d.store.BeginDelivery(ctx, message.TenantID, subscription.ID, message.ID, requestID, now)
+	delivered, err := d.store.BeginDelivery(ctx, message.OrganizationID, subscription.ID, message.ID, requestID, now)
 	if err != nil {
 		return fmt.Errorf("begin outbound webhook receipt: %w", err)
 	}
@@ -112,7 +112,7 @@ func (d *OutboundWebhookDelivery) deliverSubscription(ctx context.Context, subsc
 	if err != nil || len(body) > maxOutboundWebhookBody {
 		return ErrInvalidArgument
 	}
-	secret, err := d.secrets.ResolveOutboundWebhookSecret(ctx, message.TenantID, subscription.SigningCredentialID)
+	secret, err := d.secrets.ResolveOutboundWebhookSecret(ctx, message.OrganizationID, subscription.SigningCredentialID)
 	if err != nil {
 		return fmt.Errorf("resolve outbound webhook signing credential: %w", err)
 	}
@@ -124,7 +124,7 @@ func (d *OutboundWebhookDelivery) deliverSubscription(ctx context.Context, subsc
 	request.Signature = SignOutboundWebhook(secret, now, requestID, body)
 	status, sendErr := d.client.Send(ctx, request)
 	if sendErr == nil && status >= 200 && status < 300 {
-		if err = d.store.CompleteDelivery(ctx, message.TenantID, subscription.ID, message.ID, status, d.now().UTC()); err != nil {
+		if err = d.store.CompleteDelivery(ctx, message.OrganizationID, subscription.ID, message.ID, status, d.now().UTC()); err != nil {
 			return fmt.Errorf("complete outbound webhook receipt: %w", err)
 		}
 		return nil
@@ -134,7 +134,7 @@ func (d *OutboundWebhookDelivery) deliverSubscription(ctx context.Context, subsc
 		diagnostic = sendErr.Error()
 	}
 	diagnostic = RedactDiagnostic(diagnostic)
-	if err = d.store.FailWebhookDelivery(ctx, message.TenantID, subscription.ID, message.ID, diagnostic, d.now().UTC()); err != nil {
+	if err = d.store.FailWebhookDelivery(ctx, message.OrganizationID, subscription.ID, message.ID, diagnostic, d.now().UTC()); err != nil {
 		return fmt.Errorf("record outbound webhook failure: %w", err)
 	}
 	return fmt.Errorf("outbound webhook delivery failed: %s", diagnostic)

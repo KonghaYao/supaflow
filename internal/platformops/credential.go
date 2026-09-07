@@ -68,7 +68,7 @@ func (p *LocalAESProvider) UnwrapKey(_ context.Context, keyID string, wrapped, a
 
 // Credential is safe metadata returned to management APIs; it never includes secret bytes.
 type Credential struct {
-	TenantID       string     `json:"-"`
+	OrganizationID string     `json:"-"`
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
 	Provider       string     `json:"provider"`
@@ -83,35 +83,35 @@ type Credential struct {
 
 // CreateCredentialRequest creates a credential and its first encrypted version.
 type CreateCredentialRequest struct {
-	TenantID string
-	ActorID  string
-	Name     string
-	Purpose  string
-	Secret   []byte
+	OrganizationID string
+	ActorID        string
+	Name           string
+	Purpose        string
+	Secret         []byte
 }
 
 // ResolveCredentialRequest grants one running attempt least-privilege secret access.
 type ResolveCredentialRequest struct {
-	TenantID     string
-	RunID        string
-	AttemptID    string
-	CredentialID string
-	Purpose      string
-	FencingToken uint64
-	Now          time.Time
+	OrganizationID string
+	RunID          string
+	AttemptID      string
+	CredentialID   string
+	Purpose        string
+	FencingToken   uint64
+	Now            time.Time
 }
 
 // GrantCredentialRequest binds one purpose-specific credential grant to the
 // currently leased attempt. Stale workers cannot mint or consume a grant.
 type GrantCredentialRequest struct {
-	TenantID     string
-	RunID        string
-	AttemptID    string
-	CredentialID string
-	Purpose      string
-	FencingToken uint64
-	Now          time.Time
-	ExpiresAt    *time.Time
+	OrganizationID string
+	RunID          string
+	AttemptID      string
+	CredentialID   string
+	Purpose        string
+	FencingToken   uint64
+	Now            time.Time
+	ExpiresAt      *time.Time
 }
 
 // EncryptedCredential is the persistence boundary model.
@@ -154,60 +154,60 @@ func NewCredentialService(store CredentialStore, provider EnvelopeProvider) (*Cr
 
 // Create encrypts a new credential and clears the caller-owned secret buffer after use.
 func (s *CredentialService) Create(ctx context.Context, request CreateCredentialRequest) (Credential, error) {
-	if request.TenantID == "" || request.ActorID == "" || request.Name == "" || request.Purpose == "" || len(request.Secret) == 0 {
+	if request.OrganizationID == "" || request.ActorID == "" || request.Name == "" || request.Purpose == "" || len(request.Secret) == 0 {
 		return Credential{}, ErrInvalidArgument
 	}
 	id, err := mutationResourceIDOrRandom(ctx, "cred", "reference")
 	if err != nil {
 		return Credential{}, err
 	}
-	encrypted, err := s.encrypt(ctx, request.TenantID, id, 1, request.Secret)
+	encrypted, err := s.encrypt(ctx, request.OrganizationID, id, 1, request.Secret)
 	clearBytes(request.Secret)
 	if err != nil {
 		return Credential{}, err
 	}
 	encrypted.Credential = Credential{
-		TenantID: request.TenantID, ID: id, Name: request.Name, Provider: "envelope",
+		OrganizationID: request.OrganizationID, ID: id, Name: request.Name, Provider: "envelope",
 		Purpose: request.Purpose, Status: "active", CurrentVersion: 1, CreatedBy: request.ActorID,
 	}
 	return s.store.CreateCredential(ctx, encrypted, request.ActorID)
 }
 
 // Rotate replaces the active version without changing the stable reference.
-func (s *CredentialService) Rotate(ctx context.Context, tenantID, credentialID, actorID string, nextVersion int, secret []byte) (Credential, error) {
-	if tenantID == "" || credentialID == "" || actorID == "" || nextVersion < 2 || len(secret) == 0 {
+func (s *CredentialService) Rotate(ctx context.Context, organizationID, credentialID, actorID string, nextVersion int, secret []byte) (Credential, error) {
+	if organizationID == "" || credentialID == "" || actorID == "" || nextVersion < 2 || len(secret) == 0 {
 		return Credential{}, ErrInvalidArgument
 	}
-	encrypted, err := s.encrypt(ctx, tenantID, credentialID, nextVersion, secret)
+	encrypted, err := s.encrypt(ctx, organizationID, credentialID, nextVersion, secret)
 	clearBytes(secret)
 	if err != nil {
 		return Credential{}, err
 	}
-	encrypted.Credential = Credential{TenantID: tenantID, ID: credentialID, CurrentVersion: nextVersion}
+	encrypted.Credential = Credential{OrganizationID: organizationID, ID: credentialID, CurrentVersion: nextVersion}
 	return s.store.RotateCredential(ctx, encrypted, actorID)
 }
 
 // Revoke permanently prevents further resolution while retaining audit history.
-func (s *CredentialService) Revoke(ctx context.Context, tenantID, credentialID, actorID string, now time.Time) (Credential, error) {
-	if tenantID == "" || credentialID == "" || actorID == "" || now.IsZero() {
+func (s *CredentialService) Revoke(ctx context.Context, organizationID, credentialID, actorID string, now time.Time) (Credential, error) {
+	if organizationID == "" || credentialID == "" || actorID == "" || now.IsZero() {
 		return Credential{}, ErrInvalidArgument
 	}
-	return s.store.RevokeCredential(ctx, tenantID, credentialID, actorID, now)
+	return s.store.RevokeCredential(ctx, organizationID, credentialID, actorID, now)
 }
 
 // GrantForAttempt permits exactly the current fenced attempt to resolve one
 // purpose-bound credential, optionally until an earlier explicit expiry.
 func (s *CredentialService) GrantForAttempt(ctx context.Context, request GrantCredentialRequest) error {
-	if request.TenantID == "" || request.RunID == "" || request.AttemptID == "" || request.CredentialID == "" ||
+	if request.OrganizationID == "" || request.RunID == "" || request.AttemptID == "" || request.CredentialID == "" ||
 		request.Purpose == "" || request.FencingToken == 0 || request.Now.IsZero() {
 		return ErrInvalidArgument
 	}
 	return s.store.GrantCredential(ctx, request)
 }
 
-// ResolveForAttempt returns secret bytes only after a tenant-scoped active-attempt grant check.
+// ResolveForAttempt returns secret bytes only after a organization-scoped active-attempt grant check.
 func (s *CredentialService) ResolveForAttempt(ctx context.Context, request ResolveCredentialRequest) ([]byte, error) {
-	if request.TenantID == "" || request.RunID == "" || request.AttemptID == "" || request.CredentialID == "" || request.Purpose == "" || request.FencingToken == 0 || request.Now.IsZero() {
+	if request.OrganizationID == "" || request.RunID == "" || request.AttemptID == "" || request.CredentialID == "" || request.Purpose == "" || request.FencingToken == 0 || request.Now.IsZero() {
 		return nil, ErrInvalidArgument
 	}
 	encrypted, err := s.store.EncryptedForAttempt(ctx, request)
@@ -221,8 +221,8 @@ func (s *CredentialService) ResolveForAttempt(ctx context.Context, request Resol
 }
 
 // ResolveTriggerSecret implements TriggerSecretResolver without exposing secret material to HTTP.
-func (s *CredentialService) ResolveTriggerSecret(ctx context.Context, tenantID, triggerID string) ([]byte, error) {
-	encrypted, err := s.store.EncryptedForTrigger(ctx, tenantID, triggerID)
+func (s *CredentialService) ResolveTriggerSecret(ctx context.Context, organizationID, triggerID string) ([]byte, error) {
+	encrypted, err := s.store.EncryptedForTrigger(ctx, organizationID, triggerID)
 	if err != nil {
 		return nil, err
 	}
@@ -233,19 +233,19 @@ func (s *CredentialService) ResolveTriggerSecret(ctx context.Context, tenantID, 
 }
 
 // ResolveOutboundWebhookSecret decrypts one active signing reference only for delivery.
-func (s *CredentialService) ResolveOutboundWebhookSecret(ctx context.Context, tenantID, credentialID string) ([]byte, error) {
+func (s *CredentialService) ResolveOutboundWebhookSecret(ctx context.Context, organizationID, credentialID string) ([]byte, error) {
 	store, ok := s.store.(credentialReferenceStore)
-	if !ok || tenantID == "" || credentialID == "" {
+	if !ok || organizationID == "" || credentialID == "" {
 		return nil, ErrCredentialForbidden
 	}
-	encrypted, err := store.EncryptedForReference(ctx, tenantID, credentialID, "outbound_webhook_signing")
+	encrypted, err := store.EncryptedForReference(ctx, organizationID, credentialID, "outbound_webhook_signing")
 	if err != nil {
 		return nil, err
 	}
 	return s.decrypt(ctx, encrypted)
 }
 
-func (s *CredentialService) encrypt(ctx context.Context, tenantID, credentialID string, version int, secret []byte) (EncryptedCredential, error) {
+func (s *CredentialService) encrypt(ctx context.Context, organizationID, credentialID string, version int, secret []byte) (EncryptedCredential, error) {
 	dataKey := make([]byte, 32)
 	if _, err := rand.Read(dataKey); err != nil {
 		return EncryptedCredential{}, fmt.Errorf("generate credential data key: %w", err)
@@ -263,7 +263,7 @@ func (s *CredentialService) encrypt(ctx context.Context, tenantID, credentialID 
 	if _, err = rand.Read(nonce); err != nil {
 		return EncryptedCredential{}, fmt.Errorf("generate credential nonce: %w", err)
 	}
-	aad := credentialAAD(tenantID, credentialID, version)
+	aad := credentialAAD(organizationID, credentialID, version)
 	wrapped, err := s.provider.WrapKey(ctx, dataKey, aad)
 	if err != nil {
 		return EncryptedCredential{}, fmt.Errorf("wrap credential data key: %w", err)
@@ -272,7 +272,7 @@ func (s *CredentialService) encrypt(ctx context.Context, tenantID, credentialID 
 }
 
 func (s *CredentialService) decrypt(ctx context.Context, encrypted EncryptedCredential) ([]byte, error) {
-	aad := credentialAAD(encrypted.Credential.TenantID, encrypted.Credential.ID, encrypted.Version)
+	aad := credentialAAD(encrypted.Credential.OrganizationID, encrypted.Credential.ID, encrypted.Version)
 	dataKey, err := s.provider.UnwrapKey(ctx, encrypted.KeyID, encrypted.WrappedKey, aad)
 	if err != nil {
 		return nil, fmt.Errorf("unwrap credential: %w", err)
@@ -293,8 +293,8 @@ func (s *CredentialService) decrypt(ctx context.Context, encrypted EncryptedCred
 	return secret, nil
 }
 
-func credentialAAD(tenantID, credentialID string, version int) []byte {
-	value, _ := json.Marshal([]any{tenantID, credentialID, version})
+func credentialAAD(organizationID, credentialID string, version int) []byte {
+	value, _ := json.Marshal([]any{organizationID, credentialID, version})
 	return value
 }
 

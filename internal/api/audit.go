@@ -59,7 +59,7 @@ func (h *Handler) auditMutations(next http.Handler) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			operation = apimutation.New(principal.TenantID, principal.ActorID, action, resourceType, resourceID,
+			operation = apimutation.New(principal.OrganizationID, principal.ActorID, action, resourceType, resourceID,
 				key, r.Method, r.URL.EscapedPath(), body, platformops.AuditIdentifier(r.Header.Get("X-Request-ID")))
 			r = r.WithContext(apimutation.WithContext(r.Context(), operation))
 		}
@@ -91,7 +91,7 @@ func (h *Handler) auditMutations(next http.Handler) http.Handler {
 			return
 		}
 		if _, err := h.audit.Record(r.Context(), platformops.AuditRecord{
-			TenantID: principal.TenantID, ActorID: principal.ActorID, Action: action,
+			OrganizationID: principal.OrganizationID, ActorID: principal.ActorID, Action: action,
 			ResourceType: resourceType, ResourceID: resourceID, Outcome: outcome, Metadata: metadata,
 		}); err != nil {
 			slog.Error("persist API audit failed", "action", action, "error", platformops.RedactDiagnostic(err.Error()))

@@ -198,7 +198,7 @@ func (r *attemptCredentials) ResolveProviderCredential(ctx context.Context, scop
 }
 
 func (r *attemptCredentials) ResolveEnvironment(ctx context.Context, request executor.IsolationRequest, bindings []string) (map[string]string, error) {
-	scope := executor.AttemptScope{TenantID: request.TenantID, RunID: request.RunID, AttemptID: request.AttemptID, FencingToken: request.FencingToken}
+	scope := executor.AttemptScope{OrganizationID: request.OrganizationID, RunID: request.RunID, AttemptID: request.AttemptID, FencingToken: request.FencingToken}
 	result := make(map[string]string, len(bindings))
 	for _, binding := range bindings {
 		name, credentialID, ok := strings.Cut(binding, "=")
@@ -217,7 +217,7 @@ func (r *attemptCredentials) ResolveEnvironment(ctx context.Context, request exe
 
 func (r *attemptCredentials) resolve(ctx context.Context, scope executor.AttemptScope, credentialID, purpose string) ([]byte, error) {
 	secret, err := r.service.ResolveForAttempt(ctx, platformops.ResolveCredentialRequest{
-		TenantID: string(scope.TenantID), RunID: scope.RunID, AttemptID: scope.AttemptID,
+		OrganizationID: string(scope.OrganizationID), RunID: scope.RunID, AttemptID: scope.AttemptID,
 		CredentialID: credentialID, Purpose: purpose, FencingToken: scope.FencingToken, Now: time.Now().UTC(),
 	})
 	if err != nil {
@@ -240,7 +240,7 @@ func (r *attemptCredentials) AuthorizeCredentials(ctx context.Context, request w
 	now := time.Now().UTC()
 	for _, grant := range grants {
 		if err = r.service.GrantForAttempt(ctx, platformops.GrantCredentialRequest{
-			TenantID: string(request.TenantID), RunID: request.RunID, AttemptID: request.AttemptID,
+			OrganizationID: string(request.OrganizationID), RunID: request.RunID, AttemptID: request.AttemptID,
 			CredentialID: grant.reference, Purpose: grant.purpose, FencingToken: request.FencingToken, Now: now,
 		}); err != nil {
 			return errors.New("attempt credential grant was rejected")

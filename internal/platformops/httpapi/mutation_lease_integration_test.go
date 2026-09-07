@@ -20,7 +20,7 @@ import (
 
 // 验证短 lease 的长请求由 HTTP middleware 持续续租，第二 owner 不能在 handler 仍运行时接管。
 func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
-	ctx, pool, tenantID := mutationLeaseFixture(t)
+	ctx, pool, organizationID := mutationLeaseFixture(t)
 	ledger, err := platformops.NewPostgresMutationLedgerWithLease(pool, 60*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -49,16 +49,22 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 	go func() {
 		request := httptest.NewRequest(http.MethodPost, "/ops/quotas", bytes.NewReader([]byte(`{}`)))
 		request.Header.Set("Authorization", "Bearer mutation-lease-master-key-at-least-32-bytes")
-		request.Header.Set("X-Fenix-Organization-Id", "tenant")
+		request.Header.Set("X-Fenix-Organization-Id", organizationID)
 		request.Header.Set("Idempotency-Key", "mutation-lease-long-handler")
 		response := httptest.NewRecorder()
 		auth.Middleware(protected).ServeHTTP(response, request)
 		responseDone <- response
 	}()
-	<-started
+	select {
+	case <-started:
+	case response := <-responseDone:
+		t.Fatalf("request returned before handler start: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach handler within five seconds")
+	}
 	time.Sleep(130 * time.Millisecond)
 	fingerprint := sha256.Sum256([]byte("POST\n/ops/quotas\n{}"))
-	if _, err = ledger.Claim(ctx, tenantID, "quota.configure", "mutation-lease-long-handler", fingerprint[:]); !errors.Is(err, platformops.ErrConflict) {
+	if _, err = ledger.Claim(ctx, organizationID, "quota.configure", "mutation-lease-long-handler", fingerprint[:]); !errors.Is(err, platformops.ErrConflict) {
 		t.Fatalf("live heartbeat allowed takeover: %v", err)
 	}
 	close(release)
@@ -66,7 +72,7 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	replay, err := ledger.Claim(ctx, tenantID, "quota.configure", "mutation-lease-long-handler", fingerprint[:])
+	replay, err := ledger.Claim(ctx, organizationID, "quota.configure", "mutation-lease-long-handler", fingerprint[:])
 	if err != nil || !replay.Replay {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
@@ -74,18 +80,18 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 
 // 验证 heartbeat 停止后 lease 按数据库时钟到期，新的 owner 可以接管且保留 operation identity。
 func TestMutationLedgerAllowsTakeoverAfterHeartbeatStops(t *testing.T) {
-	ctx, pool, tenantID := mutationLeaseFixture(t)
+	ctx, pool, organizationID := mutationLeaseFixture(t)
 	ledger, err := platformops.NewPostgresMutationLedgerWithLease(pool, 40*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
 	hash := sha256.Sum256([]byte("stopped-heartbeat"))
-	first, err := ledger.Claim(ctx, tenantID, "quota.configure", "mutation-lease-stopped", hash[:])
+	first, err := ledger.Claim(ctx, organizationID, "quota.configure", "mutation-lease-stopped", hash[:])
 	if err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(90 * time.Millisecond)
-	second, err := ledger.Claim(ctx, tenantID, "quota.configure", "mutation-lease-stopped", hash[:])
+	second, err := ledger.Claim(ctx, organizationID, "quota.configure", "mutation-lease-stopped", hash[:])
 	if err != nil || second.Owner == first.Owner || second.OperationID != first.OperationID {
 		t.Fatalf("first=%+v second=%+v err=%v", first, second, err)
 	}
@@ -110,10 +116,6 @@ func mutationLeaseFixture(t *testing.T) (context.Context, *pgxpool.Pool, string)
 	if err = postgres.NewMigrator(pool).Up(ctx, migrations); err != nil {
 		t.Fatal(err)
 	}
-	tenantID := fmt.Sprintf("mutation_lease_%d", time.Now().UnixNano())
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM tenants WHERE id=$1`, tenantID) })
-	return ctx, pool, tenantID
+	organizationID := fmt.Sprintf("mutation_lease_%d", time.Now().UnixNano())
+	return ctx, pool, organizationID
 }

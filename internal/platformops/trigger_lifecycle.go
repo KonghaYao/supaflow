@@ -7,18 +7,18 @@ import (
 	"time"
 )
 
-// ListTriggersRequest selects a bounded tenant-owned trigger collection.
+// ListTriggersRequest selects a bounded organization-owned trigger collection.
 type ListTriggersRequest struct {
-	TenantID   string
-	WorkflowID string
-	Kind       TriggerKind
-	Enabled    *bool
-	Limit      int
+	OrganizationID string
+	WorkflowID     string
+	Kind           TriggerKind
+	Enabled        *bool
+	Limit          int
 }
 
 // UpdateTriggerRequest changes mutable trigger configuration using optimistic concurrency.
 type UpdateTriggerRequest struct {
-	TenantID            string
+	OrganizationID      string
 	ActorID             string
 	TriggerID           string
 	Name                string
@@ -35,7 +35,7 @@ type UpdateTriggerRequest struct {
 
 // ChangeTriggerStateRequest enables or disables one trigger idempotently.
 type ChangeTriggerStateRequest struct {
-	TenantID          string
+	OrganizationID    string
 	ActorID           string
 	TriggerID         string
 	Enabled           bool
@@ -47,7 +47,7 @@ type ChangeTriggerStateRequest struct {
 
 // DeleteTriggerRequest deletes one trigger after an optimistic revision check.
 type DeleteTriggerRequest struct {
-	TenantID          string
+	OrganizationID    string
 	ActorID           string
 	TriggerID         string
 	ExpectedUpdatedAt time.Time
@@ -63,17 +63,17 @@ type TriggerLifecycleStore interface {
 	DeleteTrigger(context.Context, DeleteTriggerRequest) error
 }
 
-// Get returns one tenant-owned trigger without secret material.
-func (s *TriggerService) Get(ctx context.Context, tenantID, triggerID string) (Trigger, error) {
-	if tenantID == "" || triggerID == "" {
+// Get returns one organization-owned trigger without secret material.
+func (s *TriggerService) Get(ctx context.Context, organizationID, triggerID string) (Trigger, error) {
+	if organizationID == "" || triggerID == "" {
 		return Trigger{}, ErrInvalidArgument
 	}
-	return s.store.GetTrigger(ctx, tenantID, triggerID)
+	return s.store.GetTrigger(ctx, organizationID, triggerID)
 }
 
-// List returns bounded tenant-owned trigger definitions.
+// List returns bounded organization-owned trigger definitions.
 func (s *TriggerService) List(ctx context.Context, request ListTriggersRequest) ([]Trigger, error) {
-	if request.TenantID == "" || request.Limit <= 0 || request.Limit > 200 {
+	if request.OrganizationID == "" || request.Limit <= 0 || request.Limit > 200 {
 		return nil, ErrInvalidArgument
 	}
 	store, ok := s.store.(TriggerLifecycleStore)
@@ -85,14 +85,14 @@ func (s *TriggerService) List(ctx context.Context, request ListTriggersRequest) 
 
 // Update validates mutable configuration and applies an optimistic idempotent update.
 func (s *TriggerService) Update(ctx context.Context, request UpdateTriggerRequest) (Trigger, error) {
-	if request.TenantID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() || !validMutationKey(request.IdempotencyKey) {
+	if request.OrganizationID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() || !validMutationKey(request.IdempotencyKey) {
 		return Trigger{}, ErrInvalidArgument
 	}
-	current, err := s.store.GetTrigger(ctx, request.TenantID, request.TriggerID)
+	current, err := s.store.GetTrigger(ctx, request.OrganizationID, request.TriggerID)
 	if err != nil {
 		return Trigger{}, err
 	}
-	if err = validateTriggerRequest(CreateTriggerRequest{TenantID: request.TenantID, ActorID: request.ActorID,
+	if err = validateTriggerRequest(CreateTriggerRequest{OrganizationID: request.OrganizationID, ActorID: request.ActorID,
 		WorkflowID: current.WorkflowID, Kind: current.Kind, Name: request.Name, Config: request.Config,
 		ScheduleInterval: request.ScheduleInterval, MisfirePolicy: request.MisfirePolicy, FirstFireAt: request.FirstFireAt,
 		SigningCredentialID: request.SigningCredentialID, EventType: request.EventType}); err != nil {
@@ -108,18 +108,18 @@ func (s *TriggerService) Update(ctx context.Context, request UpdateTriggerReques
 
 // ChangeState idempotently enables or disables a trigger at an expected revision.
 func (s *TriggerService) ChangeState(ctx context.Context, request ChangeTriggerStateRequest) (Trigger, error) {
-	if request.TenantID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() ||
+	if request.OrganizationID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() ||
 		request.Now.IsZero() || !validMutationKey(request.IdempotencyKey) {
 		return Trigger{}, ErrInvalidArgument
 	}
 	request.RequestHash = triggerMutationHash("state", struct {
-		TenantID          string
+		OrganizationID    string
 		ActorID           string
 		TriggerID         string
 		Enabled           bool
 		ExpectedUpdatedAt time.Time
 		IdempotencyKey    string
-	}{request.TenantID, request.ActorID, request.TriggerID, request.Enabled, request.ExpectedUpdatedAt, request.IdempotencyKey})
+	}{request.OrganizationID, request.ActorID, request.TriggerID, request.Enabled, request.ExpectedUpdatedAt, request.IdempotencyKey})
 	store, ok := s.store.(TriggerLifecycleStore)
 	if !ok {
 		return Trigger{}, ErrConflict
@@ -129,7 +129,7 @@ func (s *TriggerService) ChangeState(ctx context.Context, request ChangeTriggerS
 
 // Delete idempotently removes one trigger at an expected revision.
 func (s *TriggerService) Delete(ctx context.Context, request DeleteTriggerRequest) error {
-	if request.TenantID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() || !validMutationKey(request.IdempotencyKey) {
+	if request.OrganizationID == "" || request.ActorID == "" || request.TriggerID == "" || request.ExpectedUpdatedAt.IsZero() || !validMutationKey(request.IdempotencyKey) {
 		return ErrInvalidArgument
 	}
 	request.RequestHash = triggerMutationHash("delete", request)

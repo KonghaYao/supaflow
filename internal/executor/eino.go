@@ -38,7 +38,7 @@ type ProviderCredentialResolver interface {
 }
 
 // NewCredentialEinoRegistry creates a registry that can construct provider
-// adapters from tenant-scoped, attempt-granted credential references.
+// adapters from organization-scoped, attempt-granted credential references.
 func NewCredentialEinoRegistry(credentials ProviderCredentialResolver) (*EinoRegistry, error) {
 	if credentials == nil {
 		return nil, fmt.Errorf("executor: provider credential resolver is required")

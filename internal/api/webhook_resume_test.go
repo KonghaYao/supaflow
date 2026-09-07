@@ -17,7 +17,7 @@ import (
 
 func webhookResumeFixture(t *testing.T) (http.Handler, *workflowruntime.Service, *workflowruntime.MemoryStore, *workflowruntime.ResumeTokenIssuer, workflowruntime.Interrupt) {
 	t.Helper()
-	auth, err := NewMasterKeyAuthenticator(tenantAKey)
+	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func webhookResumeFixture(t *testing.T) (http.Handler, *workflowruntime.Service,
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	created, err := service.StartRun(context.Background(), "tenant-a", workflowruntime.StartRunRequest{
+	created, err := service.StartRun(context.Background(), "organization-a", workflowruntime.StartRunRequest{
 		Plan:  workflowruntime.PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "wait", Executor: "builtin.webhook-resume"},
 		Input: json.RawMessage(`{"order":42}`), IdempotencyKey: "webhook-api-run",
 	})
@@ -41,18 +41,18 @@ func webhookResumeFixture(t *testing.T) (http.Handler, *workflowruntime.Service,
 		t.Fatal(err)
 	}
 	claimAt := time.Now().UTC().Add(time.Second)
-	work, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{TenantID: "tenant-a", WorkerID: "worker", Now: claimAt, LeaseDuration: time.Minute})
+	work, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{OrganizationID: "organization-a", WorkerID: "worker", Now: claimAt, LeaseDuration: time.Minute})
 	if err != nil || work == nil {
 		t.Fatalf("work=%+v err=%v", work, err)
 	}
 	interrupt := workflowruntime.Interrupt{ID: "int_webhook", Kind: "webhook", ExpiresAt: now.Add(time.Hour)}
-	token, err := issuer.Issue(workflowruntime.Interrupt{TenantID: "tenant-a", ID: interrupt.ID, RunID: created.Run.ID, NodeID: work.Attempt.NodeID, AttemptID: work.Attempt.ID, Kind: "webhook", ExpiresAt: interrupt.ExpiresAt})
+	token, err := issuer.Issue(workflowruntime.Interrupt{OrganizationID: "organization-a", ID: interrupt.ID, RunID: created.Run.ID, NodeID: work.Attempt.NodeID, AttemptID: work.Attempt.ID, Kind: "webhook", ExpiresAt: interrupt.ExpiresAt})
 	if err != nil {
 		t.Fatal(err)
 	}
 	interrupt.TokenDigest = workflowruntime.ResumeTokenDigest(token)
 	stored, err := store.SuspendAttempt(context.Background(), workflowruntime.SuspendAttemptRequest{
-		TenantID: "tenant-a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: "organization-a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: claimAt, Interrupt: interrupt,
 	})
 	if err != nil {

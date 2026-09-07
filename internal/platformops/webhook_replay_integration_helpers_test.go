@@ -12,7 +12,7 @@ func verifyFutureWebhookReplayWindow(
 	ctx context.Context,
 	triggers *TriggerService,
 	store *PostgresTriggerStore,
-	tenantID string,
+	organizationID string,
 	triggerID string,
 	body []byte,
 	secret []byte,
@@ -21,7 +21,7 @@ func verifyFutureWebhookReplayWindow(
 	t.Helper()
 	futureTimestamp := now.Add(5 * time.Minute)
 	request := WebhookRequest{
-		TenantID: tenantID, TriggerID: triggerID, RequestID: "future-skew-request",
+		OrganizationID: organizationID, TriggerID: triggerID, RequestID: "future-skew-request",
 		Timestamp: futureTimestamp, Body: body, Now: now,
 		Signature: SignWebhook(secret, "future-skew-request", futureTimestamp, body),
 	}
@@ -33,8 +33,8 @@ func verifyFutureWebhookReplayWindow(
 	}
 	var remaining int
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM webhook_replays
-		WHERE tenant_id=$1 AND trigger_id=$2 AND request_id IN ('webhook-request-1','future-skew-request')`,
-		tenantID, triggerID).Scan(&remaining); err != nil || remaining != 2 {
+		WHERE organization_id=$1 AND trigger_id=$2 AND request_id IN ('webhook-request-1','future-skew-request')`,
+		organizationID, triggerID).Scan(&remaining); err != nil || remaining != 2 {
 		t.Fatalf("replay guards before full window=%d err=%v", remaining, err)
 	}
 	request.Now = now.Add(5*time.Minute + time.Second)
@@ -47,8 +47,8 @@ func verifyFutureWebhookReplayWindow(
 		t.Fatalf("purge webhook replay guards error=%v", err)
 	}
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM webhook_replays
-		WHERE tenant_id=$1 AND trigger_id=$2 AND request_id IN ('webhook-request-1','future-skew-request')`,
-		tenantID, triggerID).Scan(&remaining); err != nil || remaining != 0 {
+		WHERE organization_id=$1 AND trigger_id=$2 AND request_id IN ('webhook-request-1','future-skew-request')`,
+		organizationID, triggerID).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("replay guards after full window=%d err=%v", remaining, err)
 	}
 }

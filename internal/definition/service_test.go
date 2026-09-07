@@ -18,22 +18,22 @@ type fakePublisher struct {
 	replays  map[string]platform.PublishedPlan
 }
 
-func (p *fakePublisher) Publish(_ context.Context, tenantID, workflowID string, definition workflow.WorkflowDefinition, key string) (platform.PublishedPlan, bool, error) {
+func (p *fakePublisher) Publish(_ context.Context, organizationID, workflowID string, definition workflow.WorkflowDefinition, key string) (platform.PublishedPlan, bool, error) {
 	if key == "conflict" {
 		return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
 	}
-	if replay, ok := p.replays[tenantID+"\x00"+key]; ok {
+	if replay, ok := p.replays[organizationID+"\x00"+key]; ok {
 		return replay, false, nil
 	}
-	p.versions[tenantID+"\x00"+workflowID]++
+	p.versions[organizationID+"\x00"+workflowID]++
 	plan, err := workflow.Compile(definition, workflow.BuiltinRegistry(), workflow.CompilePolicy{
 		AllowedCapabilities: workflow.CapabilitySet{Interruptible: true, Idempotent: true},
 	})
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
-	published := platform.PublishedPlan{ID: "plan-1", WorkflowID: workflowID, Version: p.versions[tenantID+"\x00"+workflowID], Hash: plan.Hash(), Plan: plan, PublishedAt: time.Unix(10, 0).UTC()}
-	p.replays[tenantID+"\x00"+key] = published
+	published := platform.PublishedPlan{ID: "plan-1", WorkflowID: workflowID, Version: p.versions[organizationID+"\x00"+workflowID], Hash: plan.Hash(), Plan: plan, PublishedAt: time.Unix(10, 0).UTC()}
+	p.replays[organizationID+"\x00"+key] = published
 	return published, true, nil
 }
 
@@ -63,26 +63,26 @@ func newTestService(t *testing.T) (*Service, *MemoryStore) {
 // 验证草稿 CRUD 使用乐观 revision，过期写入不会覆盖较新的设计。
 func TestDraftLifecycleAndOptimisticConflict(t *testing.T) {
 	service, _ := newTestService(t)
-	created, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	created, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor-a", IdempotencyKey: "create-0001", Document: mustJSON(t, definitionFor("flow")),
 	})
 	if err != nil || created.Revision != 1 {
 		t.Fatalf("create=%+v err=%v", created, err)
 	}
-	updated, err := service.UpdateDraft(context.Background(), "tenant-a", UpdateDraftCommand{
+	updated, err := service.UpdateDraft(context.Background(), "organization-a", UpdateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor-a", IdempotencyKey: "update-0001", ExpectedRevision: 1, Document: mustJSON(t, definitionFor("flow")),
 	})
 	if err != nil || updated.Revision != 2 {
 		t.Fatalf("update=%+v err=%v", updated, err)
 	}
-	_, err = service.UpdateDraft(context.Background(), "tenant-a", UpdateDraftCommand{
+	_, err = service.UpdateDraft(context.Background(), "organization-a", UpdateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor-b", IdempotencyKey: "update-0002", ExpectedRevision: 1, Document: mustJSON(t, definitionFor("flow")),
 	})
 	if !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale update err=%v", err)
 	}
-	if _, err := service.GetDraft(context.Background(), "tenant-b", "flow"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross tenant read err=%v", err)
+	if _, err := service.GetDraft(context.Background(), "organization-b", "flow"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross organization read err=%v", err)
 	}
 }
 
@@ -90,16 +90,16 @@ func TestDraftLifecycleAndOptimisticConflict(t *testing.T) {
 func TestDraftMutationIdempotency(t *testing.T) {
 	service, _ := newTestService(t)
 	command := CreateDraftCommand{WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "create-0001", Document: mustJSON(t, definitionFor("flow"))}
-	first, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+	first, err := service.CreateDraftWithResult(context.Background(), "organization-a", command)
 	if err != nil || !first.Created {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	replay, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+	replay, err := service.CreateDraftWithResult(context.Background(), "organization-a", command)
 	if err != nil || replay.Created || replay.Draft.ID != first.Draft.ID || replay.Draft.Revision != first.Draft.Revision {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
 	command.WorkflowID = "other"
-	if _, err := service.CreateDraftWithResult(context.Background(), "tenant-a", command); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, err := service.CreateDraftWithResult(context.Background(), "organization-a", command); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("key reuse err=%v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestConcurrentDraftCreateHasSingleCreator(t *testing.T) {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			results[index], errs[index] = service.CreateDraftWithResult(context.Background(), "tenant-a", command)
+			results[index], errs[index] = service.CreateDraftWithResult(context.Background(), "organization-a", command)
 		}(index)
 	}
 	wait.Wait()
@@ -136,17 +136,17 @@ func TestConcurrentDraftCreateHasSingleCreator(t *testing.T) {
 // 验证删除重试可安全重放，且不会因资源已经删除而变成失败。
 func TestDeleteDraftIdempotency(t *testing.T) {
 	service, _ := newTestService(t)
-	_, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "create-0001", Document: mustJSON(t, definitionFor("flow")),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := DeleteDraftCommand{WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "delete-0001", ExpectedRevision: 1}
-	if err := service.DeleteDraft(context.Background(), "tenant-a", command); err != nil {
+	if err := service.DeleteDraft(context.Background(), "organization-a", command); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.DeleteDraft(context.Background(), "tenant-a", command); err != nil {
+	if err := service.DeleteDraft(context.Background(), "organization-a", command); err != nil {
 		t.Fatalf("delete replay err=%v", err)
 	}
 }
@@ -155,26 +155,26 @@ func TestDeleteDraftIdempotency(t *testing.T) {
 func TestPublishVersionDiffAndRepublish(t *testing.T) {
 	service, _ := newTestService(t)
 	definition := definitionFor("flow")
-	if _, _, err := service.Publish(context.Background(), "tenant-a", "flow", definition, "publish-0001"); err != nil {
+	if _, _, err := service.Publish(context.Background(), "organization-a", "flow", definition, "publish-0001"); err != nil {
 		t.Fatal(err)
 	}
 	definition.Metadata = map[string]json.RawMessage{"label": json.RawMessage(`"v2"`)}
-	if _, _, err := service.Publish(context.Background(), "tenant-a", "flow", definition, "publish-0002"); err != nil {
+	if _, _, err := service.Publish(context.Background(), "organization-a", "flow", definition, "publish-0002"); err != nil {
 		t.Fatal(err)
 	}
-	versions, err := service.ListVersions(context.Background(), "tenant-a", "flow", 0, DefaultPageLimit)
+	versions, err := service.ListVersions(context.Background(), "organization-a", "flow", 0, DefaultPageLimit)
 	if err != nil || len(versions.Items) != 2 || versions.Items[0].Version != 2 {
 		t.Fatalf("versions=%+v err=%v", versions, err)
 	}
-	latest, err := service.LatestVersion(context.Background(), "tenant-a", "flow")
+	latest, err := service.LatestVersion(context.Background(), "organization-a", "flow")
 	if err != nil || latest.Version != 2 || latest.VersionID == "" || latest.PlanHash == "" {
 		t.Fatalf("latest=%+v err=%v", latest, err)
 	}
-	diff, err := service.DiffVersions(context.Background(), "tenant-a", "flow", 1, 2)
+	diff, err := service.DiffVersions(context.Background(), "organization-a", "flow", 1, 2)
 	if err != nil || len(diff.Changes) == 0 {
 		t.Fatalf("diff=%+v err=%v", diff, err)
 	}
-	republished, created, err := service.Republish(context.Background(), "tenant-a", "flow", 1, "republish-0001")
+	republished, created, err := service.Republish(context.Background(), "organization-a", "flow", 1, "republish-0001")
 	if err != nil || !created || republished.Version != 3 {
 		t.Fatalf("republish=%+v created=%v err=%v", republished, created, err)
 	}
@@ -184,61 +184,61 @@ func TestPublishVersionDiffAndRepublish(t *testing.T) {
 func TestDefinitionListsAreBoundedSummaryPages(t *testing.T) {
 	service, _ := newTestService(t)
 	for index, workflowID := range []string{"alpha", "beta", "gamma"} {
-		if _, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+		if _, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 			WorkflowID: workflowID, ActorID: "editor", IdempotencyKey: fmt.Sprintf("create-%08d", index), Document: mustJSON(t, definitionFor(workflowID)),
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	first, err := service.ListDrafts(context.Background(), "tenant-a", "", 2)
+	first, err := service.ListDrafts(context.Background(), "organization-a", "", 2)
 	if err != nil || len(first.Items) != 2 || first.Items[0].WorkflowID != "alpha" || first.NextCursor != "beta" {
 		t.Fatalf("first draft page=%+v err=%v", first, err)
 	}
-	second, err := service.ListDrafts(context.Background(), "tenant-a", first.NextCursor, 2)
+	second, err := service.ListDrafts(context.Background(), "organization-a", first.NextCursor, 2)
 	if err != nil || len(second.Items) != 1 || second.Items[0].WorkflowID != "gamma" || second.NextCursor != "" {
 		t.Fatalf("second draft page=%+v err=%v", second, err)
 	}
-	if _, err = service.ListDrafts(context.Background(), "tenant-a", "", MaxPageLimit+1); err == nil {
+	if _, err = service.ListDrafts(context.Background(), "organization-a", "", MaxPageLimit+1); err == nil {
 		t.Fatal("oversized draft page was accepted")
 	}
 
 	for index := 0; index < 3; index++ {
 		value := definitionFor("flow")
 		value.Metadata = map[string]json.RawMessage{"revision": json.RawMessage(fmt.Sprintf("%d", index))}
-		if _, _, err = service.Publish(context.Background(), "tenant-a", "flow", value, fmt.Sprintf("publish-%08d", index)); err != nil {
+		if _, _, err = service.Publish(context.Background(), "organization-a", "flow", value, fmt.Sprintf("publish-%08d", index)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	versions, err := service.ListVersions(context.Background(), "tenant-a", "flow", 0, 2)
+	versions, err := service.ListVersions(context.Background(), "organization-a", "flow", 0, 2)
 	if err != nil || len(versions.Items) != 2 || versions.Items[0].Version != 3 || versions.NextCursor != 2 {
 		t.Fatalf("version page=%+v err=%v", versions, err)
 	}
-	last, err := service.ListVersions(context.Background(), "tenant-a", "flow", versions.NextCursor, 2)
+	last, err := service.ListVersions(context.Background(), "organization-a", "flow", versions.NextCursor, 2)
 	if err != nil || len(last.Items) != 1 || last.Items[0].Version != 1 || last.NextCursor != 0 {
 		t.Fatalf("last version page=%+v err=%v", last, err)
 	}
 }
 
 // 验证同租户的草稿硬配额在创建边界拒绝新资源。
-func TestCreateDraftEnforcesTenantHardLimit(t *testing.T) {
+func TestCreateDraftEnforcesOrganizationHardLimit(t *testing.T) {
 	service, store := newTestService(t)
 	command := CreateDraftCommand{WorkflowID: "existing", ActorID: "editor", IdempotencyKey: "create-existing", Document: mustJSON(t, definitionFor("existing"))}
-	created, err := service.CreateDraft(context.Background(), "tenant-a", command)
+	created, err := service.CreateDraft(context.Background(), "organization-a", command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 1; index < MaxDraftsPerTenant; index++ {
+	for index := 1; index < MaxDraftsPerOrganization; index++ {
 		workflowID := fmt.Sprintf("flow-%04d", index)
-		store.drafts[scope("tenant-a", workflowID)] = Draft{TenantID: "tenant-a", WorkflowID: workflowID}
+		store.drafts[scope("organization-a", workflowID)] = Draft{OrganizationID: "organization-a", WorkflowID: workflowID}
 	}
-	if replay, replayErr := service.CreateDraft(context.Background(), "tenant-a", command); replayErr != nil || replay.ID != created.ID {
+	if replay, replayErr := service.CreateDraft(context.Background(), "organization-a", command); replayErr != nil || replay.ID != created.ID {
 		t.Fatalf("replay at capacity=%+v err=%v", replay, replayErr)
 	}
-	_, err = service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	_, err = service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: "overflow", ActorID: "editor", IdempotencyKey: "create-overflow", Document: mustJSON(t, definitionFor("overflow")),
 	})
-	if !errors.Is(err, ErrTenantDraftLimit) {
-		t.Fatalf("CreateDraft() error=%v, want ErrTenantDraftLimit", err)
+	if !errors.Is(err, ErrOrganizationDraftLimit) {
+		t.Fatalf("CreateDraft() error=%v, want ErrOrganizationDraftLimit", err)
 	}
 }
 
@@ -246,26 +246,26 @@ func TestCreateDraftEnforcesTenantHardLimit(t *testing.T) {
 func TestImportVersionPreservesSourceSequence(t *testing.T) {
 	service, _ := newTestService(t)
 	definition := definitionFor("flow")
-	_, _, err := service.ImportVersion(context.Background(), "tenant-a", "flow", ImportVersionCommand{
+	_, _, err := service.ImportVersion(context.Background(), "organization-a", "flow", ImportVersionCommand{
 		Definition: definition, SourceVersion: 2, IdempotencyKey: "import-0002",
 	})
 	if !errors.Is(err, ErrVersionSequenceConflict) {
 		t.Fatalf("out of order import err=%v", err)
 	}
-	first, created, err := service.ImportVersion(context.Background(), "tenant-a", "flow", ImportVersionCommand{
+	first, created, err := service.ImportVersion(context.Background(), "organization-a", "flow", ImportVersionCommand{
 		Definition: definition, SourceVersion: 1, IdempotencyKey: "import-0001",
 	})
 	if err != nil || !created || first.Version != 1 {
 		t.Fatalf("first=%+v created=%v err=%v", first, created, err)
 	}
 	definition.Metadata = map[string]json.RawMessage{"source": json.RawMessage(`"v2"`)}
-	second, created, err := service.ImportVersion(context.Background(), "tenant-a", "flow", ImportVersionCommand{
+	second, created, err := service.ImportVersion(context.Background(), "organization-a", "flow", ImportVersionCommand{
 		Definition: definition, SourceVersion: 2, IdempotencyKey: "import-0002",
 	})
 	if err != nil || !created || second.Version != 2 {
 		t.Fatalf("second=%+v created=%v err=%v", second, created, err)
 	}
-	replay, created, err := service.ImportVersion(context.Background(), "tenant-a", "flow", ImportVersionCommand{
+	replay, created, err := service.ImportVersion(context.Background(), "organization-a", "flow", ImportVersionCommand{
 		Definition: definitionFor("flow"), SourceVersion: 1, IdempotencyKey: "import-0001",
 	})
 	if err != nil || created || replay.Version != 1 || replay.Hash != first.Hash {

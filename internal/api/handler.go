@@ -71,7 +71,7 @@ func (h *Handler) SetStudioAssets(assets fs.FS) { h.studioAssets = assets }
 // SetAudit enables immutable evidence for authenticated high-risk API mutations.
 func (h *Handler) SetAudit(audit AuditRecorder) { h.audit = audit }
 
-// OutputReader opens opaque tenant-scoped output references.
+// OutputReader opens opaque organization-scoped output references.
 type OutputReader interface {
 	OpenRunOutput(context.Context, string, string) (io.ReadCloser, platformops.ManagedObject, error)
 }
@@ -88,18 +88,18 @@ func (h *Handler) Routes() http.Handler {
 	h.registerStudioAssets(root)
 	protected := http.NewServeMux()
 	h.registerStudioRoutes(protected)
-	protected.Handle("POST /v1/workflows/compile", h.require(RoleEditor, http.HandlerFunc(h.compile)))
-	protected.Handle("POST /v1/workflows/{workflowID}/publish", h.require(RolePublisher, http.HandlerFunc(h.publish)))
-	protected.Handle("POST /v1/runs", h.require(RoleOperator, http.HandlerFunc(h.startRun)))
-	protected.Handle("POST /v1/shadow-runs", h.require(RoleOperator, http.HandlerFunc(h.startShadowRun)))
+	protected.Handle("POST /v1/workflows/compile", h.require(http.HandlerFunc(h.compile)))
+	protected.Handle("POST /v1/workflows/{workflowID}/publish", h.require(http.HandlerFunc(h.publish)))
+	protected.Handle("POST /v1/runs", h.require(http.HandlerFunc(h.startRun)))
+	protected.Handle("POST /v1/shadow-runs", h.require(http.HandlerFunc(h.startShadowRun)))
 	h.registerRunMonitorRoutes(protected)
-	protected.Handle("GET /v1/runs/{runID}", h.require(RoleViewer, http.HandlerFunc(h.getRun)))
-	protected.Handle("GET /v1/runs/{runID}/output", h.require(RoleViewer, http.HandlerFunc(h.getRunOutput)))
-	protected.Handle("POST /v1/runs/{runID}/rerun", h.require(RoleOperator, http.HandlerFunc(h.rerunRun)))
-	protected.Handle("POST /v1/runs/{runID}/cancel", h.require(RoleOperator, http.HandlerFunc(h.cancelRun)))
-	protected.Handle("GET /v1/runs/{runID}/events", h.require(RoleViewer, http.HandlerFunc(h.events)))
-	protected.Handle("GET /v1/runs/{runID}/interrupts", h.require(RoleViewer, http.HandlerFunc(h.interrupts)))
-	protected.Handle("POST /v1/interrupts/{interruptID}/resolve", h.require(RoleApprover, http.HandlerFunc(h.resolveInterrupt)))
+	protected.Handle("GET /v1/runs/{runID}", h.require(http.HandlerFunc(h.getRun)))
+	protected.Handle("GET /v1/runs/{runID}/output", h.require(http.HandlerFunc(h.getRunOutput)))
+	protected.Handle("POST /v1/runs/{runID}/rerun", h.require(http.HandlerFunc(h.rerunRun)))
+	protected.Handle("POST /v1/runs/{runID}/cancel", h.require(http.HandlerFunc(h.cancelRun)))
+	protected.Handle("GET /v1/runs/{runID}/events", h.require(http.HandlerFunc(h.events)))
+	protected.Handle("GET /v1/runs/{runID}/interrupts", h.require(http.HandlerFunc(h.interrupts)))
+	protected.Handle("POST /v1/interrupts/{interruptID}/resolve", h.require(http.HandlerFunc(h.resolveInterrupt)))
 	root.Handle("/v1/", privateNoStore(h.auth.Middleware(h.auditMutations(protected))))
 	return root
 }
@@ -130,7 +130,7 @@ func (h *Handler) compile(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &definition); err != nil {
 		return
 	}
-	plan, err := h.catalog.Compile(r.Context(), principal.TenantID, definition)
+	plan, err := h.catalog.Compile(r.Context(), principal.OrganizationID, definition)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -152,9 +152,9 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	var created bool
 	var err error
 	if h.definitions != nil {
-		published, created, err = h.definitions.Publish(r.Context(), principal.TenantID, r.PathValue("workflowID"), definition, idempotencyKey)
+		published, created, err = h.definitions.Publish(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), definition, idempotencyKey)
 	} else {
-		published, created, err = h.catalog.Publish(r.Context(), principal.TenantID, r.PathValue("workflowID"), definition, idempotencyKey)
+		published, created, err = h.catalog.Publish(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), definition, idempotencyKey)
 	}
 	if err != nil {
 		h.writeError(w, r, err)
@@ -183,7 +183,7 @@ func (h *Handler) startRun(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &body); err != nil {
 		return
 	}
-	published, err := h.catalog.Resolve(r.Context(), principal.TenantID, body.PlanID, body.PlanHash)
+	published, err := h.catalog.Resolve(r.Context(), principal.OrganizationID, body.PlanID, body.PlanHash)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -198,7 +198,7 @@ func (h *Handler) startRun(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusConflict, "invalid_plan", "published plan entry is unavailable")
 		return
 	}
-	result, err := h.runtime.StartRun(r.Context(), runtime.TenantID(principal.TenantID), runtime.StartRunRequest{
+	result, err := h.runtime.StartRun(r.Context(), runtime.OrganizationID(principal.OrganizationID), runtime.StartRunRequest{
 		Plan:  runtime.PlanRef{ID: published.ID, Hash: published.Hash, WorkflowID: published.WorkflowID, EntryNodeID: entry.ID, Executor: entry.Executor.Kind},
 		Input: body.Input, IdempotencyKey: idempotencyKey, Priority: body.Priority,
 		Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,
@@ -216,7 +216,7 @@ func (h *Handler) startRun(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getRun(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	run, err := h.runtime.GetRun(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
+	run, err := h.runtime.GetRun(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -229,7 +229,7 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, _ := PrincipalFromContext(r.Context())
-	result, err := h.runtime.CancelRun(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
+	result, err := h.runtime.CancelRun(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -241,7 +241,7 @@ func (h *Handler) interrupts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Vary", organizationHeader)
 	principal, _ := PrincipalFromContext(r.Context())
-	items, err := h.runtime.ListInterrupts(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
+	items, err := h.runtime.ListInterrupts(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -249,14 +249,12 @@ func (h *Handler) interrupts(w http.ResponseWriter, r *http.Request) {
 	response := make([]interruptResponse, len(items))
 	for index, item := range items {
 		response[index] = interruptDTO(item)
-		if principal.Role == RoleApprover || principal.Role == RoleAdmin {
-			token, issueErr := h.resumeTokens.Issue(item)
-			if issueErr != nil {
-				h.writeError(w, r, issueErr)
-				return
-			}
-			response[index].ResumeToken = token
+		token, issueErr := h.resumeTokens.Issue(item)
+		if issueErr != nil {
+			h.writeError(w, r, issueErr)
+			return
 		}
+		response[index].ResumeToken = token
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -280,7 +278,7 @@ func (h *Handler) resolveInterrupt(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "decision must be approved or rejected")
 		return
 	}
-	result, err := h.runtime.ResolveApproval(r.Context(), runtime.TenantID(principal.TenantID), runtime.ResolveApprovalCommand{
+	result, err := h.runtime.ResolveApproval(r.Context(), runtime.OrganizationID(principal.OrganizationID), runtime.ResolveApprovalCommand{
 		ActorID: principal.ActorID, InterruptID: r.PathValue("interruptID"), ResumeToken: body.ResumeToken,
 		IdempotencyKey: idempotencyKey, Decision: runtime.ApprovalDecision{
 			Approved: body.Decision == "approved", Comment: body.Comment, Data: body.Data,
@@ -293,10 +291,10 @@ func (h *Handler) resolveInterrupt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runDTO(result.Run))
 }
 
-func (h *Handler) require(_ Role, next http.Handler) http.Handler {
+func (h *Handler) require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := PrincipalFromContext(r.Context())
-		if !ok || principal.TenantID == "" {
+		if !ok || principal.OrganizationID == "" {
 			writeProblem(w, r, http.StatusForbidden, "forbidden", "permission denied")
 			return
 		}
@@ -340,14 +338,6 @@ func eventCursor(r *http.Request) (uint64, error) {
 	return strconv.ParseUint(value, 10, 64)
 }
 
-func roleAllows(actual, required Role) bool {
-	if actual == RoleAdmin || actual == required {
-		return true
-	}
-	viewerRoles := map[Role]bool{RoleViewer: true, RoleEditor: true, RolePublisher: true, RoleOperator: true, RoleApprover: true}
-	return required == RoleViewer && viewerRoles[actual]
-}
-
 func isTerminalEvent(kind string) bool {
 	return kind == "run.succeeded" || kind == "run.failed" || kind == "run.cancelled" || kind == "run.error"
 }
@@ -368,8 +358,8 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		writeProblem(w, r, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, platform.ErrPublicationConflict):
 		writeProblem(w, r, http.StatusConflict, "idempotency_conflict", "idempotency key conflicts with an earlier request")
-	case errors.Is(err, definition.ErrTenantDraftLimit), errors.Is(err, platform.ErrTenantVersionLimit), errors.Is(err, platform.ErrWorkflowVersionLimit):
-		writeProblem(w, r, http.StatusTooManyRequests, "resource_limit_exceeded", "tenant workflow resource limit is exhausted")
+	case errors.Is(err, definition.ErrOrganizationDraftLimit), errors.Is(err, platform.ErrOrganizationVersionLimit), errors.Is(err, platform.ErrWorkflowVersionLimit):
+		writeProblem(w, r, http.StatusTooManyRequests, "resource_limit_exceeded", "organization workflow resource limit is exhausted")
 	case errors.As(err, &runtimeError):
 		status := http.StatusConflict
 		if runtimeError.Code == runtime.CodeInvalidArgument {

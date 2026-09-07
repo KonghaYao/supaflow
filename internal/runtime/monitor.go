@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// RunFilter is a bounded tenant-scoped query for recent runs.
+// RunFilter is a bounded organization-scoped query for recent runs.
 type RunFilter struct {
 	WorkflowID string
 	Status     RunStatus
@@ -34,7 +34,7 @@ type NodeDiagnostic struct {
 	Output   *RunOutput
 }
 
-// RunDetails is the complete tenant-scoped monitor projection.
+// RunDetails is the complete organization-scoped monitor projection.
 type RunDetails struct {
 	Run             Run
 	Nodes           []NodeDiagnostic
@@ -44,13 +44,13 @@ type RunDetails struct {
 // MonitorStore is an optional read model implemented by production and local
 // stores without widening the transactional runtime command port.
 type MonitorStore interface {
-	ListRuns(context.Context, TenantID, RunFilter) ([]RunSummary, error)
-	GetRunDetails(context.Context, TenantID, string) (RunDetails, error)
+	ListRuns(context.Context, OrganizationID, RunFilter) ([]RunSummary, error)
+	GetRunDetails(context.Context, OrganizationID, string) (RunDetails, error)
 }
 
-// ListRuns returns recent runs using bounded filters inside one tenant.
-func (s *Service) ListRuns(ctx context.Context, tenantID TenantID, filter RunFilter) ([]RunSummary, error) {
-	if err := validateTenant(tenantID); err != nil {
+// ListRuns returns recent runs using bounded filters inside one organization.
+func (s *Service) ListRuns(ctx context.Context, organizationID OrganizationID, filter RunFilter) ([]RunSummary, error) {
+	if err := validateOrganization(organizationID); err != nil {
 		return nil, err
 	}
 	if filter.Limit <= 0 || filter.Limit > 200 || (filter.Status != "" && !validRunStatus(filter.Status)) {
@@ -60,19 +60,19 @@ func (s *Service) ListRuns(ctx context.Context, tenantID TenantID, filter RunFil
 	if !ok {
 		return nil, errorf(CodeConflict, "run monitor is unavailable")
 	}
-	return store.ListRuns(ctx, tenantID, filter)
+	return store.ListRuns(ctx, organizationID, filter)
 }
 
 // GetRunDetails returns node attempts, safe inputs/outputs, and failure codes.
-func (s *Service) GetRunDetails(ctx context.Context, tenantID TenantID, runID string) (RunDetails, error) {
-	if err := validateTenantAndID(tenantID, runID); err != nil {
+func (s *Service) GetRunDetails(ctx context.Context, organizationID OrganizationID, runID string) (RunDetails, error) {
+	if err := validateOrganizationAndID(organizationID, runID); err != nil {
 		return RunDetails{}, err
 	}
 	store, ok := s.store.(MonitorStore)
 	if !ok {
 		return RunDetails{}, errorf(CodeConflict, "run monitor is unavailable")
 	}
-	details, err := store.GetRunDetails(ctx, tenantID, runID)
+	details, err := store.GetRunDetails(ctx, organizationID, runID)
 	if err != nil {
 		return RunDetails{}, err
 	}

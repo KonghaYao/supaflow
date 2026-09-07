@@ -13,7 +13,7 @@ func TestWebhookResumeIsSeparateFromApproval(t *testing.T) {
 	service, store, clock := testService(now)
 	issuer := testResumeTokens(t)
 	service.SetResumeTokenIssuer(issuer)
-	_, err := service.StartRun(context.Background(), "tenant_a", startRequest("webhook-run"))
+	_, err := service.StartRun(context.Background(), "organization_a", startRequest("webhook-run"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestWebhookResumeIsSeparateFromApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	suspended, err := orchestrator.Advance(context.Background(), "tenant_a")
+	suspended, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || suspended.Interrupt == nil {
 		t.Fatalf("suspend=%+v err=%v", suspended, err)
 	}
@@ -49,7 +49,7 @@ func TestWebhookResumeIsSeparateFromApproval(t *testing.T) {
 	if _, err = service.ResumeWebhook(context.Background(), conflict); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("conflict error=%v", err)
 	}
-	if _, err = service.ResolveApproval(context.Background(), "tenant_a", ResolveApprovalCommand{ActorID: "approver", InterruptID: suspended.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-key-after", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalInvalid) {
+	if _, err = service.ResolveApproval(context.Background(), "organization_a", ResolveApprovalCommand{ActorID: "approver", InterruptID: suspended.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-key-after", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalInvalid) {
 		t.Fatalf("approval path consumed webhook result: %v", err)
 	}
 }
@@ -58,10 +58,10 @@ func TestWebhookResumeIsSeparateFromApproval(t *testing.T) {
 func TestResumeTokenVerifyRejectsTamperingAndExpiry(t *testing.T) {
 	issuer := testResumeTokens(t)
 	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
-	interrupt := Interrupt{TenantID: "tenant", ID: "interrupt", RunID: "run", NodeID: "node", AttemptID: "attempt", Kind: "webhook", ExpiresAt: now.Add(time.Minute)}
+	interrupt := Interrupt{OrganizationID: "organization", ID: "interrupt", RunID: "run", NodeID: "node", AttemptID: "attempt", Kind: "webhook", ExpiresAt: now.Add(time.Minute)}
 	token, _ := issuer.Issue(interrupt)
 	claims, err := issuer.Verify(token, now)
-	if err != nil || claims.InterruptID != interrupt.ID || claims.TenantID != interrupt.TenantID || claims.Kind != "webhook" {
+	if err != nil || claims.InterruptID != interrupt.ID || claims.OrganizationID != interrupt.OrganizationID || claims.Kind != "webhook" {
 		t.Fatalf("claims=%+v err=%v", claims, err)
 	}
 	if _, err = issuer.Verify(token+"x", now); err == nil {

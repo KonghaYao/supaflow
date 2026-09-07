@@ -58,11 +58,11 @@ func TestImportDraftReportsAtomicCreateOutcome(t *testing.T) {
 		},
 		Edges: []workflow.EdgeDefinition{{ID: "edge", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}},
 	}
-	created, err := target.ImportDraft(context.Background(), "tenant", "flow", "migration-admin", value, "draft-import-stable-key")
+	created, err := target.ImportDraft(context.Background(), "organization", "flow", "migration-admin", value, "draft-import-stable-key")
 	if err != nil || !created {
 		t.Fatalf("first created=%t err=%v", created, err)
 	}
-	replayed, err := target.ImportDraft(context.Background(), "tenant", "flow", "migration-admin", value, "draft-import-stable-key")
+	replayed, err := target.ImportDraft(context.Background(), "organization", "flow", "migration-admin", value, "draft-import-stable-key")
 	if err != nil || replayed {
 		t.Fatalf("replay created=%t err=%v", replayed, err)
 	}

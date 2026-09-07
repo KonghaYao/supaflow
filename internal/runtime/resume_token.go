@@ -13,29 +13,29 @@ import (
 const minimumResumeTokenSecretBytes = 32
 
 type resumeTokenClaims struct {
-	Version     int      `json:"v"`
-	TenantID    TenantID `json:"tenantId"`
-	RunID       string   `json:"runId"`
-	NodeID      string   `json:"nodeId"`
-	AttemptID   string   `json:"attemptId"`
-	InterruptID string   `json:"interruptId"`
-	Kind        string   `json:"kind"`
-	ExpiresAt   int64    `json:"expiresAt"`
+	Version        int            `json:"v"`
+	OrganizationID OrganizationID `json:"organizationId"`
+	RunID          string         `json:"runId"`
+	NodeID         string         `json:"nodeId"`
+	AttemptID      string         `json:"attemptId"`
+	InterruptID    string         `json:"interruptId"`
+	Kind           string         `json:"kind"`
+	ExpiresAt      int64          `json:"expiresAt"`
 }
 
 // VerifiedResumeToken is the authenticated identity scope carried by a resume
 // token. It is produced only after constant-time signature and expiry checks.
 type VerifiedResumeToken struct {
-	TenantID    TenantID
-	RunID       string
-	NodeID      string
-	AttemptID   string
-	InterruptID string
-	Kind        string
-	ExpiresAt   time.Time
+	OrganizationID OrganizationID
+	RunID          string
+	NodeID         string
+	AttemptID      string
+	InterruptID    string
+	Kind           string
+	ExpiresAt      time.Time
 }
 
-// ResumeTokenIssuer deterministically issues tenant-scoped, expiring approval
+// ResumeTokenIssuer deterministically issues organization-scoped, expiring approval
 // tokens. Callers may persist only Digest(token), never the raw token.
 type ResumeTokenIssuer struct {
 	secret []byte
@@ -54,12 +54,12 @@ func (i *ResumeTokenIssuer) Issue(interrupt Interrupt) (string, error) {
 	if i == nil || len(i.secret) < minimumResumeTokenSecretBytes {
 		return "", errors.New("resume token issuer is not configured")
 	}
-	if interrupt.TenantID == "" || interrupt.RunID == "" || interrupt.NodeID == "" ||
+	if interrupt.OrganizationID == "" || interrupt.RunID == "" || interrupt.NodeID == "" ||
 		interrupt.AttemptID == "" || interrupt.ID == "" || interrupt.Kind == "" || interrupt.ExpiresAt.IsZero() {
 		return "", errors.New("interrupt token claims are incomplete")
 	}
 	claims, err := json.Marshal(resumeTokenClaims{
-		Version: 1, TenantID: interrupt.TenantID, RunID: interrupt.RunID, NodeID: interrupt.NodeID,
+		Version: 1, OrganizationID: interrupt.OrganizationID, RunID: interrupt.RunID, NodeID: interrupt.NodeID,
 		AttemptID: interrupt.AttemptID, InterruptID: interrupt.ID, Kind: interrupt.Kind,
 		// PostgreSQL timestamps preserve microseconds, so canonicalize here to
 		// guarantee worker and control-plane issue the identical token.
@@ -114,13 +114,13 @@ func (i *ResumeTokenIssuer) verifyClaims(token string) (VerifiedResumeToken, err
 	var claims resumeTokenClaims
 	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&claims); err != nil || claims.Version != 1 || claims.TenantID == "" ||
+	if err = decoder.Decode(&claims); err != nil || claims.Version != 1 || claims.OrganizationID == "" ||
 		claims.RunID == "" || claims.NodeID == "" || claims.AttemptID == "" || claims.InterruptID == "" || claims.Kind == "" {
 		return VerifiedResumeToken{}, errors.New("resume token is invalid")
 	}
 	expiresAt := time.UnixMicro(claims.ExpiresAt).UTC()
 	return VerifiedResumeToken{
-		TenantID: claims.TenantID, RunID: claims.RunID, NodeID: claims.NodeID,
+		OrganizationID: claims.OrganizationID, RunID: claims.RunID, NodeID: claims.NodeID,
 		AttemptID: claims.AttemptID, InterruptID: claims.InterruptID,
 		Kind: claims.Kind, ExpiresAt: expiresAt,
 	}, nil

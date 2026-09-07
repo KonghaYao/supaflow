@@ -17,7 +17,7 @@ import (
 // DeliveryMessage is one leased at-least-once outbox delivery.
 type DeliveryMessage struct {
 	ID             string
-	TenantID       string
+	OrganizationID string
 	AggregateType  string
 	AggregateID    string
 	Topic          string
@@ -31,7 +31,7 @@ type DeliveryMessage struct {
 // DeadLetter is a terminally failed outbox delivery safe for operations APIs.
 type DeadLetter struct {
 	ID                string          `json:"id"`
-	TenantID          string          `json:"-"`
+	OrganizationID    string          `json:"-"`
 	OriginalMessageID string          `json:"originalMessageId"`
 	AggregateType     string          `json:"aggregateType"`
 	AggregateID       string          `json:"aggregateId"`
@@ -78,7 +78,7 @@ type OutboxDispatcher struct {
 	telemetry   OperationTelemetry
 }
 
-// SetTelemetry enables tenant-hashed tracing and outbound W3C propagation.
+// SetTelemetry enables organization-hashed tracing and outbound W3C propagation.
 func (d *OutboxDispatcher) SetTelemetry(telemetry OperationTelemetry) { d.telemetry = telemetry }
 
 // NewOutboxDispatcher creates a bounded transactional outbox dispatcher.
@@ -89,12 +89,12 @@ func NewOutboxDispatcher(store DeliveryStore, client DeliveryClient, workerID st
 	return &OutboxDispatcher{store: store, client: client, workerID: workerID, lease: lease, baseBackoff: baseBackoff, maxBackoff: maxBackoff, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-// DispatchOne claims and processes at most one tenant-scoped message.
-func (d *OutboxDispatcher) DispatchOne(ctx context.Context, tenantID string, now time.Time) (DispatchResult, error) {
-	if tenantID == "" || now.IsZero() {
+// DispatchOne claims and processes at most one organization-scoped message.
+func (d *OutboxDispatcher) DispatchOne(ctx context.Context, organizationID string, now time.Time) (DispatchResult, error) {
+	if organizationID == "" || now.IsZero() {
 		return DispatchResult{}, ErrInvalidArgument
 	}
-	message, err := d.store.ClaimDelivery(ctx, tenantID, d.workerID, now, d.lease)
+	message, err := d.store.ClaimDelivery(ctx, organizationID, d.workerID, now, d.lease)
 	if errors.Is(err, ErrNotFound) {
 		return DispatchResult{}, nil
 	}
@@ -105,7 +105,7 @@ func (d *OutboxDispatcher) DispatchOne(ctx context.Context, tenantID string, now
 	deliveryCtx, cancelDelivery := context.WithCancel(ctx)
 	completeTelemetry := func(error) {}
 	if d.telemetry != nil {
-		deliveryCtx, completeTelemetry = d.telemetry.Start(deliveryCtx, "outbox.delivery", message.TenantID)
+		deliveryCtx, completeTelemetry = d.telemetry.Start(deliveryCtx, "outbox.delivery", message.OrganizationID)
 		message.TraceHeaders = make(map[string]string)
 		d.telemetry.Inject(deliveryCtx, propagation.MapCarrier(message.TraceHeaders))
 	}
@@ -208,24 +208,24 @@ func NewPostgresTopicDeliveryStore(pool *pgxpool.Pool, topics ...string) *Postgr
 }
 
 // ClaimDelivery leases one due message with SKIP LOCKED.
-func (s *PostgresDeliveryStore) ClaimDelivery(ctx context.Context, tenantID, workerID string, now time.Time, lease time.Duration) (DeliveryMessage, error) {
-	if tenantID == "" || workerID == "" || now.IsZero() || lease <= 0 {
+func (s *PostgresDeliveryStore) ClaimDelivery(ctx context.Context, organizationID, workerID string, now time.Time, lease time.Duration) (DeliveryMessage, error) {
+	if organizationID == "" || workerID == "" || now.IsZero() || lease <= 0 {
 		return DeliveryMessage{}, ErrInvalidArgument
 	}
 	var message DeliveryMessage
 	err := s.pool.QueryRow(ctx, `
 		WITH candidate AS (
 		    SELECT id FROM outbox_messages
-		    WHERE tenant_id=$1 AND delivered_at IS NULL AND available_at <= clock_timestamp()
+		    WHERE organization_id=$1 AND delivered_at IS NULL AND available_at <= clock_timestamp()
 		      AND (claimed_by IS NULL OR claim_expires_at <= clock_timestamp())
 		      AND (coalesce(cardinality($4::text[]),0) = 0 OR topic = ANY($4::text[]))
 		    ORDER BY available_at,created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		UPDATE outbox_messages o SET claimed_by=$2,
 		       claim_expires_at=clock_timestamp()+make_interval(secs => $3),attempts=o.attempts+1
-		FROM candidate WHERE o.tenant_id=$1 AND o.id=candidate.id
-		RETURNING o.id,o.tenant_id,o.aggregate_type,o.aggregate_id,o.topic,o.payload,o.attempts,o.max_attempts,o.claim_expires_at`,
-		tenantID, workerID, lease.Seconds(), s.topics).Scan(&message.ID, &message.TenantID,
+		FROM candidate WHERE o.organization_id=$1 AND o.id=candidate.id
+		RETURNING o.id,o.organization_id,o.aggregate_type,o.aggregate_id,o.topic,o.payload,o.attempts,o.max_attempts,o.claim_expires_at`,
+		organizationID, workerID, lease.Seconds(), s.topics).Scan(&message.ID, &message.OrganizationID,
 		&message.AggregateType, &message.AggregateID, &message.Topic, &message.Payload,
 		&message.Attempts, &message.MaxAttempts, &message.LeaseExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -239,15 +239,15 @@ func (s *PostgresDeliveryStore) ClaimDelivery(ctx context.Context, tenantID, wor
 
 // RenewDeliveryLease extends only the currently owned, unexpired row lease.
 func (s *PostgresDeliveryStore) RenewDeliveryLease(ctx context.Context, message DeliveryMessage, workerID string, now time.Time, lease time.Duration) (time.Time, error) {
-	if message.TenantID == "" || message.ID == "" || workerID == "" || now.IsZero() || lease <= 0 {
+	if message.OrganizationID == "" || message.ID == "" || workerID == "" || now.IsZero() || lease <= 0 {
 		return time.Time{}, ErrInvalidArgument
 	}
 	var expiresAt time.Time
 	err := s.pool.QueryRow(ctx, `UPDATE outbox_messages
 		SET claim_expires_at=clock_timestamp()+make_interval(secs => $4)
-		WHERE tenant_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
+		WHERE organization_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
 		  AND claim_expires_at>clock_timestamp()
-		RETURNING claim_expires_at`, message.TenantID, message.ID, workerID, lease.Seconds()).Scan(&expiresAt)
+		RETURNING claim_expires_at`, message.OrganizationID, message.ID, workerID, lease.Seconds()).Scan(&expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, ErrStaleLease
 	}
@@ -259,13 +259,13 @@ func (s *PostgresDeliveryStore) RenewDeliveryLease(ctx context.Context, message 
 
 // AcknowledgeDelivery marks a currently owned lease delivered.
 func (s *PostgresDeliveryStore) AcknowledgeDelivery(ctx context.Context, message DeliveryMessage, workerID string, now time.Time) error {
-	if message.TenantID == "" || message.ID == "" || workerID == "" || now.IsZero() {
+	if message.OrganizationID == "" || message.ID == "" || workerID == "" || now.IsZero() {
 		return ErrInvalidArgument
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE outbox_messages SET delivered_at=clock_timestamp(),claimed_by=NULL,claim_expires_at=NULL,last_error=NULL
-		WHERE tenant_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
-		  AND claim_expires_at > clock_timestamp()`, message.TenantID, message.ID, workerID)
+		WHERE organization_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
+		  AND claim_expires_at > clock_timestamp()`, message.OrganizationID, message.ID, workerID)
 	if err != nil {
 		return fmt.Errorf("acknowledge outbox delivery: %w", err)
 	}
@@ -277,7 +277,7 @@ func (s *PostgresDeliveryStore) AcknowledgeDelivery(ctx context.Context, message
 
 // FailDelivery schedules retry or atomically moves an exhausted message to DLQ.
 func (s *PostgresDeliveryStore) FailDelivery(ctx context.Context, message DeliveryMessage, workerID, diagnostic string, retryAt, now time.Time) (bool, error) {
-	if message.TenantID == "" || message.ID == "" || workerID == "" || retryAt.IsZero() || now.IsZero() {
+	if message.OrganizationID == "" || message.ID == "" || workerID == "" || retryAt.IsZero() || now.IsZero() {
 		return false, ErrInvalidArgument
 	}
 	retryDelay := retryAt.Sub(now)
@@ -292,9 +292,9 @@ func (s *PostgresDeliveryStore) FailDelivery(ctx context.Context, message Delive
 	var attempts, maxAttempts int
 	err = tx.QueryRow(ctx, `
 		SELECT attempts,max_attempts FROM outbox_messages
-		WHERE tenant_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
+		WHERE organization_id=$1 AND id=$2 AND claimed_by=$3 AND delivered_at IS NULL
 		  AND claim_expires_at > clock_timestamp()
-		FOR UPDATE`, message.TenantID, message.ID, workerID).Scan(&attempts, &maxAttempts)
+		FOR UPDATE`, message.OrganizationID, message.ID, workerID).Scan(&attempts, &maxAttempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, ErrStaleLease
 	}
@@ -310,21 +310,21 @@ func (s *PostgresDeliveryStore) FailDelivery(ctx context.Context, message Delive
 		}
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO outbox_dead_letters (
-			    tenant_id,id,original_message_id,aggregate_type,aggregate_id,topic,payload,attempts,last_error,failed_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())`, message.TenantID, deadID,
+			    organization_id,id,original_message_id,aggregate_type,aggregate_id,topic,payload,attempts,last_error,failed_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())`, message.OrganizationID, deadID,
 			message.ID, message.AggregateType, message.AggregateID, message.Topic, message.Payload,
 			attempts, diagnostic); err != nil {
 			return false, fmt.Errorf("persist dead letter: %w", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE outbox_messages SET delivered_at=clock_timestamp(),claimed_by=NULL,claim_expires_at=NULL,last_error=$4
-			WHERE tenant_id=$1 AND id=$2 AND claimed_by=$3`, message.TenantID, message.ID, workerID, diagnostic); err != nil {
+			WHERE organization_id=$1 AND id=$2 AND claimed_by=$3`, message.OrganizationID, message.ID, workerID, diagnostic); err != nil {
 			return false, fmt.Errorf("finalize dead letter source: %w", err)
 		}
 	} else if _, err = tx.Exec(ctx, `
 		UPDATE outbox_messages SET claimed_by=NULL,claim_expires_at=NULL,last_error=$4,
 		       available_at=clock_timestamp()+make_interval(secs => $5)
-		WHERE tenant_id=$1 AND id=$2 AND claimed_by=$3`, message.TenantID, message.ID, workerID, diagnostic, retryDelay.Seconds()); err != nil {
+		WHERE organization_id=$1 AND id=$2 AND claimed_by=$3`, message.OrganizationID, message.ID, workerID, diagnostic, retryDelay.Seconds()); err != nil {
 		return false, fmt.Errorf("schedule outbox retry: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -333,15 +333,15 @@ func (s *PostgresDeliveryStore) FailDelivery(ctx context.Context, message Delive
 	return dead, nil
 }
 
-// ListDeadLetters lists bounded tenant-scoped delivery failures.
-func (s *PostgresDeliveryStore) ListDeadLetters(ctx context.Context, tenantID string, limit int) ([]DeadLetter, error) {
-	if tenantID == "" || limit <= 0 || limit > 500 {
+// ListDeadLetters lists bounded organization-scoped delivery failures.
+func (s *PostgresDeliveryStore) ListDeadLetters(ctx context.Context, organizationID string, limit int) ([]DeadLetter, error) {
+	if organizationID == "" || limit <= 0 || limit > 500 {
 		return nil, ErrInvalidArgument
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id,tenant_id,original_message_id,aggregate_type,aggregate_id,topic,payload,
+		SELECT id,organization_id,original_message_id,aggregate_type,aggregate_id,topic,payload,
 		       attempts,last_error,failed_at,requeued_at
-		FROM outbox_dead_letters WHERE tenant_id=$1 ORDER BY failed_at DESC,id LIMIT $2`, tenantID, limit)
+		FROM outbox_dead_letters WHERE organization_id=$1 ORDER BY failed_at DESC,id LIMIT $2`, organizationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list dead letters: %w", err)
 	}
@@ -349,7 +349,7 @@ func (s *PostgresDeliveryStore) ListDeadLetters(ctx context.Context, tenantID st
 	letters := make([]DeadLetter, 0, limit)
 	for rows.Next() {
 		var letter DeadLetter
-		if err = rows.Scan(&letter.ID, &letter.TenantID, &letter.OriginalMessageID,
+		if err = rows.Scan(&letter.ID, &letter.OrganizationID, &letter.OriginalMessageID,
 			&letter.AggregateType, &letter.AggregateID, &letter.Topic, &letter.Payload,
 			&letter.Attempts, &letter.LastError, &letter.FailedAt, &letter.RequeuedAt); err != nil {
 			return nil, fmt.Errorf("scan dead letter: %w", err)
@@ -364,7 +364,7 @@ func (s *PostgresDeliveryStore) ListDeadLetters(ctx context.Context, tenantID st
 }
 
 // RequeueDeadLetter creates a fresh delivery once and marks the DLQ record requeued atomically.
-func (s *PostgresDeliveryStore) RequeueDeadLetter(ctx context.Context, tenantID, deadLetterID string, now time.Time) error {
+func (s *PostgresDeliveryStore) RequeueDeadLetter(ctx context.Context, organizationID, deadLetterID string, now time.Time) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin dead letter requeue: %w", err)
@@ -373,7 +373,7 @@ func (s *PostgresDeliveryStore) RequeueDeadLetter(ctx context.Context, tenantID,
 	var letter DeadLetter
 	err = tx.QueryRow(ctx, `
 		SELECT original_message_id,aggregate_type,aggregate_id,topic,payload,requeued_at
-		FROM outbox_dead_letters WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, deadLetterID).Scan(
+		FROM outbox_dead_letters WHERE organization_id=$1 AND id=$2 FOR UPDATE`, organizationID, deadLetterID).Scan(
 		&letter.OriginalMessageID, &letter.AggregateType, &letter.AggregateID,
 		&letter.Topic, &letter.Payload, &letter.RequeuedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -403,12 +403,12 @@ func (s *PostgresDeliveryStore) RequeueDeadLetter(ctx context.Context, tenantID,
 		return err
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO outbox_messages (id,tenant_id,aggregate_type,aggregate_id,topic,payload,available_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`, messageID, tenantID, letter.AggregateType,
+		INSERT INTO outbox_messages (id,organization_id,aggregate_type,aggregate_id,topic,payload,available_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`, messageID, organizationID, letter.AggregateType,
 		letter.AggregateID, letter.Topic, letter.Payload, now); err != nil {
 		return fmt.Errorf("requeue dead letter: %w", err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE outbox_dead_letters SET requeued_at=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, deadLetterID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE outbox_dead_letters SET requeued_at=$3 WHERE organization_id=$1 AND id=$2`, organizationID, deadLetterID, now); err != nil {
 		return fmt.Errorf("mark dead letter requeued: %w", err)
 	}
 	audited, err := recordAllowedMutationTx(ctx, tx, deadLetterID)

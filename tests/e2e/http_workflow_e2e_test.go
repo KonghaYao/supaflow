@@ -130,7 +130,7 @@ func TestHTTPApprovalWorkflowThroughAPIWithoutListener(t *testing.T) {
 	run := httpWorkflowDecode[httpWorkflowRun](t, startResponse)
 
 	for step := 0; step < 3; step++ {
-		result, advanceErr := orchestrator.Advance(context.Background(), "tenant-http")
+		result, advanceErr := orchestrator.Advance(context.Background(), "organization-http")
 		if advanceErr != nil || !result.Worked {
 			t.Fatalf("advance %d: result=%+v err=%v", step, result, advanceErr)
 		}
@@ -169,7 +169,7 @@ func TestHTTPApprovalWorkflowThroughAPIWithoutListener(t *testing.T) {
 		t.Fatalf("resolve status=%d body=%s", resolveResponse.Code, resolveResponse.Body.String())
 	}
 	for step := 0; step < 2; step++ {
-		result, advanceErr := orchestrator.Advance(context.Background(), "tenant-http")
+		result, advanceErr := orchestrator.Advance(context.Background(), "organization-http")
 		if advanceErr != nil || !result.Worked {
 			t.Fatalf("resume advance %d: result=%+v err=%v", step, result, advanceErr)
 		}
@@ -218,7 +218,7 @@ func httpWorkflowRequest(t *testing.T, handler http.Handler, method, path, idemp
 	}
 	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(payload))
 	request.Header.Set("Authorization", "Bearer "+httpWorkflowAdminKey)
-	request.Header.Set("X-Fenix-Organization-Id", "tenant-http")
+	request.Header.Set("X-Fenix-Organization-Id", "organization-http")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

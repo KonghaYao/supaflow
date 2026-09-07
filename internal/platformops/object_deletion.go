@@ -14,11 +14,11 @@ import (
 // deleteManagedObject first commits a durable, non-readable deletion state.
 // The supervisor can therefore finish physical cleanup after cancellation,
 // process death, or an ambiguous client-side database result.
-func deleteManagedObject(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, tenantID, objectID, kind string, audit *AuditRecord) (bool, error) {
-	if pool == nil || objects == nil || tenantID == "" || objectID == "" || !validObjectKind(kind) {
+func deleteManagedObject(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, organizationID, objectID, kind string, audit *AuditRecord) (bool, error) {
+	if pool == nil || objects == nil || organizationID == "" || objectID == "" || !validObjectKind(kind) {
 		return false, ErrInvalidArgument
 	}
-	objectKey, claimed, err := markObjectDeleting(ctx, pool, tenantID, objectID, kind, audit)
+	objectKey, claimed, err := markObjectDeleting(ctx, pool, organizationID, objectID, kind, audit)
 	if err != nil {
 		return false, err
 	}
@@ -27,25 +27,25 @@ func deleteManagedObject(ctx context.Context, pool *pgxpool.Pool, objects Object
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), objectUploadCleanupTimeout)
 	defer cancel()
-	if err = objects.Delete(cleanupCtx, tenantID, objectKey); err != nil {
+	if err = objects.Delete(cleanupCtx, organizationID, objectKey); err != nil {
 		return claimed, fmt.Errorf("delete managed object bytes: %w", err)
 	}
 	if _, err = pool.Exec(cleanupCtx, `UPDATE managed_objects
 		SET status='deleted',deleted_at=COALESCE(deleted_at,now())
-		WHERE tenant_id=$1 AND id=$2 AND kind=$3 AND status='deleting'`,
-		tenantID, objectID, kind); err != nil {
+		WHERE organization_id=$1 AND id=$2 AND kind=$3 AND status='deleting'`,
+		organizationID, objectID, kind); err != nil {
 		return claimed, fmt.Errorf("complete managed object deletion: %w", err)
 	}
 	return claimed, nil
 }
 
-func markObjectDeleting(ctx context.Context, pool *pgxpool.Pool, tenantID, objectID, kind string, audit *AuditRecord) (string, bool, error) {
+func markObjectDeleting(ctx context.Context, pool *pgxpool.Pool, organizationID, objectID, kind string, audit *AuditRecord) (string, bool, error) {
 	if audit != nil {
-		if err := validateAuditRecord(*audit); err != nil || audit.TenantID != tenantID || audit.ResourceID != objectID {
+		if err := validateAuditRecord(*audit); err != nil || audit.OrganizationID != organizationID || audit.ResourceID != objectID {
 			return "", false, ErrInvalidArgument
 		}
 		if audit.ID == "" {
-			digest := sha256.Sum256([]byte(tenantID + "\x00" + audit.Action + "\x00" + audit.ResourceType + "\x00" + objectID))
+			digest := sha256.Sum256([]byte(organizationID + "\x00" + audit.Action + "\x00" + audit.ResourceType + "\x00" + objectID))
 			audit.ID = "audit_del_" + hex.EncodeToString(digest[:16])
 		}
 	}
@@ -56,7 +56,7 @@ func markObjectDeleting(ctx context.Context, pool *pgxpool.Pool, tenantID, objec
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var objectKey, status string
 	err = tx.QueryRow(ctx, `SELECT object_key,status FROM managed_objects
-		WHERE tenant_id=$1 AND id=$2 AND kind=$3 FOR UPDATE`, tenantID, objectID, kind).Scan(&objectKey, &status)
+		WHERE organization_id=$1 AND id=$2 AND kind=$3 FOR UPDATE`, organizationID, objectID, kind).Scan(&objectKey, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, ErrNotFound
 	}
@@ -69,7 +69,7 @@ func markObjectDeleting(ctx context.Context, pool *pgxpool.Pool, tenantID, objec
 	claimed := status == "active" || status == "archived"
 	if claimed {
 		if _, err = tx.Exec(ctx, `UPDATE managed_objects SET status='deleting'
-			WHERE tenant_id=$1 AND id=$2 AND kind=$3`, tenantID, objectID, kind); err != nil {
+			WHERE organization_id=$1 AND id=$2 AND kind=$3`, organizationID, objectID, kind); err != nil {
 			return "", false, fmt.Errorf("mark managed object deleting: %w", err)
 		}
 		if audit != nil {
@@ -88,9 +88,9 @@ func markObjectDeleting(ctx context.Context, pool *pgxpool.Pool, tenantID, objec
 	var resolvedKey, resolvedStatus string
 	var auditCommitted bool
 	resolveErr := pool.QueryRow(resolveCtx, `SELECT object_key,status,
-		$4='' OR EXISTS (SELECT 1 FROM audit_records WHERE tenant_id=$1 AND id=$4)
-		FROM managed_objects WHERE tenant_id=$1 AND id=$2 AND kind=$3`,
-		tenantID, objectID, kind, auditID(audit)).Scan(&resolvedKey, &resolvedStatus, &auditCommitted)
+		$4='' OR EXISTS (SELECT 1 FROM audit_records WHERE organization_id=$1 AND id=$4)
+		FROM managed_objects WHERE organization_id=$1 AND id=$2 AND kind=$3`,
+		organizationID, objectID, kind, auditID(audit)).Scan(&resolvedKey, &resolvedStatus, &auditCommitted)
 	if resolveErr == nil && (resolvedStatus == "deleting" || resolvedStatus == "deleted") {
 		return resolvedKey, claimed && auditCommitted, nil
 	}
@@ -104,12 +104,12 @@ func auditID(record *AuditRecord) string {
 	return record.ID
 }
 
-func recoverManagedObjectDeletions(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, tenantID string, limit int) (int, error) {
-	if pool == nil || objects == nil || tenantID == "" || limit <= 0 || limit > 1000 {
+func recoverManagedObjectDeletions(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, organizationID string, limit int) (int, error) {
+	if pool == nil || objects == nil || organizationID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	rows, err := pool.Query(ctx, `SELECT id,object_key FROM managed_objects
-		WHERE tenant_id=$1 AND status='deleting' ORDER BY id LIMIT $2`, tenantID, limit)
+		WHERE organization_id=$1 AND status='deleting' ORDER BY id LIMIT $2`, organizationID, limit)
 	if err != nil {
 		return 0, fmt.Errorf("select interrupted object deletions: %w", err)
 	}
@@ -130,13 +130,13 @@ func recoverManagedObjectDeletions(ctx context.Context, pool *pgxpool.Pool, obje
 	recovered := 0
 	var failures []error
 	for _, item := range targets {
-		if err = objects.Delete(ctx, tenantID, item.key); err != nil {
+		if err = objects.Delete(ctx, organizationID, item.key); err != nil {
 			failures = append(failures, fmt.Errorf("recover managed object deletion: %w", err))
 			continue
 		}
 		tag, updateErr := pool.Exec(ctx, `UPDATE managed_objects
 			SET status='deleted',deleted_at=COALESCE(deleted_at,now())
-			WHERE tenant_id=$1 AND id=$2 AND status='deleting'`, tenantID, item.id)
+			WHERE organization_id=$1 AND id=$2 AND status='deleting'`, organizationID, item.id)
 		if updateErr != nil {
 			failures = append(failures, updateErr)
 			continue

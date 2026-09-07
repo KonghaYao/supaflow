@@ -15,7 +15,7 @@ var (
 	ErrSignature           = errors.New("webhook signature is invalid")
 	ErrCredentialRevoked   = errors.New("credential is revoked")
 	ErrCredentialForbidden = errors.New("credential is not granted to attempt")
-	ErrRateLimited         = errors.New("tenant quota exceeded")
+	ErrRateLimited         = errors.New("organization quota exceeded")
 	ErrPermissionDenied    = errors.New("permission denied")
 	ErrStaleLease          = errors.New("delivery lease is stale")
 )

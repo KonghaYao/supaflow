@@ -31,7 +31,7 @@ func TestBoundedAgentUsesConfiguredTrustedTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := agents.Invoke(context.Background(), AttemptScope{TenantID: "tenant", AttemptID: "attempt"}, "analyst", json.RawMessage(`{"question":"value"}`))
+	output, err := agents.Invoke(context.Background(), AttemptScope{OrganizationID: "organization", AttemptID: "attempt"}, "analyst", json.RawMessage(`{"question":"value"}`))
 	if err != nil || models.calls != 2 || string(output) != `{"content":"42","toolCalls":[]}` {
 		t.Fatalf("output=%s calls=%d err=%v", output, models.calls, err)
 	}
@@ -45,7 +45,7 @@ func TestBoundedAgentRejectsUnboundedToolLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = agents.Invoke(context.Background(), AttemptScope{TenantID: "tenant", AttemptID: "attempt"}, "one", json.RawMessage(`{}`)); err == nil {
+	if _, err = agents.Invoke(context.Background(), AttemptScope{OrganizationID: "organization", AttemptID: "attempt"}, "one", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected maxSteps failure")
 	}
 }

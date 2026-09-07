@@ -1,4 +1,4 @@
-// Package supaflow is the stable Go client for Supaflow's tenant-scoped API.
+// Package supaflow is the stable Go client for Supaflow's organization-scoped API.
 package supaflow
 
 import (
@@ -228,7 +228,7 @@ func (c *Client) CancelRun(ctx context.Context, runID, idempotencyKey string) (R
 	return result, err
 }
 
-// ListOutboundWebhookSubscriptions lists safe tenant-scoped event sinks.
+// ListOutboundWebhookSubscriptions lists safe organization-scoped event sinks.
 func (c *Client) ListOutboundWebhookSubscriptions(ctx context.Context) ([]OutboundWebhookSubscription, error) {
 	var result []OutboundWebhookSubscription
 	err := c.request(ctx, http.MethodGet, "/ops/webhook-subscriptions", "", nil, &result)

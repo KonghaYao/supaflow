@@ -6,17 +6,17 @@ import (
 )
 
 const (
-	// DefaultTenantMaxActiveRuns is the bootstrap run concurrency limit used
-	// only until an administrator persists an explicit tenant quota.
-	DefaultTenantMaxActiveRuns = 100
-	// DefaultTenantMaxActiveWorkers is the bootstrap worker reservation limit.
-	DefaultTenantMaxActiveWorkers = 50
-	// DefaultTenantMaxQueueDepth is the bootstrap durable run backlog limit.
-	DefaultTenantMaxQueueDepth = 1000
+	// DefaultOrganizationMaxActiveRuns is the bootstrap run concurrency limit used
+	// only until an administrator persists an explicit organization quota.
+	DefaultOrganizationMaxActiveRuns = 100
+	// DefaultOrganizationMaxActiveWorkers is the bootstrap worker reservation limit.
+	DefaultOrganizationMaxActiveWorkers = 50
+	// DefaultOrganizationMaxQueueDepth is the bootstrap durable run backlog limit.
+	DefaultOrganizationMaxQueueDepth = 1000
 )
 
-// TenantID is the authenticated tenant boundary for every runtime operation.
-type TenantID string
+// OrganizationID is the authenticated organization boundary for every runtime operation.
+type OrganizationID string
 
 // RunStatus is the durable lifecycle state of a workflow run.
 type RunStatus string
@@ -78,9 +78,9 @@ type PlanRef struct {
 	Executor    string
 }
 
-// Run is the tenant-scoped durable workflow execution aggregate.
+// Run is the organization-scoped durable workflow execution aggregate.
 type Run struct {
-	TenantID           TenantID
+	OrganizationID     OrganizationID
 	ID                 string
 	Plan               PlanRef
 	Status             RunStatus
@@ -119,7 +119,7 @@ type RunOutput struct {
 
 // NodeState is a logical node projection across retries and lease takeovers.
 type NodeState struct {
-	TenantID        TenantID
+	OrganizationID  OrganizationID
 	RunID           string
 	NodeID          string
 	Status          NodeStatus
@@ -130,8 +130,8 @@ type NodeState struct {
 
 // Attempt is one physical execution of a logical node.
 type Attempt struct {
-	TenantID TenantID
-	ID       string
+	OrganizationID OrganizationID
+	ID             string
 	// ExecutionID is stable for one logical node activation across physical retries.
 	// External deduplication must bind to this value rather than ID.
 	ExecutionID   string
@@ -153,72 +153,72 @@ type Attempt struct {
 // Lease grants one worker temporary ownership with a monotonically increasing
 // fencing token. A token is only meaningful for its attempt.
 type Lease struct {
-	TenantID     TenantID
-	RunID        string
-	AttemptID    string
-	WorkerID     string
-	FencingToken uint64
-	ExpiresAt    time.Time
-	UpdatedAt    time.Time
+	OrganizationID OrganizationID
+	RunID          string
+	AttemptID      string
+	WorkerID       string
+	FencingToken   uint64
+	ExpiresAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Event is an immutable run event. Cursor is monotonically increasing per run.
 type Event struct {
-	TenantID TenantID
-	RunID    string
-	Cursor   uint64
-	Type     string
-	Data     json.RawMessage
-	At       time.Time
+	OrganizationID OrganizationID
+	RunID          string
+	Cursor         uint64
+	Type           string
+	Data           json.RawMessage
+	At             time.Time
 }
 
 // Interrupt is a durable, single-use suspension awaiting an external decision.
 type Interrupt struct {
-	TenantID    TenantID
-	ID          string
-	RunID       string
-	NodeID      string
-	AttemptID   string
-	Kind        string
-	Status      InterruptStatus
-	TokenDigest [32]byte
-	ExpiresAt   time.Time
-	ResolvedAt  *time.Time
-	Decision    json.RawMessage
-	AutoResume  bool
-	CreatedAt   time.Time
+	OrganizationID OrganizationID
+	ID             string
+	RunID          string
+	NodeID         string
+	AttemptID      string
+	Kind           string
+	Status         InterruptStatus
+	TokenDigest    [32]byte
+	ExpiresAt      time.Time
+	ResolvedAt     *time.Time
+	Decision       json.RawMessage
+	AutoResume     bool
+	CreatedAt      time.Time
 }
 
 // Output describes a bounded result payload or an external object reference.
 type Output struct {
-	TenantID    TenantID
-	ID          string
-	RunID       string
-	NodeID      string
-	AttemptID   string
-	ContentType string
-	Size        int64
-	SHA256      string
-	Sensitive   bool
-	Inline      json.RawMessage
-	ObjectRef   string
-	CreatedAt   time.Time
+	OrganizationID OrganizationID
+	ID             string
+	RunID          string
+	NodeID         string
+	AttemptID      string
+	ContentType    string
+	Size           int64
+	SHA256         string
+	Sensitive      bool
+	Inline         json.RawMessage
+	ObjectRef      string
+	CreatedAt      time.Time
 }
 
 // Snapshot is the durable orchestration checkpoint committed with an attempt.
 type Snapshot struct {
-	TenantID  TenantID
-	ID        string
-	RunID     string
-	AttemptID string
-	Sequence  uint64
-	Data      json.RawMessage
-	CreatedAt time.Time
+	OrganizationID OrganizationID
+	ID             string
+	RunID          string
+	AttemptID      string
+	Sequence       uint64
+	Data           json.RawMessage
+	CreatedAt      time.Time
 }
 
 // SubworkflowLink is immutable parent-child execution lineage.
 type SubworkflowLink struct {
-	TenantID        TenantID
+	OrganizationID  OrganizationID
 	ParentRunID     string
 	ParentNodeID    string
 	ParentAttemptID string

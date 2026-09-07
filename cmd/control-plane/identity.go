@@ -6,25 +6,23 @@ import (
 	"strings"
 
 	"github.com/pazhou/supaflow/internal/api"
-	"github.com/pazhou/supaflow/internal/identity"
 )
 
-func configureIdentity() (*api.Authenticator, *identity.HTTPHandler, error) {
+func configureAuthentication() (*api.Authenticator, error) {
 	if strings.TrimSpace(os.Getenv("SUPAFLOW_API_KEYS_JSON")) != "" ||
 		strings.TrimSpace(os.Getenv("SUPAFLOW_BOOTSTRAP_API_KEYS_JSON")) != "" ||
 		enabled(os.Getenv("SUPAFLOW_IDENTITY_BOOTSTRAP_ENABLED")) {
-		return nil, nil, errors.New("legacy API key and identity bootstrap configuration is no longer accepted")
+		return nil, errors.New("legacy API key and identity bootstrap configuration is no longer accepted")
 	}
 	current, err := readSecretFile("SUPAFLOW_MASTER_KEY_FILE", true)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	previous, err := readSecretFile("SUPAFLOW_PREVIOUS_MASTER_KEY_FILE", false)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	authenticator, err := api.NewMasterKeyAuthenticator(current, previous)
-	return authenticator, nil, err
+	return api.NewMasterKeyAuthenticator(current, previous)
 }
 
 func readSecretFile(environmentName string, required bool) (string, error) {

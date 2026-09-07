@@ -37,7 +37,7 @@ func CheckCapabilities(ctx context.Context) error {
 
 func capabilityRequest(attemptID, language, source string) Request {
 	return Request{
-		TenantID: "capability-probe", RunID: "capability-probe", AttemptID: attemptID,
+		OrganizationID: "capability-probe", RunID: "capability-probe", AttemptID: attemptID,
 		FencingToken: 1, Language: language, Source: source, Network: false,
 		Input: []byte("null"), Timeout: 5 * time.Second, OutputLimit: 1024,
 		Limits: ResourceLimits{Processes: 4, WorkspaceBytes: 1 << 20, WorkspaceInodes: 64},

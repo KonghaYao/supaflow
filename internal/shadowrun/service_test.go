@@ -30,7 +30,7 @@ func TestServiceStartsOnlyFullyStubbedShadowRun(t *testing.T) {
 			{ID: "to_end", FromNode: "request", FromPort: "response", ToNode: "end", ToPort: "result"},
 		},
 	}
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", definition.ID, definition, "publish-shadow-1")
+	published, _, err := catalog.Publish(context.Background(), "organization_a", definition.ID, definition, "publish-shadow-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,17 +42,17 @@ func TestServiceStartsOnlyFullyStubbedShadowRun(t *testing.T) {
 		PlanID: published.ID, PlanHash: published.Hash, Input: json.RawMessage(`{"order":42}`),
 		IdempotencyKey: "shadow-run-key-1",
 	}
-	_, err = service.Start(context.Background(), "tenant_a", request)
+	_, err = service.Start(context.Background(), "organization_a", request)
 	var shadowErr *Error
 	if !errors.As(err, &shadowErr) || shadowErr.Code != CodeShadowStubRequired {
 		t.Fatalf("missing stub error = %#v", err)
 	}
 	request.StubBindings = map[string]string{"request": workflow.ShadowStubExecutorKind}
-	created, err := service.Start(context.Background(), "tenant_a", request)
+	created, err := service.Start(context.Background(), "organization_a", request)
 	if err != nil || !created.Created || created.Run.Plan.Executor != "shadow-v1:builtin.start" {
 		t.Fatalf("created = %+v, err = %v", created, err)
 	}
-	replay, err := service.Start(context.Background(), "tenant_a", request)
+	replay, err := service.Start(context.Background(), "organization_a", request)
 	if err != nil || replay.Created || replay.Run.ID != created.Run.ID {
 		t.Fatalf("replay = %+v, err = %v", replay, err)
 	}

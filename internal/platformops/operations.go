@@ -94,8 +94,8 @@ func NewWorkerRegistry(pool *pgxpool.Pool) *WorkerRegistry { return &WorkerRegis
 
 // Heartbeat registers capacity while preserving a previously requested drain.
 // An offline worker must atomically reacquire quota before it may become ready.
-func (r *WorkerRegistry) Heartbeat(ctx context.Context, tenantID, workerID string, capacity, active int) error {
-	if tenantID == "" || workerID == "" || capacity <= 0 || active < 0 || active > capacity {
+func (r *WorkerRegistry) Heartbeat(ctx context.Context, organizationID, workerID string, capacity, active int) error {
+	if organizationID == "" || workerID == "" || capacity <= 0 || active < 0 || active > capacity {
 		return ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -105,8 +105,8 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, tenantID, workerID strin
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var maxWorkers, activeWorkers int
 	err = tx.QueryRow(ctx, `SELECT q.max_active_workers,c.active_workers
-		FROM tenant_quotas q JOIN tenant_quota_counters c ON c.tenant_id=q.tenant_id
-		WHERE q.tenant_id=$1 FOR UPDATE OF q,c`, tenantID).Scan(&maxWorkers, &activeWorkers)
+		FROM organization_quotas q JOIN organization_quota_counters c ON c.organization_id=q.organization_id
+		WHERE q.organization_id=$1 FOR UPDATE OF q,c`, organizationID).Scan(&maxWorkers, &activeWorkers)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -115,7 +115,7 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, tenantID, workerID strin
 	}
 	var admissionID, admissionStatus string
 	err = tx.QueryRow(ctx, `SELECT id,status FROM admission_entries
-		WHERE tenant_id=$1 AND resource_type='worker' AND resource_id=$2 FOR UPDATE`, tenantID, workerID).
+		WHERE organization_id=$1 AND resource_type='worker' AND resource_id=$2 FOR UPDATE`, organizationID, workerID).
 		Scan(&admissionID, &admissionStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		admissionID, err = newID("adm")
@@ -132,25 +132,25 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, tenantID, workerID strin
 			return &RateLimitError{RetryAfter: 5 * time.Second, Reason: "worker capacity exhausted"}
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO admission_entries
-			(tenant_id,id,resource_type,resource_id,priority,status,admitted_at)
+			(organization_id,id,resource_type,resource_id,priority,status,admitted_at)
 			VALUES ($1,$2,'worker',$3,0,'active',clock_timestamp())
-			ON CONFLICT (tenant_id,resource_type,resource_id) DO UPDATE SET
-			  status='active',admitted_at=clock_timestamp(),released_at=NULL`, tenantID, admissionID, workerID); err != nil {
+			ON CONFLICT (organization_id,resource_type,resource_id) DO UPDATE SET
+			  status='active',admitted_at=clock_timestamp(),released_at=NULL`, organizationID, admissionID, workerID); err != nil {
 			return fmt.Errorf("reacquire worker admission: %w", err)
 		}
 		activeWorkers++
-		if _, err = tx.Exec(ctx, `UPDATE tenant_quota_counters
-			SET active_workers=$2,updated_at=clock_timestamp() WHERE tenant_id=$1`, tenantID, activeWorkers); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE organization_quota_counters
+			SET active_workers=$2,updated_at=clock_timestamp() WHERE organization_id=$1`, organizationID, activeWorkers); err != nil {
 			return fmt.Errorf("update worker quota counter: %w", err)
 		}
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO worker_registrations (tenant_id,worker_id,status,capacity,active_attempts,heartbeat_at)
+		INSERT INTO worker_registrations (organization_id,worker_id,status,capacity,active_attempts,heartbeat_at)
 		VALUES ($1,$2,'ready',$3,$4,clock_timestamp())
-		ON CONFLICT (tenant_id,worker_id) DO UPDATE SET
+		ON CONFLICT (organization_id,worker_id) DO UPDATE SET
 		status=CASE WHEN worker_registrations.status='draining' AND NOT $5 THEN 'draining' ELSE 'ready' END,
 		capacity=EXCLUDED.capacity,active_attempts=EXCLUDED.active_attempts,
-		heartbeat_at=EXCLUDED.heartbeat_at,updated_at=clock_timestamp()`, tenantID, workerID, capacity, active, reacquired)
+		heartbeat_at=EXCLUDED.heartbeat_at,updated_at=clock_timestamp()`, organizationID, workerID, capacity, active, reacquired)
 	if err != nil {
 		return fmt.Errorf("persist worker heartbeat: %w", err)
 	}
@@ -161,14 +161,14 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, tenantID, workerID strin
 }
 
 // BeginDrain persistently prevents new claims for a worker.
-func (r *WorkerRegistry) BeginDrain(ctx context.Context, tenantID, workerID string) error {
+func (r *WorkerRegistry) BeginDrain(ctx context.Context, organizationID, workerID string) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin worker drain: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	tag, err := tx.Exec(ctx, `UPDATE worker_registrations SET status='draining',updated_at=clock_timestamp()
-		WHERE tenant_id=$1 AND worker_id=$2`, tenantID, workerID)
+		WHERE organization_id=$1 AND worker_id=$2`, organizationID, workerID)
 	if err != nil {
 		return fmt.Errorf("begin worker drain: %w", err)
 	}
@@ -189,8 +189,8 @@ func (r *WorkerRegistry) BeginDrain(ctx context.Context, tenantID, workerID stri
 }
 
 // MayClaim reports whether a fresh, non-draining worker may claim new work.
-func (r *WorkerRegistry) MayClaim(ctx context.Context, tenantID, workerID string, maxHeartbeatAge time.Duration) (bool, error) {
-	if tenantID == "" || workerID == "" || maxHeartbeatAge <= 0 {
+func (r *WorkerRegistry) MayClaim(ctx context.Context, organizationID, workerID string, maxHeartbeatAge time.Duration) (bool, error) {
+	if organizationID == "" || workerID == "" || maxHeartbeatAge <= 0 {
 		return false, ErrInvalidArgument
 	}
 	var allowed bool
@@ -199,9 +199,9 @@ func (r *WorkerRegistry) MayClaim(ctx context.Context, tenantID, workerID string
 		  AND w.heartbeat_at >= clock_timestamp()-make_interval(secs => $3)
 		  AND w.active_attempts < w.capacity
 		  AND EXISTS (SELECT 1 FROM admission_entries a
-		      WHERE a.tenant_id=w.tenant_id AND a.resource_type='worker'
+		      WHERE a.organization_id=w.organization_id AND a.resource_type='worker'
 		        AND a.resource_id=w.worker_id AND a.status='active')
-		FROM worker_registrations w WHERE w.tenant_id=$1 AND w.worker_id=$2`, tenantID, workerID, maxHeartbeatAge.Seconds()).Scan(&allowed)
+		FROM worker_registrations w WHERE w.organization_id=$1 AND w.worker_id=$2`, organizationID, workerID, maxHeartbeatAge.Seconds()).Scan(&allowed)
 	if err != nil {
 		return false, ErrNotFound
 	}
@@ -209,8 +209,8 @@ func (r *WorkerRegistry) MayClaim(ctx context.Context, tenantID, workerID string
 }
 
 // ReapStale marks crashed workers offline and atomically releases their quota reservations.
-func (r *WorkerRegistry) ReapStale(ctx context.Context, tenantID string, maxHeartbeatAge time.Duration, limit int) (int, error) {
-	if tenantID == "" || maxHeartbeatAge <= 0 || limit <= 0 || limit > 1000 {
+func (r *WorkerRegistry) ReapStale(ctx context.Context, organizationID string, maxHeartbeatAge time.Duration, limit int) (int, error) {
+	if organizationID == "" || maxHeartbeatAge <= 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -219,9 +219,9 @@ func (r *WorkerRegistry) ReapStale(ctx context.Context, tenantID string, maxHear
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var ignored int
-	if err = tx.QueryRow(ctx, `SELECT c.active_workers FROM tenant_quotas q
-		JOIN tenant_quota_counters c ON c.tenant_id=q.tenant_id
-		WHERE q.tenant_id=$1 FOR UPDATE OF q,c`, tenantID).Scan(&ignored); errors.Is(err, pgx.ErrNoRows) {
+	if err = tx.QueryRow(ctx, `SELECT c.active_workers FROM organization_quotas q
+		JOIN organization_quota_counters c ON c.organization_id=q.organization_id
+		WHERE q.organization_id=$1 FOR UPDATE OF q,c`, organizationID).Scan(&ignored); errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNotFound
 	} else if err != nil {
 		return 0, fmt.Errorf("lock worker quota for reap: %w", err)
@@ -229,32 +229,32 @@ func (r *WorkerRegistry) ReapStale(ctx context.Context, tenantID string, maxHear
 	var released int
 	err = tx.QueryRow(ctx, `
 		WITH stale AS (
-		    SELECT tenant_id,worker_id FROM worker_registrations
-		    WHERE tenant_id=$1 AND status IN ('ready','draining')
+		    SELECT organization_id,worker_id FROM worker_registrations
+		    WHERE organization_id=$1 AND status IN ('ready','draining')
 		      AND heartbeat_at < clock_timestamp()-make_interval(secs => $2)
 		    ORDER BY heartbeat_at,worker_id FOR UPDATE SKIP LOCKED LIMIT $3
 		), offline AS (
 		    UPDATE worker_registrations w SET status='offline',updated_at=clock_timestamp()
-		    FROM stale s WHERE w.tenant_id=s.tenant_id AND w.worker_id=s.worker_id
+		    FROM stale s WHERE w.organization_id=s.organization_id AND w.worker_id=s.worker_id
 		    RETURNING w.worker_id
 		), orphan AS (
 		    SELECT a.resource_id AS worker_id FROM admission_entries a
-		    WHERE a.tenant_id=$1 AND a.resource_type='worker' AND a.status='active'
+		    WHERE a.organization_id=$1 AND a.resource_type='worker' AND a.status='active'
 		      AND a.created_at < clock_timestamp()-make_interval(secs => $2)
 		      AND NOT EXISTS (SELECT 1 FROM worker_registrations w
-		          WHERE w.tenant_id=a.tenant_id AND w.worker_id=a.resource_id)
+		          WHERE w.organization_id=a.organization_id AND w.worker_id=a.resource_id)
 		    ORDER BY a.created_at,a.resource_id FOR UPDATE OF a SKIP LOCKED LIMIT $3
 		), released AS (
 		    UPDATE admission_entries a SET status='released',released_at=clock_timestamp()
-		    WHERE a.tenant_id=$1 AND a.resource_type='worker' AND a.status='active'
+		    WHERE a.organization_id=$1 AND a.resource_type='worker' AND a.status='active'
 		      AND a.resource_id IN (SELECT worker_id FROM offline UNION SELECT worker_id FROM orphan)
 		    RETURNING 1
 		), counter AS (
-		    UPDATE tenant_quota_counters SET
+		    UPDATE organization_quota_counters SET
 		      active_workers=greatest(0,active_workers-(SELECT count(*) FROM released)),updated_at=clock_timestamp()
-		    WHERE tenant_id=$1
+		    WHERE organization_id=$1
 		)
-		SELECT count(*) FROM released`, tenantID, maxHeartbeatAge.Seconds(), limit).Scan(&released)
+		SELECT count(*) FROM released`, organizationID, maxHeartbeatAge.Seconds(), limit).Scan(&released)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale workers: %w", err)
 	}
@@ -264,9 +264,9 @@ func (r *WorkerRegistry) ReapStale(ctx context.Context, tenantID string, maxHear
 	return released, nil
 }
 
-// CapacitySnapshot contains tenant-safe operational saturation signals.
+// CapacitySnapshot contains organization-safe operational saturation signals.
 type CapacitySnapshot struct {
-	TenantID                 string        `json:"-"`
+	OrganizationID           string        `json:"-"`
 	ActiveRuns               int           `json:"activeRuns"`
 	QueuedRuns               int           `json:"queuedRuns"`
 	ActiveWorkers            int           `json:"activeWorkers"`
@@ -286,21 +286,21 @@ type CapacityMonitor struct{ pool *pgxpool.Pool }
 // NewCapacityMonitor creates a PostgreSQL capacity monitor.
 func NewCapacityMonitor(pool *pgxpool.Pool) *CapacityMonitor { return &CapacityMonitor{pool: pool} }
 
-// Snapshot returns one tenant's current durable saturation state.
-func (m *CapacityMonitor) Snapshot(ctx context.Context, tenantID string, now time.Time) (CapacitySnapshot, error) {
+// Snapshot returns one organization's current durable saturation state.
+func (m *CapacityMonitor) Snapshot(ctx context.Context, organizationID string, now time.Time) (CapacitySnapshot, error) {
 	var snapshot CapacitySnapshot
-	snapshot.TenantID = tenantID
+	snapshot.OrganizationID = organizationID
 	var oldest *time.Time
 	err := m.pool.QueryRow(ctx, `
 		SELECT c.active_runs,c.queued_runs,c.active_workers,
-		       (SELECT count(*) FROM triggers t WHERE t.tenant_id=c.tenant_id),
-		       (SELECT count(*) FROM trigger_firings f WHERE f.tenant_id=c.tenant_id AND f.status='pending'),
-		       (SELECT count(*) FROM outbox_messages o WHERE o.tenant_id=c.tenant_id AND o.delivered_at IS NULL),
+		       (SELECT count(*) FROM triggers t WHERE t.organization_id=c.organization_id),
+		       (SELECT count(*) FROM trigger_firings f WHERE f.organization_id=c.organization_id AND f.status='pending'),
+		       (SELECT count(*) FROM outbox_messages o WHERE o.organization_id=c.organization_id AND o.delivered_at IS NULL),
 		       q.max_triggers,q.max_pending_trigger_firings,q.max_pending_outbox_messages,
-		       (SELECT min(created_at) FROM outbox_messages o WHERE o.tenant_id=c.tenant_id AND o.delivered_at IS NULL),
-		       (SELECT count(*) FROM outbox_dead_letters d WHERE d.tenant_id=c.tenant_id AND d.requeued_at IS NULL)
-		FROM tenant_quota_counters c JOIN tenant_quotas q ON q.tenant_id=c.tenant_id
-		WHERE c.tenant_id=$1`, tenantID).Scan(&snapshot.ActiveRuns, &snapshot.QueuedRuns,
+		       (SELECT min(created_at) FROM outbox_messages o WHERE o.organization_id=c.organization_id AND o.delivered_at IS NULL),
+		       (SELECT count(*) FROM outbox_dead_letters d WHERE d.organization_id=c.organization_id AND d.requeued_at IS NULL)
+		FROM organization_quota_counters c JOIN organization_quotas q ON q.organization_id=c.organization_id
+		WHERE c.organization_id=$1`, organizationID).Scan(&snapshot.ActiveRuns, &snapshot.QueuedRuns,
 		&snapshot.ActiveWorkers, &snapshot.TriggerCount, &snapshot.PendingTriggerFirings,
 		&snapshot.OutboxBacklog, &snapshot.MaxTriggers, &snapshot.MaxPendingTriggerFirings,
 		&snapshot.MaxPendingOutboxMessages, &oldest, &snapshot.DLQDepth)

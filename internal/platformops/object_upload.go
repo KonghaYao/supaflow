@@ -18,8 +18,8 @@ const (
 )
 
 type objectUploadSpec struct {
-	tenantID, id, runID, kind, key, contentType string
-	retentionUntil                              *time.Time
+	organizationID, id, runID, kind, key, contentType string
+	retentionUntil                                    *time.Time
 }
 
 type objectUpload struct {
@@ -42,7 +42,7 @@ type uploadAborter interface {
 // beginObjectUpload durably records ownership before any filesystem bytes are
 // written. Expired owners are reclaimed only by the recovery coordinator.
 func beginObjectUpload(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, spec objectUploadSpec) (*objectUpload, error) {
-	if pool == nil || objects == nil || spec.tenantID == "" || spec.id == "" || spec.key == "" || spec.contentType == "" || !validObjectKind(spec.kind) {
+	if pool == nil || objects == nil || spec.organizationID == "" || spec.id == "" || spec.key == "" || spec.contentType == "" || !validObjectKind(spec.kind) {
 		return nil, ErrInvalidArgument
 	}
 	uploadStore, ok := objects.(uploadAborter)
@@ -56,13 +56,13 @@ func beginObjectUpload(ctx context.Context, pool *pgxpool.Pool, objects ObjectSt
 	var claimed string
 	err = pool.QueryRow(ctx, `
 		INSERT INTO object_upload_intents
-		(tenant_id,id,run_id,kind,object_key,content_type,retention_until,owner_token,lease_expires_at)
+		(organization_id,id,run_id,kind,object_key,content_type,retention_until,owner_token,lease_expires_at)
 		SELECT $1,$2,NULLIF($3,''),$4,$5,$6,$7,$8,now() + $9 * interval '1 millisecond'
 		WHERE NOT EXISTS (
-			SELECT 1 FROM managed_objects WHERE tenant_id=$1 AND (id=$2 OR object_key=$5)
+			SELECT 1 FROM managed_objects WHERE organization_id=$1 AND (id=$2 OR object_key=$5)
 		)
 		ON CONFLICT DO NOTHING
-		RETURNING owner_token`, spec.tenantID, spec.id, spec.runID, spec.kind, spec.key,
+		RETURNING owner_token`, spec.organizationID, spec.id, spec.runID, spec.kind, spec.key,
 		spec.contentType, spec.retentionUntil, ownerToken, objectUploadLease.Milliseconds()).Scan(&claimed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrConflict
@@ -77,7 +77,7 @@ func beginObjectUpload(ctx context.Context, pool *pgxpool.Pool, objects ObjectSt
 
 func validObjectKind(kind string) bool {
 	switch kind {
-	case "output", "archive", "tenant_export", "backup":
+	case "output", "archive", "organization_export", "backup":
 		return true
 	default:
 		return false
@@ -100,8 +100,8 @@ func (u *objectUpload) startHeartbeat() {
 				tag, err := u.pool.Exec(ctx, `
 					UPDATE object_upload_intents
 					SET lease_expires_at=now() + $4 * interval '1 millisecond',updated_at=now()
-					WHERE tenant_id=$1 AND id=$2 AND owner_token=$3`,
-					u.tenantID, u.id, u.ownerToken, objectUploadLease.Milliseconds())
+					WHERE organization_id=$1 AND id=$2 AND owner_token=$3`,
+					u.organizationID, u.id, u.ownerToken, objectUploadLease.Milliseconds())
 				if err != nil {
 					u.done <- fmt.Errorf("renew object upload intent: %w", err)
 					return
@@ -124,7 +124,7 @@ func (u *objectUpload) closeHeartbeat() error {
 }
 
 func (u *objectUpload) put(ctx context.Context, source io.Reader, maxBytes int64) (StoredObject, error) {
-	stored, err := u.uploads.StageUpload(ctx, u.tenantID, u.key, u.ownerToken, source, maxBytes)
+	stored, err := u.uploads.StageUpload(ctx, u.organizationID, u.key, u.ownerToken, source, maxBytes)
 	if err != nil {
 		return StoredObject{}, err
 	}
@@ -145,8 +145,8 @@ func (u *objectUpload) put(ctx context.Context, source io.Reader, maxBytes int64
 func (u *objectUpload) publishTx(ctx context.Context, tx pgx.Tx) error {
 	var owned bool
 	err := tx.QueryRow(ctx, `SELECT true FROM object_upload_intents
-		WHERE tenant_id=$1 AND id=$2 AND owner_token=$3 FOR UPDATE`,
-		u.tenantID, u.id, u.ownerToken).Scan(&owned)
+		WHERE organization_id=$1 AND id=$2 AND owner_token=$3 FOR UPDATE`,
+		u.organizationID, u.id, u.ownerToken).Scan(&owned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrStaleLease
 	}
@@ -156,7 +156,7 @@ func (u *objectUpload) publishTx(ctx context.Context, tx pgx.Tx) error {
 	if !owned {
 		return ErrStaleLease
 	}
-	if err = u.uploads.PublishUpload(ctx, u.tenantID, u.key, u.ownerToken); err != nil {
+	if err = u.uploads.PublishUpload(ctx, u.organizationID, u.key, u.ownerToken); err != nil {
 		return err
 	}
 	return nil
@@ -166,7 +166,7 @@ func (u *objectUpload) publishTx(ctx context.Context, tx pgx.Tx) error {
 // intent. A stale or recovered owner is fenced before the caller can commit.
 func (u *objectUpload) completeTx(ctx context.Context, tx pgx.Tx) error {
 	tag, err := tx.Exec(ctx, `DELETE FROM object_upload_intents
-		WHERE tenant_id=$1 AND id=$2 AND owner_token=$3`, u.tenantID, u.id, u.ownerToken)
+		WHERE organization_id=$1 AND id=$2 AND owner_token=$3`, u.organizationID, u.id, u.ownerToken)
 	if err != nil {
 		return fmt.Errorf("complete object upload intent: %w", err)
 	}
@@ -182,30 +182,30 @@ func (u *objectUpload) abort() error {
 	defer cancel()
 	tx, err := u.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		stageErr := u.uploads.AbortUpload(ctx, u.tenantID, u.key, u.ownerToken, false)
+		stageErr := u.uploads.AbortUpload(ctx, u.organizationID, u.key, u.ownerToken, false)
 		return errors.Join(heartbeatErr, stageErr, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var managedExists bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM managed_objects WHERE tenant_id=$1 AND id=$2 AND object_key=$3
-	)`, u.tenantID, u.id, u.key).Scan(&managedExists); err != nil {
+		SELECT 1 FROM managed_objects WHERE organization_id=$1 AND id=$2 AND object_key=$3
+	)`, u.organizationID, u.id, u.key).Scan(&managedExists); err != nil {
 		return errors.Join(heartbeatErr, err)
 	}
 	var ownsIntent bool
 	err = tx.QueryRow(ctx, `SELECT true FROM object_upload_intents
-		WHERE tenant_id=$1 AND id=$2 AND owner_token=$3 FOR UPDATE`,
-		u.tenantID, u.id, u.ownerToken).Scan(&ownsIntent)
+		WHERE organization_id=$1 AND id=$2 AND owner_token=$3 FOR UPDATE`,
+		u.organizationID, u.id, u.ownerToken).Scan(&ownsIntent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = nil
 	} else if err != nil {
 		return errors.Join(heartbeatErr, err)
 	}
 	removeFinal := ownsIntent && !managedExists
-	fileErr := u.uploads.AbortUpload(ctx, u.tenantID, u.key, u.ownerToken, removeFinal)
+	fileErr := u.uploads.AbortUpload(ctx, u.organizationID, u.key, u.ownerToken, removeFinal)
 	if fileErr == nil && ownsIntent {
 		_, err = tx.Exec(ctx, `DELETE FROM object_upload_intents
-			WHERE tenant_id=$1 AND id=$2 AND owner_token=$3`, u.tenantID, u.id, u.ownerToken)
+			WHERE organization_id=$1 AND id=$2 AND owner_token=$3`, u.organizationID, u.id, u.ownerToken)
 	}
 	if err == nil {
 		err = tx.Commit(ctx)
@@ -217,8 +217,8 @@ func (u *objectUpload) abort() error {
 // clock, removes that immutable owner's bytes, and deletes the intent in the
 // same transaction. A recovery-process crash rolls the row change back, so the
 // original owner token remains available to the next recovery pass.
-func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, tenantID string, limit int) (int, error) {
-	if pool == nil || objects == nil || tenantID == "" || limit <= 0 || limit > 1000 {
+func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects ObjectStore, organizationID string, limit int) (int, error) {
+	if pool == nil || objects == nil || organizationID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	uploadStore, ok := objects.(uploadAborter)
@@ -227,8 +227,8 @@ func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects Objec
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM object_upload_intents intent
 		USING managed_objects object
-		WHERE intent.tenant_id=$1 AND object.tenant_id=intent.tenant_id
-		  AND object.id=intent.id AND object.object_key=intent.object_key`, tenantID); err != nil {
+		WHERE intent.organization_id=$1 AND object.organization_id=intent.organization_id
+		  AND object.id=intent.id AND object.object_key=intent.object_key`, organizationID); err != nil {
 		return 0, fmt.Errorf("discard completed upload intents: %w", err)
 	}
 	recovered := 0
@@ -240,8 +240,8 @@ func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects Objec
 		var id, key, ownerToken string
 		err := tx.QueryRow(ctx, `
 			SELECT id,object_key,owner_token FROM object_upload_intents
-			WHERE tenant_id=$1 AND lease_expires_at <= now()
-			ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 1`, tenantID).
+			WHERE organization_id=$1 AND lease_expires_at <= now()
+			ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 1`, organizationID).
 			Scan(&id, &key, &ownerToken)
 		if errors.Is(err, pgx.ErrNoRows) {
 			_ = tx.Rollback(context.WithoutCancel(ctx))
@@ -251,12 +251,12 @@ func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects Objec
 			_ = tx.Rollback(context.WithoutCancel(ctx))
 			return recovered, fmt.Errorf("lock stale object upload: %w", err)
 		}
-		if err = uploadStore.AbortUpload(ctx, tenantID, key, ownerToken, true); err != nil {
+		if err = uploadStore.AbortUpload(ctx, organizationID, key, ownerToken, true); err != nil {
 			_ = tx.Rollback(context.WithoutCancel(ctx))
 			return recovered, err
 		}
 		tag, deleteErr := tx.Exec(ctx, `DELETE FROM object_upload_intents
-			WHERE tenant_id=$1 AND id=$2 AND owner_token=$3`, tenantID, id, ownerToken)
+			WHERE organization_id=$1 AND id=$2 AND owner_token=$3`, organizationID, id, ownerToken)
 		if deleteErr != nil || tag.RowsAffected() != 1 {
 			_ = tx.Rollback(context.WithoutCancel(ctx))
 			if deleteErr != nil {
@@ -273,12 +273,12 @@ func recoverObjectUploads(ctx context.Context, pool *pgxpool.Pool, objects Objec
 }
 
 // RecoverObjects repairs expired uploads and interrupted physical deletions for
-// one tenant. All upload fencing decisions use PostgreSQL's clock.
-func (r *Retention) RecoverObjects(ctx context.Context, tenantID string, limit int) (int, error) {
+// one organization. All upload fencing decisions use PostgreSQL's clock.
+func (r *Retention) RecoverObjects(ctx context.Context, organizationID string, limit int) (int, error) {
 	if r == nil {
 		return 0, ErrInvalidArgument
 	}
-	uploads, uploadErr := recoverObjectUploads(ctx, r.pool, r.objects, tenantID, limit)
-	deletions, deletionErr := recoverManagedObjectDeletions(ctx, r.pool, r.objects, tenantID, limit)
+	uploads, uploadErr := recoverObjectUploads(ctx, r.pool, r.objects, organizationID, limit)
+	deletions, deletionErr := recoverManagedObjectDeletions(ctx, r.pool, r.objects, organizationID, limit)
 	return uploads + deletions, errors.Join(uploadErr, deletionErr)
 }

@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// ErrNotFound is returned when a tenant cannot see the requested definition.
+	// ErrNotFound is returned when a organization cannot see the requested definition.
 	ErrNotFound = errors.New("definition not found")
 	// ErrRevisionConflict protects a newer draft from stale autosave writes.
 	ErrRevisionConflict = errors.New("draft revision conflict")
@@ -18,8 +18,8 @@ var (
 	ErrIdempotencyConflict = errors.New("definition idempotency conflict")
 	// ErrVersionSequenceConflict rejects migration that would renumber source history.
 	ErrVersionSequenceConflict = errors.New("workflow version sequence conflict")
-	// ErrTenantDraftLimit rejects creation after a tenant reaches its durable draft quota.
-	ErrTenantDraftLimit = errors.New("tenant workflow draft limit exceeded")
+	// ErrOrganizationDraftLimit rejects creation after a organization reaches its durable draft quota.
+	ErrOrganizationDraftLimit = errors.New("organization workflow draft limit exceeded")
 )
 
 const (
@@ -27,20 +27,20 @@ const (
 	DefaultPageLimit = 50
 	// MaxPageLimit is the hard upper bound for one Studio list response.
 	MaxPageLimit = 100
-	// MaxDraftsPerTenant bounds durable editable definitions owned by one tenant.
-	MaxDraftsPerTenant = 1000
+	// MaxDraftsPerOrganization bounds durable editable definitions owned by one organization.
+	MaxDraftsPerOrganization = 1000
 )
 
-// Draft is the tenant-scoped editable document and optimistic revision.
+// Draft is the organization-scoped editable document and optimistic revision.
 type Draft struct {
-	ID         string
-	TenantID   string
-	WorkflowID string
-	Document   json.RawMessage
-	Revision   uint64
-	UpdatedBy  string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID             string
+	OrganizationID string
+	WorkflowID     string
+	Document       json.RawMessage
+	Revision       uint64
+	UpdatedBy      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // CreateDraftResult reports whether an idempotent create inserted a new draft
@@ -52,13 +52,13 @@ type CreateDraftResult struct {
 
 // DraftSummary is the bounded list projection; it deliberately excludes Document.
 type DraftSummary struct {
-	ID         string
-	TenantID   string
-	WorkflowID string
-	Revision   uint64
-	UpdatedBy  string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID             string
+	OrganizationID string
+	WorkflowID     string
+	Revision       uint64
+	UpdatedBy      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // DraftPage is one cursor-bounded page of draft summaries.
@@ -69,25 +69,25 @@ type DraftPage struct {
 
 // Version is one immutable published workflow definition.
 type Version struct {
-	TenantID    string
-	WorkflowID  string
-	VersionID   string
-	PlanID      string
-	Version     uint64
-	PlanHash    string
-	Definition  workflow.WorkflowDefinition
-	PublishedAt time.Time
+	OrganizationID string
+	WorkflowID     string
+	VersionID      string
+	PlanID         string
+	Version        uint64
+	PlanHash       string
+	Definition     workflow.WorkflowDefinition
+	PublishedAt    time.Time
 }
 
 // VersionSummary is the immutable list projection; it excludes Definition.
 type VersionSummary struct {
-	TenantID    string
-	WorkflowID  string
-	VersionID   string
-	PlanID      string
-	Version     uint64
-	PlanHash    string
-	PublishedAt time.Time
+	OrganizationID string
+	WorkflowID     string
+	VersionID      string
+	PlanID         string
+	Version        uint64
+	PlanHash       string
+	PublishedAt    time.Time
 }
 
 // VersionPage is one cursor-bounded page of immutable version summaries.
@@ -111,7 +111,7 @@ type VersionDiff struct {
 	Changes    []VersionChange `json:"changes"`
 }
 
-// CreateDraftCommand creates a draft through a tenant-scoped idempotent mutation.
+// CreateDraftCommand creates a draft through a organization-scoped idempotent mutation.
 type CreateDraftCommand struct {
 	WorkflowID     string
 	Document       json.RawMessage

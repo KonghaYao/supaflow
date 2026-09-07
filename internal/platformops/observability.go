@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pazhou/supaflow/internal/identity"
+	"github.com/pazhou/supaflow/internal/organization"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -40,27 +40,27 @@ type InboundTelemetry interface {
 
 // TelemetryConfig configures OTLP exporters and privacy-preserving attribution.
 type TelemetryConfig struct {
-	ServiceName    string
-	Endpoint       string
-	Insecure       bool
-	TenantHashKey  []byte
-	MetricInterval time.Duration
+	ServiceName         string
+	Endpoint            string
+	Insecure            bool
+	OrganizationHashKey []byte
+	MetricInterval      time.Duration
 }
 
 // Telemetry owns real OpenTelemetry trace and metric providers.
 type Telemetry struct {
-	tracerProvider *sdktrace.TracerProvider
-	meterProvider  *sdkmetric.MeterProvider
-	tracer         trace.Tracer
-	operations     metric.Int64Counter
-	duration       metric.Float64Histogram
-	tenantHashKey  []byte
-	propagator     propagation.TextMapPropagator
+	tracerProvider      *sdktrace.TracerProvider
+	meterProvider       *sdkmetric.MeterProvider
+	tracer              trace.Tracer
+	operations          metric.Int64Counter
+	duration            metric.Float64Histogram
+	organizationHashKey []byte
+	propagator          propagation.TextMapPropagator
 }
 
 // NewTelemetry creates OTLP gRPC trace/metric exporters and installs W3C propagation.
 func NewTelemetry(ctx context.Context, config TelemetryConfig) (*Telemetry, error) {
-	if config.ServiceName == "" || config.Endpoint == "" || len(config.TenantHashKey) < 32 {
+	if config.ServiceName == "" || config.Endpoint == "" || len(config.OrganizationHashKey) < 32 {
 		return nil, ErrInvalidArgument
 	}
 	if config.MetricInterval <= 0 {
@@ -109,23 +109,23 @@ func NewTelemetry(ctx context.Context, config TelemetryConfig) (*Telemetry, erro
 	return &Telemetry{
 		tracerProvider: tracerProvider, meterProvider: meterProvider,
 		tracer:     tracerProvider.Tracer("github.com/pazhou/supaflow/internal/platformops"),
-		operations: operations, duration: duration, tenantHashKey: append([]byte(nil), config.TenantHashKey...),
+		operations: operations, duration: duration, organizationHashKey: append([]byte(nil), config.OrganizationHashKey...),
 		propagator: propagator,
 	}, nil
 }
 
 // Start begins a span and returns a completion function that records safe metrics.
-func (t *Telemetry) Start(ctx context.Context, operation, tenantID string) (context.Context, func(error)) {
-	hash := t.tenantHash(tenantID)
+func (t *Telemetry) Start(ctx context.Context, operation, organizationID string) (context.Context, func(error)) {
+	hash := t.organizationHash(organizationID)
 	started := time.Now()
-	ctx, span := t.tracer.Start(ctx, operation, trace.WithAttributes(attribute.String("supaflow.tenant_hash", hash)))
+	ctx, span := t.tracer.Start(ctx, operation, trace.WithAttributes(attribute.String("supaflow.organization_hash", hash)))
 	return ctx, func(err error) {
 		outcome := "success"
 		if err != nil {
 			outcome = "error"
 			span.SetStatus(codes.Error, "operation failed")
 		}
-		attributes := metric.WithAttributes(attribute.String("operation", operation), attribute.String("outcome", outcome), attribute.String("supaflow.tenant_hash", hash))
+		attributes := metric.WithAttributes(attribute.String("operation", operation), attribute.String("outcome", outcome), attribute.String("supaflow.organization_hash", hash))
 		t.operations.Add(ctx, 1, attributes)
 		t.duration.Record(ctx, time.Since(started).Seconds(), attributes)
 		span.SetAttributes(attribute.String("outcome", outcome))
@@ -134,17 +134,17 @@ func (t *Telemetry) Start(ctx context.Context, operation, tenantID string) (cont
 }
 
 // StartHTTP begins an inbound span whose outcome and status come from the HTTP response boundary.
-func (t *Telemetry) StartHTTP(ctx context.Context, operation, tenantID string) (context.Context, func(int, error)) {
-	hash := t.tenantHash(tenantID)
+func (t *Telemetry) StartHTTP(ctx context.Context, operation, organizationID string) (context.Context, func(int, error)) {
+	hash := t.organizationHash(organizationID)
 	started := time.Now()
-	ctx, span := t.tracer.Start(ctx, operation, trace.WithAttributes(attribute.String("supaflow.tenant_hash", hash)))
+	ctx, span := t.tracer.Start(ctx, operation, trace.WithAttributes(attribute.String("supaflow.organization_hash", hash)))
 	return ctx, func(status int, err error) {
 		outcome := "success"
 		if err != nil || status >= http.StatusBadRequest {
 			outcome = "error"
 			span.SetStatus(codes.Error, "HTTP operation failed")
 		}
-		attributes := metric.WithAttributes(attribute.String("operation", operation), attribute.String("outcome", outcome), attribute.String("supaflow.tenant_hash", hash))
+		attributes := metric.WithAttributes(attribute.String("operation", operation), attribute.String("outcome", outcome), attribute.String("supaflow.organization_hash", hash))
 		t.operations.Add(ctx, 1, attributes)
 		t.duration.Record(ctx, time.Since(started).Seconds(), attributes)
 		span.SetAttributes(semconv.HTTPResponseStatusCode(status), attribute.String("outcome", outcome))
@@ -152,12 +152,12 @@ func (t *Telemetry) StartHTTP(ctx context.Context, operation, tenantID string) (
 	}
 }
 
-// StartDeferredHTTP begins a public HTTP span and applies tenant attribution
+// StartDeferredHTTP begins a public HTTP span and applies organization attribution
 // only after the handler resolves it from server-owned routing state.
 func (t *Telemetry) StartDeferredHTTP(ctx context.Context, operation string) (context.Context, func(string, int, error)) {
 	started := time.Now()
 	ctx, span := t.tracer.Start(ctx, operation)
-	return ctx, func(tenantID string, status int, err error) {
+	return ctx, func(organizationID string, status int, err error) {
 		outcome := "success"
 		if err != nil || status >= http.StatusBadRequest {
 			outcome = "error"
@@ -168,10 +168,10 @@ func (t *Telemetry) StartDeferredHTTP(ctx context.Context, operation string) (co
 			attribute.Int("http.response.status_code", status),
 		}
 		spanAttributes := []attribute.KeyValue{semconv.HTTPResponseStatusCode(status), attribute.String("outcome", outcome)}
-		if tenantID != "" {
-			tenantAttribute := attribute.String("supaflow.tenant_hash", t.tenantHash(tenantID))
-			metricAttributes = append(metricAttributes, tenantAttribute)
-			spanAttributes = append(spanAttributes, tenantAttribute)
+		if organizationID != "" {
+			organizationAttribute := attribute.String("supaflow.organization_hash", t.organizationHash(organizationID))
+			metricAttributes = append(metricAttributes, organizationAttribute)
+			spanAttributes = append(spanAttributes, organizationAttribute)
 		}
 		attributes := metric.WithAttributes(metricAttributes...)
 		t.operations.Add(ctx, 1, attributes)
@@ -200,8 +200,8 @@ func (t *Telemetry) HTTPMiddleware(next http.Handler) http.Handler {
 func NewTelemetryHTTPMiddleware(telemetry InboundTelemetry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		ctx := telemetry.Extract(request.Context(), propagation.HeaderCarrier(request.Header))
-		principal, _ := identity.PrincipalFromContext(ctx)
-		ctx, complete := telemetry.StartHTTP(ctx, "control_plane.http.inbound", principal.TenantID)
+		principal, _ := organization.PrincipalFromContext(ctx)
+		ctx, complete := telemetry.StartHTTP(ctx, "control_plane.http.inbound", principal.OrganizationID)
 		tracked := &telemetryResponseWriter{ResponseWriter: w}
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -257,9 +257,9 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 	return errors.Join(t.meterProvider.Shutdown(ctx), t.tracerProvider.Shutdown(ctx))
 }
 
-func (t *Telemetry) tenantHash(tenantID string) string {
-	mac := hmac.New(sha256.New, t.tenantHashKey)
-	_, _ = mac.Write([]byte(tenantID))
+func (t *Telemetry) organizationHash(organizationID string) string {
+	mac := hmac.New(sha256.New, t.organizationHashKey)
+	_, _ = mac.Write([]byte(organizationID))
 	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 

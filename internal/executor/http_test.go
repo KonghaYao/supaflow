@@ -123,7 +123,7 @@ func TestPlanExecutorCancelsActiveAttemptAndReleasesRegistry(t *testing.T) {
 // 验证外部副作用幂等键绑定逻辑执行而非物理 attempt，响应丢失后的 retry 可由远端去重。
 func TestHTTPIdempotencyKeyBindsLogicalExecutionAndInput(t *testing.T) {
 	base := workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", NodeID: "request", AttemptID: "attempt_1", ExecutionID: "execution_1",
+		OrganizationID: "organization_a", RunID: "run_1", NodeID: "request", AttemptID: "attempt_1", ExecutionID: "execution_1",
 		Plan: workflowruntime.PlanRef{ID: "plan_1", Hash: "sha256:one"}, FencingToken: 1, Input: json.RawMessage(`{"item":1}`),
 	}
 	takeover := base
@@ -226,7 +226,7 @@ func httpMethodRequestFixture(t *testing.T, target, method string, retrySafe boo
 		t.Fatal(err)
 	}
 	return executor, workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "request", AttemptID: "attempt_1", ExecutionID: "execution_1", Attempt: 1, Executor: "http.request",
 		Input: json.RawMessage(`{"value":1}`), FencingToken: 1,
 	}
@@ -240,7 +240,7 @@ func httpRequestFixture(t *testing.T, target string, cfg Config) (*PlanExecutor,
 		t.Fatal(err)
 	}
 	return executor, workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "request", AttemptID: "attempt_1", ExecutionID: "execution_1", Attempt: 1, Executor: "http.request",
 		Input: json.RawMessage(`{"value":1}`), FencingToken: 1,
 	}

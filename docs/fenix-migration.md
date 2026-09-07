@@ -4,11 +4,11 @@ The migration is a one-way, restartable import into Supaflow. It is not a dual-w
 
 ## Mapping
 
-Provide a strict JSON mapping file. Every source organization needs an explicit target tenant. HTTP credential, webhook signing credential, and subworkflow references must already exist in Supaflow; raw Fenix secrets are never imported.
+Provide a strict JSON mapping file. Every source organization needs an explicit target organization. HTTP credential, webhook signing credential, and subworkflow references must already exist in Supaflow; raw Fenix secrets are never imported.
 
 ```json
 {
-  "tenants": { "fenix-organization-id": "supaflow-tenant-id" },
+  "organizations": { "fenix-organization-id": "supaflow-organization-id" },
   "httpNodeCredentials": {
     "workflow-id": { "node-id": "credential-reference-id" }
   },
@@ -23,7 +23,7 @@ The converter supports static Fenix Shell, Python, Agent, API, approval/audit, s
 
 ## Dry run and import
 
-Run migrations for Supaflow, create target tenants/credentials, then execute:
+Run migrations for Supaflow, create target organizations/credentials, then execute:
 
 ```bash
 fenix-migrate \
@@ -42,7 +42,7 @@ The final non-dry-run report contains the durable target installation UUID plus 
 
 ## Constrained shadow runs
 
-`POST /v1/shadow-runs` is the only shadow execution entry point. The application service resolves the tenant-owned immutable plan and requires an exact `stubBindings` entry for every node that can reach external resources. Network, credential, filesystem and compute permissions always require a stub. Custom and newly introduced executors also require a stub by default; only the reviewed deterministic built-in control executors are allowed to run directly. Subworkflow nodes require a stub even though their child plan owns the resource permissions.
+`POST /v1/shadow-runs` is the only shadow execution entry point. The application service resolves the organization-owned immutable plan and requires an exact `stubBindings` entry for every node that can reach external resources. Network, credential, filesystem and compute permissions always require a stub. Custom and newly introduced executors also require a stub by default; only the reviewed deterministic built-in control executors are allowed to run directly. Subworkflow nodes require a stub even though their child plan owns the resource permissions.
 
 The only supported stub is `builtin.shadow-noop.v1`. It does not copy node input or config, resolve credentials, invoke child workflows, run user code, or call external adapters. It emits bounded synthetic JSON containing only the node ID and stub kind. The request must name every unsafe node and must not name pure or unknown nodes:
 

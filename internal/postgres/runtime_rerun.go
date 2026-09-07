@@ -42,7 +42,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	}
 
 	source, err := scanRuntimeRun(tx.QueryRow(ctx, `SELECT `+runtimeRunColumns+` FROM runs
-		WHERE tenant_id = $1 AND id = $2 FOR SHARE`, request.Run.TenantID, request.SourceRunID))
+		WHERE organization_id = $1 AND id = $2 FOR SHARE`, request.Run.OrganizationID, request.SourceRunID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "source run not found", err)
 	}
@@ -56,8 +56,8 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	input := source.Input
 	if request.FromNodeID != "" {
 		err = tx.QueryRow(ctx, `SELECT input FROM node_attempts
-			WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
-			ORDER BY attempt_number DESC LIMIT 1`, request.Run.TenantID, source.ID, request.FromNodeID).Scan(&input)
+			WHERE organization_id = $1 AND run_id = $2 AND node_id = $3
+			ORDER BY attempt_number DESC LIMIT 1`, request.Run.OrganizationID, source.ID, request.FromNodeID).Scan(&input)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "source node attempt not found", err)
 		}
@@ -68,7 +68,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	run := request.Run
 	run.Plan.ID, run.Plan.Hash, run.Input = source.Plan.ID, source.Plan.Hash, input
 	stored, err := scanRuntimeRun(tx.QueryRow(ctx, createRuntimeRunSQL,
-		run.ID, string(run.TenantID), run.IdempotencyKey, decodeHash(run.RequestFingerprint), run.Input,
+		run.ID, string(run.OrganizationID), run.IdempotencyKey, decodeHash(run.RequestFingerprint), run.Input,
 		run.Plan.EntryNodeID, run.Plan.Executor, dbRunStatus(run.Status), run.CreatedAt, run.Version, run.Plan.ID, run.Plan.Hash, run.Priority, run.DeadlineAt))
 	if errors.Is(err, pgx.ErrNoRows) {
 		if replay, found, replayErr := rerunReplay(ctx, tx, request); replayErr != nil {
@@ -100,24 +100,24 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	if request.FromNodeID != "" {
 		fromNode = request.FromNodeID
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO run_rerun_lineage (tenant_id, run_id, source_run_id, from_node_id, created_at)
-		VALUES ($1, $2, $3, $4, $5)`, run.TenantID, run.ID, source.ID, fromNode, run.CreatedAt)
+	_, err = tx.Exec(ctx, `INSERT INTO run_rerun_lineage (organization_id, run_id, source_run_id, from_node_id, created_at)
+		VALUES ($1, $2, $3, $4, $5)`, run.OrganizationID, run.ID, source.ID, fromNode, run.CreatedAt)
 	if err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun lineage", err)
 	}
 	payload, _ := json.Marshal(map[string]any{"sourceRunId": source.ID, "fromNodeId": fromNode})
-	if _, err = appendEventTx(ctx, tx, string(run.TenantID), run.ID, "run.created", payload); err != nil {
+	if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, "run.created", payload); err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun event", err)
 	}
-	if err = insertOutboxTx(ctx, tx, string(run.TenantID), "run", run.ID, "run.created", payload); err != nil {
+	if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, "run.created", payload); err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun delivery", err)
 	}
 	admissionPayload, _ := json.Marshal(map[string]any{"priority": run.Priority, "status": admission.status})
 	admissionEvent := runtimeAdmissionEvent(admission.status)
-	if _, err = appendEventTx(ctx, tx, string(run.TenantID), run.ID, admissionEvent, admissionPayload); err != nil {
+	if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, admissionEvent, admissionPayload); err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun admission event", err)
 	}
-	if err = insertOutboxTx(ctx, tx, string(run.TenantID), "run", run.ID, admissionEvent, admissionPayload); err != nil {
+	if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, admissionEvent, admissionPayload); err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun admission delivery", err)
 	}
 	if err = seedRuntimeAttempt(ctx, tx, run); err != nil {
@@ -137,7 +137,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 
 func rerunReplay(ctx context.Context, tx pgx.Tx, request workflowruntime.RerunRunRequest) (workflowruntime.Run, bool, error) {
 	run, err := scanRuntimeRunProjection(tx.QueryRow(ctx, runtimeRunProjectionByIdempotencySQL,
-		string(request.Run.TenantID), request.Run.IdempotencyKey))
+		string(request.Run.OrganizationID), request.Run.IdempotencyKey))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.Run{}, false, nil
 	}

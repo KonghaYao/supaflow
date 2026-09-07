@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Supaflow API
   version: 1.0.0
-  description: Stable tenant-scoped API for workflow publication and durable execution.
+  description: Stable organization-scoped API for workflow publication and durable execution.
 servers:
   - url: /v1
 security:
@@ -11,7 +11,7 @@ paths:
   /workflows:
     get:
       operationId: listWorkflowDrafts
-      summary: List tenant workflow drafts.
+      summary: List organization workflow drafts.
       parameters:
         - $ref: '#/components/parameters/PaginationLimit'
         - $ref: '#/components/parameters/PaginationCursor'
@@ -48,7 +48,7 @@ paths:
       operationId: getWorkflowDraft
       parameters: [{ $ref: '#/components/parameters/WorkflowId' }]
       responses:
-        '200': { description: Tenant workflow draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '200': { description: Organization workflow draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     put:
       operationId: updateWorkflowDraft
@@ -240,7 +240,7 @@ paths:
   /runs:
     get:
       operationId: listRuns
-      summary: List recent tenant-owned runs for the Studio monitor.
+      summary: List recent organization-owned runs for the Studio monitor.
       parameters:
         - { name: workflowId, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [PENDING, RUNNING, SUSPENDED, CANCELLING, SUCCESS, FAILED, ERROR, CANCELLED] } }
@@ -342,7 +342,7 @@ paths:
   /runs/{runId}/output:
     get:
       operationId: downloadRunOutput
-      summary: Stream a retained object-backed final output through a tenant-authorized boundary.
+      summary: Stream a retained object-backed final output through an organization-authorized boundary.
       parameters:
         - $ref: '#/components/parameters/RunId'
       responses:
@@ -394,7 +394,7 @@ paths:
       summary: Read safe node attempts, redacted inputs, output metadata, and failure codes.
       parameters: [{ $ref: '#/components/parameters/RunId' }]
       responses:
-        '200': { description: Tenant-scoped run diagnostics, content: { application/json: { schema: { $ref: '#/components/schemas/RunDetails' } } } }
+        '200': { description: Organization-scoped run diagnostics, content: { application/json: { schema: { $ref: '#/components/schemas/RunDetails' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /runs/{runId}/cancel:
     post:
@@ -430,7 +430,7 @@ paths:
             text/event-stream:
               schema: { type: string }
         '429':
-          description: Process-wide or tenant stream capacity is exhausted. Retry after the response `Retry-After` delay.
+          description: Process-wide or organization stream capacity is exhausted. Retry after the response `Retry-After` delay.
           headers:
             Retry-After: { schema: { type: integer, minimum: 1 } }
           content:
@@ -494,7 +494,7 @@ paths:
           in: header
           required: true
           schema: { type: string, pattern: '^Resume .{32,}$' }
-          description: Resume bearer token bound to tenant, run, node, attempt, interrupt kind and expiry. Never put it in a URL or body.
+          description: Resume bearer token bound to organization, run, node, attempt, interrupt kind and expiry. Never put it in a URL or body.
         - name: X-Supaflow-Timestamp
           in: header
           required: true
@@ -529,7 +529,7 @@ paths:
     servers: [{ url: / }]
     get:
       operationId: platformMetrics
-      summary: Return tenant-scoped capacity and delivery metrics.
+      summary: Return organization-scoped capacity and delivery metrics.
       responses:
         '200': { description: Capacity snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/CapacitySnapshot' } } } }
   /ops/capacity:
@@ -548,7 +548,7 @@ paths:
         - { name: enabled, in: query, schema: { type: boolean } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
       responses:
-        '200': { description: Tenant-owned triggers, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Trigger' } } } } }
+        '200': { description: Organization-owned triggers, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Trigger' } } } } }
     post:
       operationId: createTrigger
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
@@ -563,7 +563,7 @@ paths:
       operationId: getTrigger
       parameters: [{ $ref: '#/components/parameters/TriggerId' }]
       responses:
-        '200': { description: Tenant-owned trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '200': { description: Organization-owned trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     put:
       operationId: updateTrigger
@@ -667,7 +667,7 @@ paths:
         '202': { description: Event accepted and matching firings committed }
         '429':
           description: >-
-            Tenant trigger-ingress capacity is exhausted and a bounded prefix of matching
+            Organization trigger-ingress capacity is exhausted and a bounded prefix of matching
             firings may already be committed. Retry after the `Retry-After` delay with the
             same `Idempotency-Key` header, the same `eventId`, and the identical request
             payload. Previously committed firings replay idempotently and fan-out resumes
@@ -732,7 +732,7 @@ paths:
     get:
       operationId: queryAudit
       responses:
-        '200': { description: Tenant audit records, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } } } } }
+        '200': { description: Organization audit records, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } } } } }
   /ops/retention:
     servers: [{ url: / }]
     post:
@@ -746,10 +746,10 @@ paths:
   /ops/exports:
     servers: [{ url: / }]
     post:
-      operationId: exportTenant
+      operationId: exportOrganization
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       responses:
-        '202': { description: Secret-free tenant export, content: { application/json: { schema: { $ref: '#/components/schemas/TenantExport' } } } }
+        '202': { description: Secret-free organization export, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationExport' } } } }
   /ops/workers/{workerId}/drain:
     servers: [{ url: / }]
     post:
@@ -764,7 +764,7 @@ paths:
     get:
       operationId: listDeadLetters
       responses:
-        '200': { description: Tenant dead letters, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DeadLetter' } } } } }
+        '200': { description: Organization dead letters, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DeadLetter' } } } } }
   /ops/dlq/{messageId}/requeue:
     servers: [{ url: / }]
     post:
@@ -778,7 +778,7 @@ paths:
     servers: [{ url: / }]
     get:
       operationId: listOutboundWebhookSubscriptions
-      summary: List safe tenant-scoped outbound event webhook metadata.
+      summary: List safe organization-scoped outbound event webhook metadata.
       responses:
         '200':
           description: Active and disabled subscriptions
@@ -1238,7 +1238,7 @@ components:
         eventDays: { type: integer, minimum: 1 }
         outputDays: { type: integer, minimum: 1 }
         archiveBeforeDelete: { type: boolean }
-    TenantExport:
+    OrganizationExport:
       type: object
       required: [id, status, createdAt]
       properties:

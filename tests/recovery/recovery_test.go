@@ -20,18 +20,18 @@ func TestWorkerCrashLeaseTakeover(t *testing.T) {
 	service := workflowruntime.NewService(store, clock, nil)
 	created := startRun(t, service, "crash-takeover")
 	dead, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{
-		TenantID: "tenant", WorkerID: "dead-worker", Now: now, LeaseDuration: time.Second,
+		OrganizationID: "organization", WorkerID: "dead-worker", Now: now, LeaseDuration: time.Second,
 	})
 	if err != nil || dead == nil {
 		t.Fatalf("initial claim = %#v, %v", dead, err)
 	}
 	clock.Set(now.Add(2 * time.Second))
 	orchestrator := newOrchestrator(t, store, finalExecutor{}, clock, "recovery-worker", 2)
-	result, err := orchestrator.Advance(context.Background(), "tenant")
+	result, err := orchestrator.Advance(context.Background(), "organization")
 	if err != nil || result.Run == nil || result.Run.ID != created.ID || result.Run.Status != workflowruntime.RunSuccess {
 		t.Fatalf("recovery advance = %#v, %v", result, err)
 	}
-	events, err := service.ListEvents(context.Background(), "tenant", created.ID, 0, 100)
+	events, err := service.ListEvents(context.Background(), "organization", created.ID, 0, 100)
 	if err != nil || !hasEvent(events, "attempt.lease_taken_over") {
 		t.Fatalf("takeover events = %#v, %v", events, err)
 	}
@@ -46,10 +46,10 @@ func TestTransientStoreFailurePreservesWork(t *testing.T) {
 	service := workflowruntime.NewService(store, clock, nil)
 	created := startRun(t, service, "store-fault")
 	orchestrator := newOrchestrator(t, store, finalExecutor{}, clock, "worker", 1)
-	if _, err := orchestrator.Advance(context.Background(), "tenant"); err == nil {
+	if _, err := orchestrator.Advance(context.Background(), "organization"); err == nil {
 		t.Fatal("first Advance() error = nil")
 	}
-	result, err := orchestrator.Advance(context.Background(), "tenant")
+	result, err := orchestrator.Advance(context.Background(), "organization")
 	if err != nil || result.Run == nil || result.Run.ID != created.ID || result.Run.Status != workflowruntime.RunSuccess {
 		t.Fatalf("second advance = %#v, %v", result, err)
 	}
@@ -64,12 +64,12 @@ func TestTransientExecutorPartitionRetriesBoundedly(t *testing.T) {
 	created := startRun(t, service, "network-fault")
 	executor := &failOnceExecutor{}
 	orchestrator := newOrchestrator(t, store, executor, clock, "worker", 2)
-	first, err := orchestrator.Advance(context.Background(), "tenant")
+	first, err := orchestrator.Advance(context.Background(), "organization")
 	if err != nil || first.Run == nil || first.Run.Status != workflowruntime.RunRunning {
 		t.Fatalf("first advance = %#v, %v", first, err)
 	}
 	clock.Set(now.Add(2 * time.Millisecond))
-	second, err := orchestrator.Advance(context.Background(), "tenant")
+	second, err := orchestrator.Advance(context.Background(), "organization")
 	if err != nil || second.Run == nil || second.Run.ID != created.ID || second.Run.Status != workflowruntime.RunSuccess {
 		t.Fatalf("second advance = %#v, %v", second, err)
 	}
@@ -80,7 +80,7 @@ func TestTransientExecutorPartitionRetriesBoundedly(t *testing.T) {
 
 func startRun(t *testing.T, service *workflowruntime.Service, key string) workflowruntime.Run {
 	t.Helper()
-	result, err := service.StartRun(context.Background(), "tenant", workflowruntime.StartRunRequest{
+	result, err := service.StartRun(context.Background(), "organization", workflowruntime.StartRunRequest{
 		Plan:  workflowruntime.PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "end", Executor: "builtin.end"},
 		Input: json.RawMessage(`{"value":1}`), IdempotencyKey: key + "-00000001",
 	})

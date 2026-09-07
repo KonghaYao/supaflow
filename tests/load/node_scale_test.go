@@ -22,14 +22,14 @@ func TestNodeScaleBaseline(t *testing.T) {
 			registry := workflow.BuiltinRegistry()
 			policy := workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}}
 			catalog := platform.NewMemoryCatalog(registry, policy)
-			published, _, err := catalog.Publish(context.Background(), "scale-tenant", definition.ID, definition, fmt.Sprintf("publish-%d", size))
+			published, _, err := catalog.Publish(context.Background(), "scale-organization", definition.ID, definition, fmt.Sprintf("publish-%d", size))
 			if err != nil {
 				t.Fatal(err)
 			}
 			publishedAt := time.Now()
 			store := workflowruntime.NewMemoryStore()
 			service := workflowruntime.NewService(store, nil, nil)
-			created, err := service.StartRun(context.Background(), "scale-tenant", workflowruntime.StartRunRequest{
+			created, err := service.StartRun(context.Background(), "scale-organization", workflowruntime.StartRunRequest{
 				Plan: workflowruntime.PlanRef{
 					ID: published.ID, Hash: published.Hash, EntryNodeID: "start", Executor: "builtin.start",
 				},
@@ -57,7 +57,7 @@ func TestNodeScaleBaseline(t *testing.T) {
 			deadline := time.Now().Add(20 * time.Second)
 			advances := 0
 			for {
-				run, getErr := service.GetRun(context.Background(), "scale-tenant", created.Run.ID)
+				run, getErr := service.GetRun(context.Background(), "scale-organization", created.Run.ID)
 				if getErr != nil {
 					t.Fatal(getErr)
 				}
@@ -70,7 +70,7 @@ func TestNodeScaleBaseline(t *testing.T) {
 				if time.Now().After(deadline) {
 					t.Fatalf("%d-node execution exceeded 20s after %d advances", size, advances)
 				}
-				result, advanceErr := orchestrator.Advance(context.Background(), "scale-tenant")
+				result, advanceErr := orchestrator.Advance(context.Background(), "scale-organization")
 				if advanceErr != nil {
 					t.Fatal(advanceErr)
 				}

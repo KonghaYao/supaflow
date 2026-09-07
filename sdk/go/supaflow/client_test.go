@@ -50,14 +50,14 @@ func response(status int, contentType, body string) *http.Response {
 	return recorder.Result()
 }
 
-// 验证版本解析请求只携带 API key，不允许 SDK 注入 tenant 身份。
+// 验证版本解析请求只携带 API key，不允许 SDK 注入 organization 身份。
 func TestResolveLatestVersionContract(t *testing.T) {
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/v1/workflows/flow/versions/latest" || request.Header.Get("Authorization") != "Bearer "+testKey || request.Header.Get("X-Fenix-Organization-Id") != "org-a" || request.Header.Get("X-API-Key") != "" {
 			t.Fatalf("request=%s headers=%v", request.URL, request.Header)
 		}
-		if request.Header.Get("X-Tenant-ID") != "" || request.URL.Query().Has("tenantId") {
-			t.Fatal("SDK must not send caller-controlled tenant identity")
+		if request.Header.Get("X-Organization-ID") != "" || request.URL.Query().Has("organizationId") {
+			t.Fatal("SDK must not send caller-controlled organization identity")
 		}
 		return response(http.StatusOK, "application/json", `{"workflowId":"flow","version":3,"versionId":"version-3","planId":"plan-3","planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publishedAt":"2026-01-01T00:00:00Z"}`), nil
 	})
@@ -67,7 +67,7 @@ func TestResolveLatestVersionContract(t *testing.T) {
 	}
 }
 
-// 验证 SDK 拒绝非本机明文地址，避免 tenant API key 在传输中泄漏。
+// 验证 SDK 拒绝非本机明文地址，避免 organization API key 在传输中泄漏。
 func TestClientRejectsPlaintextRemoteBaseURL(t *testing.T) {
 	if _, err := NewClient("http://supaflow.internal", testKey, "org-a", nil); err == nil {
 		t.Fatal("plaintext remote base URL unexpectedly accepted")
@@ -166,11 +166,11 @@ func TestStreamEventsCursorContract(t *testing.T) {
 	}
 }
 
-// 验证 SDK 覆盖 outbound webhook 创建、查询、启停和删除且不发送 tenant 或 secret。
+// 验证 SDK 覆盖 outbound webhook 创建、查询、启停和删除且不发送 organization 或 secret。
 func TestOutboundWebhookLifecycleContract(t *testing.T) {
 	client := testClient(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.Query().Has("tenantId") || request.Header.Get("X-Tenant-ID") != "" {
-			t.Fatal("SDK must not send tenant identity")
+		if request.URL.Query().Has("organizationId") || request.Header.Get("X-Organization-ID") != "" {
+			t.Fatal("SDK must not send organization identity")
 		}
 		if strings.Contains(request.URL.RawQuery, "secret") {
 			t.Fatal("SDK leaked secret")

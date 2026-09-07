@@ -31,21 +31,21 @@ func NewPlanCatalog(pool *pgxpool.Pool, registry *workflow.Registry, policy work
 var _ platform.PlanCatalog = (*PlanCatalog)(nil)
 
 // Compile validates and compiles a definition without mutating publication state.
-func (c *PlanCatalog) Compile(_ context.Context, tenantID string, definition workflow.WorkflowDefinition) (*workflow.ExecutionPlan, error) {
-	if tenantID == "" {
-		return nil, errors.New("tenant is required")
+func (c *PlanCatalog) Compile(_ context.Context, organizationID string, definition workflow.WorkflowDefinition) (*workflow.ExecutionPlan, error) {
+	if organizationID == "" {
+		return nil, errors.New("organization is required")
 	}
 	return workflow.Compile(definition, c.registry, c.policy)
 }
 
 // Publish atomically allocates a workflow-local version and stores immutable
-// definition and plan records under tenant-scoped idempotency.
-func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, definition workflow.WorkflowDefinition, idempotencyKey string) (platform.PublishedPlan, bool, error) {
-	if c == nil || c.pool == nil || tenantID == "" || workflowID == "" ||
+// definition and plan records under organization-scoped idempotency.
+func (c *PlanCatalog) Publish(ctx context.Context, organizationID, workflowID string, definition workflow.WorkflowDefinition, idempotencyKey string) (platform.PublishedPlan, bool, error) {
+	if c == nil || c.pool == nil || organizationID == "" || workflowID == "" ||
 		idempotencyKey == "" || definition.ID != workflowID {
-		return platform.PublishedPlan{}, false, errors.New("tenant, matching workflow id, and idempotency key are required")
+		return platform.PublishedPlan{}, false, errors.New("organization, matching workflow id, and idempotency key are required")
 	}
-	plan, err := c.Compile(ctx, tenantID, definition)
+	plan, err := c.Compile(ctx, organizationID, definition)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -70,7 +70,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		return platform.PublishedPlan{}, false, err
 	}
 
-	existing, found, err := resolvePublicationKey(ctx, tx, tenantID, idempotencyKey)
+	existing, found, err := resolvePublicationKey(ctx, tx, organizationID, idempotencyKey)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -78,7 +78,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		if existing.Hash != plan.Hash() {
 			return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
 		}
-		resolved, err := c.resolveTx(ctx, tx, tenantID, existing.ID, existing.Hash)
+		resolved, err := c.resolveTx(ctx, tx, organizationID, existing.ID, existing.Hash)
 		if err != nil {
 			return platform.PublishedPlan{}, false, err
 		}
@@ -91,18 +91,18 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		apimutation.MarkCommitted(ctx)
 		return resolved, false, nil
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "workflow-version-capacity:"+tenantID); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "workflow-version-capacity:"+organizationID); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("lock workflow version capacity: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO workflows (id, tenant_id, slug, name, created_by)
-		VALUES ($1, $2, $1, $1, 'system') ON CONFLICT (tenant_id, id) DO NOTHING`, workflowID, tenantID); err != nil {
+		INSERT INTO workflows (id, organization_id, slug, name, created_by)
+		VALUES ($1, $2, $1, $1, 'system') ON CONFLICT (organization_id, id) DO NOTHING`, workflowID, organizationID); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("ensure workflow record: %w", err)
 	}
 	var lockedWorkflowID string
 	if err = tx.QueryRow(ctx, `
-		SELECT id FROM workflows WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
-		tenantID, workflowID).Scan(&lockedWorkflowID); err != nil {
+		SELECT id FROM workflows WHERE organization_id = $1 AND id = $2 FOR UPDATE`,
+		organizationID, workflowID).Scan(&lockedWorkflowID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
 		}
@@ -110,7 +110,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 	}
 	// A concurrent request may have committed this key while this transaction
 	// waited for the workflow lock.
-	existing, found, err = resolvePublicationKey(ctx, tx, tenantID, idempotencyKey)
+	existing, found, err = resolvePublicationKey(ctx, tx, organizationID, idempotencyKey)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -118,7 +118,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		if existing.Hash != plan.Hash() {
 			return platform.PublishedPlan{}, false, platform.ErrPublicationConflict
 		}
-		resolved, resolveErr := c.resolveTx(ctx, tx, tenantID, existing.ID, existing.Hash)
+		resolved, resolveErr := c.resolveTx(ctx, tx, organizationID, existing.ID, existing.Hash)
 		if resolveErr != nil {
 			return platform.PublishedPlan{}, false, resolveErr
 		}
@@ -131,14 +131,14 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 		apimutation.MarkCommitted(ctx)
 		return resolved, false, nil
 	}
-	var tenantVersionCount, workflowVersionCount uint64
+	var organizationVersionCount, workflowVersionCount uint64
 	if err = tx.QueryRow(ctx, `
 		SELECT count(*), count(*) FILTER (WHERE workflow_id = $2)
-		FROM workflow_versions WHERE tenant_id = $1`, tenantID, workflowID).Scan(&tenantVersionCount, &workflowVersionCount); err != nil {
+		FROM workflow_versions WHERE organization_id = $1`, organizationID, workflowID).Scan(&organizationVersionCount, &workflowVersionCount); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("count workflow versions: %w", err)
 	}
-	if tenantVersionCount >= platform.MaxVersionsPerTenant {
-		return platform.PublishedPlan{}, false, platform.ErrTenantVersionLimit
+	if organizationVersionCount >= platform.MaxVersionsPerOrganization {
+		return platform.PublishedPlan{}, false, platform.ErrOrganizationVersionLimit
 	}
 	if workflowVersionCount >= platform.MaxVersionsPerWorkflow {
 		return platform.PublishedPlan{}, false, platform.ErrWorkflowVersionLimit
@@ -146,7 +146,7 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 	var version uint64
 	if err = tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_versions
-		WHERE tenant_id = $1 AND workflow_id = $2`, tenantID, workflowID).Scan(&version); err != nil {
+		WHERE organization_id = $1 AND workflow_id = $2`, organizationID, workflowID).Scan(&version); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("allocate workflow version: %w", err)
 	}
 	versionID, err := NewID("version")
@@ -160,19 +160,19 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 	publishedAt := time.Now().UTC()
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO workflow_versions (
-		    id, tenant_id, workflow_id, version, publication_key, definition,
+		    id, organization_id, workflow_id, version, publication_key, definition,
 		    definition_hash, published_by, published_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'system', $8)`,
-		versionID, tenantID, workflowID, version, idempotencyKey, definitionJSON,
+		versionID, organizationID, workflowID, version, idempotencyKey, definitionJSON,
 		definitionHash[:], publishedAt); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("persist workflow version: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO execution_plans (
-		    id, tenant_id, workflow_id, workflow_version_id, plan, plan_hash,
+		    id, organization_id, workflow_id, workflow_version_id, plan, plan_hash,
 		    compiler_version, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		planID, tenantID, workflowID, versionID, planJSON, decodeHash(plan.Hash()),
+		planID, organizationID, workflowID, versionID, planJSON, decodeHash(plan.Hash()),
 		plan.SchemaVersion(), publishedAt); err != nil {
 		return platform.PublishedPlan{}, false, fmt.Errorf("persist execution plan: %w", err)
 	}
@@ -192,9 +192,9 @@ func (c *PlanCatalog) Publish(ctx context.Context, tenantID, workflowID string, 
 
 // ReplayPublication returns the immutable publication previously accepted for
 // this key without reading or compiling the mutable current draft.
-func (c *PlanCatalog) ReplayPublication(ctx context.Context, tenantID, workflowID, key string) (platform.PublishedPlan, bool, error) {
-	if c == nil || c.pool == nil || tenantID == "" || workflowID == "" || key == "" {
-		return platform.PublishedPlan{}, false, errors.New("tenant, workflow, and idempotency key are required")
+func (c *PlanCatalog) ReplayPublication(ctx context.Context, organizationID, workflowID, key string) (platform.PublishedPlan, bool, error) {
+	if c == nil || c.pool == nil || organizationID == "" || workflowID == "" || key == "" {
+		return platform.PublishedPlan{}, false, errors.New("organization, workflow, and idempotency key are required")
 	}
 	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -207,11 +207,11 @@ func (c *PlanCatalog) ReplayPublication(ctx context.Context, tenantID, workflowI
 		}
 		return platform.PublishedPlan{}, false, err
 	}
-	existing, found, err := resolvePublicationKey(ctx, tx, tenantID, key)
+	existing, found, err := resolvePublicationKey(ctx, tx, organizationID, key)
 	if err != nil || !found {
 		return platform.PublishedPlan{}, found, err
 	}
-	published, err := c.resolveTx(ctx, tx, tenantID, existing.ID, existing.Hash)
+	published, err := c.resolveTx(ctx, tx, organizationID, existing.ID, existing.Hash)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -228,19 +228,19 @@ func (c *PlanCatalog) ReplayPublication(ctx context.Context, tenantID, workflowI
 	return published, true, nil
 }
 
-// Resolve reads an immutable plan with both tenant and hash predicates.
-func (c *PlanCatalog) Resolve(ctx context.Context, tenantID, planID, hash string) (platform.PublishedPlan, error) {
+// Resolve reads an immutable plan with both organization and hash predicates.
+func (c *PlanCatalog) Resolve(ctx context.Context, organizationID, planID, hash string) (platform.PublishedPlan, error) {
 	if c == nil || c.pool == nil {
 		return platform.PublishedPlan{}, errors.New("postgres catalog requires a pool")
 	}
-	return c.resolveTx(ctx, c.pool, tenantID, planID, hash)
+	return c.resolveTx(ctx, c.pool, organizationID, planID, hash)
 }
 
 type queryRower interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func (c *PlanCatalog) resolveTx(ctx context.Context, db queryRower, tenantID, planID, hash string) (platform.PublishedPlan, error) {
+func (c *PlanCatalog) resolveTx(ctx context.Context, db queryRower, organizationID, planID, hash string) (platform.PublishedPlan, error) {
 	var published platform.PublishedPlan
 	var planJSON json.RawMessage
 	err := db.QueryRow(ctx, `
@@ -248,9 +248,9 @@ func (c *PlanCatalog) resolveTx(ctx context.Context, db queryRower, tenantID, pl
 		       p.plan, v.published_at
 		FROM execution_plans p
 		JOIN workflow_versions v
-		  ON v.tenant_id = p.tenant_id AND v.id = p.workflow_version_id
-		WHERE p.tenant_id = $1 AND p.id = $2 AND encode(p.plan_hash, 'hex') = $3`,
-		tenantID, planID, hash).Scan(&published.ID, &published.WorkflowID,
+		  ON v.organization_id = p.organization_id AND v.id = p.workflow_version_id
+		WHERE p.organization_id = $1 AND p.id = $2 AND encode(p.plan_hash, 'hex') = $3`,
+		organizationID, planID, hash).Scan(&published.ID, &published.WorkflowID,
 		&published.Version, &published.Hash, &planJSON, &published.PublishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return platform.PublishedPlan{}, platform.ErrPlanNotFound
@@ -268,13 +268,13 @@ func (c *PlanCatalog) resolveTx(ctx context.Context, db queryRower, tenantID, pl
 	return published, nil
 }
 
-func resolvePublicationKey(ctx context.Context, tx pgx.Tx, tenantID, key string) (platform.PublishedPlan, bool, error) {
+func resolvePublicationKey(ctx context.Context, tx pgx.Tx, organizationID, key string) (platform.PublishedPlan, bool, error) {
 	var published platform.PublishedPlan
 	err := tx.QueryRow(ctx, `
 		SELECT p.id, encode(p.plan_hash, 'hex')
 		FROM workflow_versions v
-		JOIN execution_plans p ON p.tenant_id = v.tenant_id AND p.workflow_version_id = v.id
-		WHERE v.tenant_id = $1 AND v.publication_key = $2`, tenantID, key).Scan(&published.ID, &published.Hash)
+		JOIN execution_plans p ON p.organization_id = v.organization_id AND p.workflow_version_id = v.id
+		WHERE v.organization_id = $1 AND v.publication_key = $2`, organizationID, key).Scan(&published.ID, &published.Hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return platform.PublishedPlan{}, false, nil
 	}

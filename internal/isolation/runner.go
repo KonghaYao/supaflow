@@ -264,7 +264,7 @@ func ceilSeconds(value time.Duration) uint64 {
 }
 
 func validateRequest(request Request) error {
-	if request.TenantID == "" || request.RunID == "" || request.AttemptID == "" || request.FencingToken == 0 {
+	if request.OrganizationID == "" || request.RunID == "" || request.AttemptID == "" || request.FencingToken == 0 {
 		return fmt.Errorf("invalid_scope")
 	}
 	if request.Language != "shell" && request.Language != "python" {

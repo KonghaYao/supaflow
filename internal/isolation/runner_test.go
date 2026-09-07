@@ -13,7 +13,7 @@ import (
 
 func validRequest(source string) Request {
 	return Request{
-		TenantID: "tenant", RunID: "run", AttemptID: "attempt", FencingToken: 1,
+		OrganizationID: "organization", RunID: "run", AttemptID: "attempt", FencingToken: 1,
 		Language: "shell", Source: source, Input: []byte(`null`), Timeout: time.Second, OutputLimit: 1024,
 	}
 }

@@ -24,7 +24,7 @@ func TestOperationsMutationsSendIdempotencyKeys(t *testing.T) {
 	_, _ = client.RevokeCredential(ctx, "credential", "credential-revoke")
 	_ = client.ConfigureQuota(ctx, Quota{MaxActiveRuns: 1, MaxActiveWorkers: 1}, "quota-configure")
 	_ = client.ConfigureRetention(ctx, RetentionPolicy{EventDays: 7, OutputDays: 7}, "retention-configure")
-	_, _ = client.ExportTenant(ctx, "tenant-export")
+	_, _ = client.ExportOrganization(ctx, "organization-export")
 	_ = client.DrainWorker(ctx, "worker", "worker-drain")
 	_ = client.RequeueDeadLetter(ctx, "letter", "letter-requeue")
 	_, _ = client.CreateOutboundWebhookSubscription(ctx, CreateOutboundWebhookSubscription{Name: "events"}, "webhook-create")

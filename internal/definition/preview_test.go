@@ -20,13 +20,13 @@ func (f previewAdapterFunc) PreviewNode(ctx context.Context, request PreviewAdap
 func TestDryRunTraversesCompiledDraft(t *testing.T) {
 	service, _ := newTestService(t)
 	definition := definitionFor("flow")
-	_, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "create-preview-1", Document: mustJSON(t, definition),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.DryRun(context.Background(), "tenant-a", "flow", json.RawMessage(`{"message":"hello"}`))
+	result, err := service.DryRun(context.Background(), "organization-a", "flow", json.RawMessage(`{"message":"hello"}`))
 	if err != nil || len(result.Steps) != 2 || result.Steps[0].NodeID != "start" || string(result.Output) != `{"message":"hello"}` {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -35,13 +35,13 @@ func TestDryRunTraversesCompiledDraft(t *testing.T) {
 // 验证 node-test 返回发布时解析出的 executor binding，而不是前端猜测。
 func TestNodeTestUsesResolvedExecutor(t *testing.T) {
 	service, _ := newTestService(t)
-	_, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: "flow", ActorID: "editor", IdempotencyKey: "create-preview-2", Document: mustJSON(t, definitionFor("flow")),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.TestNode(context.Background(), "tenant-a", "flow", "end", json.RawMessage(`{}`))
+	result, err := service.TestNode(context.Background(), "organization-a", "flow", "end", json.RawMessage(`{}`))
 	if err != nil || result.Executor.Kind == "" || result.Status != "executed" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -64,7 +64,7 @@ func TestNodeTestExecutesPureNodeSemantics(t *testing.T) {
 			service, _ := newTestService(t)
 			workflowID := fmt.Sprintf("preview-%d", index)
 			createPreviewDraft(t, service, previewDefinition(workflowID, test.nodeType, test.config))
-			result, err := service.TestNode(context.Background(), "tenant-a", workflowID, "target", test.input)
+			result, err := service.TestNode(context.Background(), "organization-a", workflowID, "target", test.input)
 			if err != nil || result.Status != "executed" || string(result.Output) != test.output || result.SelectedPort != test.port {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -79,7 +79,7 @@ func TestNodeTestUsesBoundedExternalPreviewAdapter(t *testing.T) {
 			service, _ := newTestService(t)
 			workflowID := "external-" + nodeType
 			createPreviewDraft(t, service, previewDefinition(workflowID, nodeType, json.RawMessage(`{"name":"sandbox"}`)))
-			validation, err := service.TestNode(context.Background(), "tenant-a", workflowID, "target", json.RawMessage(`{"id":7}`))
+			validation, err := service.TestNode(context.Background(), "organization-a", workflowID, "target", json.RawMessage(`{"id":7}`))
 			if err != nil || validation.Status != "validation-only" || validation.Output != nil {
 				t.Fatalf("validation result=%+v err=%v", validation, err)
 			}
@@ -88,7 +88,7 @@ func TestNodeTestUsesBoundedExternalPreviewAdapter(t *testing.T) {
 				calls++
 				return json.Marshal(map[string]any{"adapter": request.Node.Type, "inputValid": json.Valid(request.Input)})
 			}))
-			executed, err := service.TestNode(context.Background(), "tenant-a", workflowID, "target", json.RawMessage(`{"id":7}`))
+			executed, err := service.TestNode(context.Background(), "organization-a", workflowID, "target", json.RawMessage(`{"id":7}`))
 			if err != nil || executed.Status != "executed-test-adapter" || calls != 1 || string(executed.Output) != `{"adapter":"`+nodeType+`","inputValid":true}` {
 				t.Fatalf("executed result=%+v calls=%d err=%v", executed, calls, err)
 			}
@@ -103,7 +103,7 @@ func TestNodeTestRejectsPreviewAdapterOutputBeyondNodeLimit(t *testing.T) {
 	service.SetPreviewAdapter(previewAdapterFunc(func(_ context.Context, request PreviewAdapterRequest) (json.RawMessage, error) {
 		return json.Marshal(string(bytes.Repeat([]byte{'x'}, int(request.OutputLimit))))
 	}))
-	if _, err := service.TestNode(context.Background(), "tenant-a", "bounded-adapter", "target", json.RawMessage(`null`)); err == nil {
+	if _, err := service.TestNode(context.Background(), "organization-a", "bounded-adapter", "target", json.RawMessage(`null`)); err == nil {
 		t.Fatal("TestNode() error = nil, want bounded output rejection")
 	}
 }
@@ -112,7 +112,7 @@ func TestNodeTestRejectsPreviewAdapterOutputBeyondNodeLimit(t *testing.T) {
 func TestDryRunPropagatesRealTransformOutput(t *testing.T) {
 	service, _ := newTestService(t)
 	createPreviewDraft(t, service, previewDefinition("transform-flow", workflow.NodeTypeTransform, json.RawMessage(`{"select":{"name":"$.user.name"}}`)))
-	result, err := service.DryRun(context.Background(), "tenant-a", "transform-flow", json.RawMessage(`{"user":{"name":"Ada"}}`))
+	result, err := service.DryRun(context.Background(), "organization-a", "transform-flow", json.RawMessage(`{"user":{"name":"Ada"}}`))
 	if err != nil || len(result.Steps) != 3 || result.Steps[1].Status != "executed" || string(result.Output) != `{"name":"Ada"}` {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -120,7 +120,7 @@ func TestDryRunPropagatesRealTransformOutput(t *testing.T) {
 
 func createPreviewDraft(t *testing.T, service *Service, definition workflow.WorkflowDefinition) {
 	t.Helper()
-	_, err := service.CreateDraft(context.Background(), "tenant-a", CreateDraftCommand{
+	_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
 		WorkflowID: definition.ID, ActorID: "editor", IdempotencyKey: "create-" + definition.ID, Document: mustJSON(t, definition),
 	})
 	if err != nil {

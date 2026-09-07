@@ -17,7 +17,7 @@ import (
 
 // CreateOutboundWebhookRequest contains safe subscription metadata only.
 type CreateOutboundWebhookRequest struct {
-	TenantID            string
+	OrganizationID      string
 	ActorID             string
 	Name                string
 	EndpointURL         string
@@ -34,7 +34,7 @@ func NewOutboundWebhookRepository(pool *pgxpool.Pool) *OutboundWebhookRepository
 	return &OutboundWebhookRepository{pool: pool}
 }
 
-// Create persists an enabled tenant subscription referencing encrypted credentials.
+// Create persists an enabled organization subscription referencing encrypted credentials.
 func (s *OutboundWebhookRepository) Create(ctx context.Context, request CreateOutboundWebhookRequest) (OutboundWebhookSubscription, error) {
 	if s == nil || s.pool == nil || validateOutboundWebhookRequest(request) != nil {
 		return OutboundWebhookSubscription{}, ErrInvalidArgument
@@ -52,25 +52,25 @@ func (s *OutboundWebhookRepository) Create(ctx context.Context, request CreateOu
 	var subscription OutboundWebhookSubscription
 	err = tx.QueryRow(ctx, `
 		INSERT INTO outbound_webhook_subscriptions (
-		    tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,timeout_ms,created_by
+		    organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,timeout_ms,created_by
 		)
 		SELECT $1,$2,$3,$4,$5,$6,'enabled',$7,$8
 		FROM credential_refs c
-		WHERE c.tenant_id=$1 AND c.id=$6 AND c.status='active' AND c.purpose='outbound_webhook_signing'
-		ON CONFLICT (tenant_id,id) DO NOTHING
-		RETURNING tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+		WHERE c.organization_id=$1 AND c.id=$6 AND c.status='active' AND c.purpose='outbound_webhook_signing'
+		ON CONFLICT (organization_id,id) DO NOTHING
+		RETURNING organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
 		          timeout_ms,created_by,created_at,updated_at`,
-		request.TenantID, id, request.Name, request.EndpointURL, events,
+		request.OrganizationID, id, request.Name, request.EndpointURL, events,
 		request.SigningCredentialID, request.Timeout.Milliseconds(), request.ActorID).Scan(
-		&subscription.TenantID, &subscription.ID, &subscription.Name, &subscription.EndpointURL,
+		&subscription.OrganizationID, &subscription.ID, &subscription.Name, &subscription.EndpointURL,
 		&subscription.EventTypes, &subscription.SigningCredentialID, &subscription.Status,
 		&subscription.TimeoutMS, &subscription.CreatedBy, &subscription.CreatedAt, &subscription.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if _, stable := MutationResourceID(ctx, "sub", "subscription"); stable {
 			replayed, replayErr := scanOutboundWebhook(tx.QueryRow(ctx, `
-				SELECT tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+				SELECT organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
 				       timeout_ms,created_by,created_at,updated_at
-				FROM outbound_webhook_subscriptions WHERE tenant_id=$1 AND id=$2`, request.TenantID, id))
+				FROM outbound_webhook_subscriptions WHERE organization_id=$1 AND id=$2`, request.OrganizationID, id))
 			if replayErr == nil {
 				if commitErr := tx.Commit(ctx); commitErr != nil {
 					return OutboundWebhookSubscription{}, fmt.Errorf("commit outbound webhook replay: %w", commitErr)
@@ -86,7 +86,7 @@ func (s *OutboundWebhookRepository) Create(ctx context.Context, request CreateOu
 	}
 	subscription.Timeout = time.Duration(subscription.TimeoutMS) * time.Millisecond
 	if _, err = insertAuditTx(ctx, tx, AuditRecord{
-		TenantID: request.TenantID, ActorID: request.ActorID, Action: "webhook_subscription.create",
+		OrganizationID: request.OrganizationID, ActorID: request.ActorID, Action: "webhook_subscription.create",
 		ResourceType: "webhook_subscription", ResourceID: subscription.ID, Outcome: AuditAllowed,
 	}); err != nil {
 		return OutboundWebhookSubscription{}, err
@@ -97,16 +97,16 @@ func (s *OutboundWebhookRepository) Create(ctx context.Context, request CreateOu
 	return subscription, nil
 }
 
-// List returns safe tenant-scoped subscription metadata, excluding soft-deleted rows.
-func (s *OutboundWebhookRepository) List(ctx context.Context, tenantID string, limit int) ([]OutboundWebhookSubscription, error) {
-	if s == nil || s.pool == nil || tenantID == "" || limit <= 0 || limit > 500 {
+// List returns safe organization-scoped subscription metadata, excluding soft-deleted rows.
+func (s *OutboundWebhookRepository) List(ctx context.Context, organizationID string, limit int) ([]OutboundWebhookSubscription, error) {
+	if s == nil || s.pool == nil || organizationID == "" || limit <= 0 || limit > 500 {
 		return nil, ErrInvalidArgument
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+		SELECT organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
 		       timeout_ms,created_by,created_at,updated_at
 		FROM outbound_webhook_subscriptions
-		WHERE tenant_id=$1 AND status <> 'deleted' ORDER BY created_at,id LIMIT $2`, tenantID, limit)
+		WHERE organization_id=$1 AND status <> 'deleted' ORDER BY created_at,id LIMIT $2`, organizationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list outbound webhook subscriptions: %w", err)
 	}
@@ -122,9 +122,9 @@ func (s *OutboundWebhookRepository) List(ctx context.Context, tenantID string, l
 	return result, rows.Err()
 }
 
-// SetEnabled changes one active subscription lifecycle state with a tenant predicate.
-func (s *OutboundWebhookRepository) SetEnabled(ctx context.Context, tenantID, subscriptionID, actorID string, enabled bool, now time.Time) (OutboundWebhookSubscription, error) {
-	if tenantID == "" || subscriptionID == "" || actorID == "" || now.IsZero() {
+// SetEnabled changes one active subscription lifecycle state with a organization predicate.
+func (s *OutboundWebhookRepository) SetEnabled(ctx context.Context, organizationID, subscriptionID, actorID string, enabled bool, now time.Time) (OutboundWebhookSubscription, error) {
+	if organizationID == "" || subscriptionID == "" || actorID == "" || now.IsZero() {
 		return OutboundWebhookSubscription{}, ErrInvalidArgument
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -138,15 +138,15 @@ func (s *OutboundWebhookRepository) SetEnabled(ctx context.Context, tenantID, su
 	}
 	row := tx.QueryRow(ctx, `
 		UPDATE outbound_webhook_subscriptions SET status=$3,updated_at=$4
-		WHERE tenant_id=$1 AND id=$2 AND status <> 'deleted' AND status <> $3
-		RETURNING tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
-		          timeout_ms,created_by,created_at,updated_at`, tenantID, subscriptionID, status, now)
+		WHERE organization_id=$1 AND id=$2 AND status <> 'deleted' AND status <> $3
+		RETURNING organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+		          timeout_ms,created_by,created_at,updated_at`, organizationID, subscriptionID, status, now)
 	subscription, err := scanOutboundWebhook(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		subscription, err = scanOutboundWebhook(tx.QueryRow(ctx, `
-			SELECT tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+			SELECT organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
 			       timeout_ms,created_by,created_at,updated_at
-			FROM outbound_webhook_subscriptions WHERE tenant_id=$1 AND id=$2 AND status=$3`, tenantID, subscriptionID, status))
+			FROM outbound_webhook_subscriptions WHERE organization_id=$1 AND id=$2 AND status=$3`, organizationID, subscriptionID, status))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return OutboundWebhookSubscription{}, ErrNotFound
 		}
@@ -163,7 +163,7 @@ func (s *OutboundWebhookRepository) SetEnabled(ctx context.Context, tenantID, su
 		return OutboundWebhookSubscription{}, err
 	}
 	if _, err = insertAuditTx(ctx, tx, AuditRecord{
-		TenantID: tenantID, ActorID: actorID, Action: "webhook_subscription." + status,
+		OrganizationID: organizationID, ActorID: actorID, Action: "webhook_subscription." + status,
 		ResourceType: "webhook_subscription", ResourceID: subscriptionID, Outcome: AuditAllowed,
 	}); err != nil {
 		return OutboundWebhookSubscription{}, err
@@ -175,8 +175,8 @@ func (s *OutboundWebhookRepository) SetEnabled(ctx context.Context, tenantID, su
 }
 
 // Delete soft-deletes a subscription so historical receipts retain referential integrity.
-func (s *OutboundWebhookRepository) Delete(ctx context.Context, tenantID, subscriptionID, actorID string, now time.Time) error {
-	if tenantID == "" || subscriptionID == "" || actorID == "" || now.IsZero() {
+func (s *OutboundWebhookRepository) Delete(ctx context.Context, organizationID, subscriptionID, actorID string, now time.Time) error {
+	if organizationID == "" || subscriptionID == "" || actorID == "" || now.IsZero() {
 		return ErrInvalidArgument
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -186,7 +186,7 @@ func (s *OutboundWebhookRepository) Delete(ctx context.Context, tenantID, subscr
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	tag, err := tx.Exec(ctx, `
 		UPDATE outbound_webhook_subscriptions SET status='deleted',deleted_at=$3,updated_at=$3
-		WHERE tenant_id=$1 AND id=$2 AND status <> 'deleted'`, tenantID, subscriptionID, now)
+		WHERE organization_id=$1 AND id=$2 AND status <> 'deleted'`, organizationID, subscriptionID, now)
 	if err != nil {
 		return fmt.Errorf("delete outbound webhook subscription: %w", err)
 	}
@@ -194,8 +194,8 @@ func (s *OutboundWebhookRepository) Delete(ctx context.Context, tenantID, subscr
 		if _, recovery := MutationResourceID(ctx, "sub", "delete:"+subscriptionID); recovery {
 			var exists bool
 			if queryErr := tx.QueryRow(ctx, `SELECT EXISTS (
-				SELECT 1 FROM outbound_webhook_subscriptions WHERE tenant_id=$1 AND id=$2 AND status='deleted'
-			)`, tenantID, subscriptionID).Scan(&exists); queryErr != nil {
+				SELECT 1 FROM outbound_webhook_subscriptions WHERE organization_id=$1 AND id=$2 AND status='deleted'
+			)`, organizationID, subscriptionID).Scan(&exists); queryErr != nil {
 				return fmt.Errorf("inspect outbound webhook deletion replay: %w", queryErr)
 			}
 			if exists {
@@ -205,7 +205,7 @@ func (s *OutboundWebhookRepository) Delete(ctx context.Context, tenantID, subscr
 		return ErrNotFound
 	}
 	if _, err = insertAuditTx(ctx, tx, AuditRecord{
-		TenantID: tenantID, ActorID: actorID, Action: "webhook_subscription.delete",
+		OrganizationID: organizationID, ActorID: actorID, Action: "webhook_subscription.delete",
 		ResourceType: "webhook_subscription", ResourceID: subscriptionID, Outcome: AuditAllowed,
 	}); err != nil {
 		return err
@@ -217,13 +217,13 @@ func (s *OutboundWebhookRepository) Delete(ctx context.Context, tenantID, subscr
 }
 
 // ListEnabled returns subscriptions selecting one exact event topic or wildcard.
-func (s *OutboundWebhookRepository) ListEnabled(ctx context.Context, tenantID, topic string) ([]OutboundWebhookSubscription, error) {
+func (s *OutboundWebhookRepository) ListEnabled(ctx context.Context, organizationID, topic string) ([]OutboundWebhookSubscription, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT tenant_id,id,name,endpoint_url,event_types,signing_credential_id,status,
+		SELECT organization_id,id,name,endpoint_url,event_types,signing_credential_id,status,
 		       timeout_ms,created_by,created_at,updated_at
 		FROM outbound_webhook_subscriptions
-		WHERE tenant_id=$1 AND status='enabled' AND ($2=ANY(event_types) OR '*'=ANY(event_types))
-		ORDER BY created_at,id`, tenantID, topic)
+		WHERE organization_id=$1 AND status='enabled' AND ($2=ANY(event_types) OR '*'=ANY(event_types))
+		ORDER BY created_at,id`, organizationID, topic)
 	if err != nil {
 		return nil, fmt.Errorf("select outbound webhook subscriptions: %w", err)
 	}
@@ -240,18 +240,18 @@ func (s *OutboundWebhookRepository) ListEnabled(ctx context.Context, tenantID, t
 }
 
 // BeginDelivery creates or advances a stable receipt and reports prior completion.
-func (s *OutboundWebhookRepository) BeginDelivery(ctx context.Context, tenantID, subscriptionID, messageID, requestID string, now time.Time) (bool, error) {
+func (s *OutboundWebhookRepository) BeginDelivery(ctx context.Context, organizationID, subscriptionID, messageID, requestID string, now time.Time) (bool, error) {
 	var delivered bool
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO outbound_webhook_receipts (
-		    tenant_id,subscription_id,message_id,request_id,status,attempts,first_attempt_at,last_attempt_at
+		    organization_id,subscription_id,message_id,request_id,status,attempts,first_attempt_at,last_attempt_at
 		) VALUES ($1,$2,$3,$4,'pending',1,$5,$5)
-		ON CONFLICT (tenant_id,subscription_id,message_id) DO UPDATE
+		ON CONFLICT (organization_id,subscription_id,message_id) DO UPDATE
 		SET attempts=CASE WHEN outbound_webhook_receipts.status='pending'
 		                  THEN outbound_webhook_receipts.attempts+1 ELSE outbound_webhook_receipts.attempts END,
 		    last_attempt_at=CASE WHEN outbound_webhook_receipts.status='pending'
 		                         THEN EXCLUDED.last_attempt_at ELSE outbound_webhook_receipts.last_attempt_at END
-		RETURNING status='delivered'`, tenantID, subscriptionID, messageID, requestID, now).Scan(&delivered)
+		RETURNING status='delivered'`, organizationID, subscriptionID, messageID, requestID, now).Scan(&delivered)
 	if err != nil {
 		return false, fmt.Errorf("begin outbound webhook delivery: %w", err)
 	}
@@ -259,12 +259,12 @@ func (s *OutboundWebhookRepository) BeginDelivery(ctx context.Context, tenantID,
 }
 
 // CompleteDelivery marks a pending stable receipt delivered.
-func (s *OutboundWebhookRepository) CompleteDelivery(ctx context.Context, tenantID, subscriptionID, messageID string, responseStatus int, now time.Time) error {
+func (s *OutboundWebhookRepository) CompleteDelivery(ctx context.Context, organizationID, subscriptionID, messageID string, responseStatus int, now time.Time) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE outbound_webhook_receipts
 		SET status='delivered',response_status=$4,last_error=NULL,delivered_at=$5,last_attempt_at=$5
-		WHERE tenant_id=$1 AND subscription_id=$2 AND message_id=$3 AND status='pending'`,
-		tenantID, subscriptionID, messageID, responseStatus, now)
+		WHERE organization_id=$1 AND subscription_id=$2 AND message_id=$3 AND status='pending'`,
+		organizationID, subscriptionID, messageID, responseStatus, now)
 	if err != nil {
 		return fmt.Errorf("complete outbound webhook delivery: %w", err)
 	}
@@ -272,11 +272,11 @@ func (s *OutboundWebhookRepository) CompleteDelivery(ctx context.Context, tenant
 }
 
 // FailWebhookDelivery stores only a redacted bounded diagnostic for a pending receipt.
-func (s *OutboundWebhookRepository) FailWebhookDelivery(ctx context.Context, tenantID, subscriptionID, messageID, diagnostic string, now time.Time) error {
+func (s *OutboundWebhookRepository) FailWebhookDelivery(ctx context.Context, organizationID, subscriptionID, messageID, diagnostic string, now time.Time) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE outbound_webhook_receipts SET last_error=$4,last_attempt_at=$5
-		WHERE tenant_id=$1 AND subscription_id=$2 AND message_id=$3 AND status='pending'`,
-		tenantID, subscriptionID, messageID, RedactDiagnostic(diagnostic), now)
+		WHERE organization_id=$1 AND subscription_id=$2 AND message_id=$3 AND status='pending'`,
+		organizationID, subscriptionID, messageID, RedactDiagnostic(diagnostic), now)
 	if err != nil {
 		return fmt.Errorf("record outbound webhook failure: %w", err)
 	}
@@ -285,7 +285,7 @@ func (s *OutboundWebhookRepository) FailWebhookDelivery(ctx context.Context, ten
 
 func scanOutboundWebhook(row interface{ Scan(...any) error }) (OutboundWebhookSubscription, error) {
 	var subscription OutboundWebhookSubscription
-	err := row.Scan(&subscription.TenantID, &subscription.ID, &subscription.Name,
+	err := row.Scan(&subscription.OrganizationID, &subscription.ID, &subscription.Name,
 		&subscription.EndpointURL, &subscription.EventTypes, &subscription.SigningCredentialID,
 		&subscription.Status, &subscription.TimeoutMS, &subscription.CreatedBy,
 		&subscription.CreatedAt, &subscription.UpdatedAt)
@@ -297,7 +297,7 @@ func scanOutboundWebhook(row interface{ Scan(...any) error }) (OutboundWebhookSu
 }
 
 func validateOutboundWebhookRequest(request CreateOutboundWebhookRequest) error {
-	if request.TenantID == "" || request.ActorID == "" || request.Name == "" || request.SigningCredentialID == "" ||
+	if request.OrganizationID == "" || request.ActorID == "" || request.Name == "" || request.SigningCredentialID == "" ||
 		request.Timeout < 100*time.Millisecond || request.Timeout > 10*time.Second || len(request.EventTypes) == 0 || len(request.EventTypes) > 128 {
 		return ErrInvalidArgument
 	}

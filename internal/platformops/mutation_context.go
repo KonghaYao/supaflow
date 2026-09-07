@@ -15,12 +15,12 @@ type mutationOperationContextKey struct{}
 // MutationOperation is the authenticated identity shared by the HTTP ledger
 // and the PostgreSQL transaction that applies one operations mutation.
 type MutationOperation struct {
-	ID           string
-	TenantID     string
-	ActorID      string
-	Action       string
-	ResourceType string
-	ResourceID   string
+	ID             string
+	OrganizationID string
+	ActorID        string
+	Action         string
+	ResourceType   string
+	ResourceID     string
 }
 
 type mutationContext struct {
@@ -77,7 +77,7 @@ func recordAllowedMutationTx(ctx context.Context, tx pgx.Tx, resourceID string) 
 		return false, nil
 	}
 	identity := operation.operation
-	if identity.TenantID == "" || identity.ActorID == "" || identity.Action == "" || identity.ResourceType == "" {
+	if identity.OrganizationID == "" || identity.ActorID == "" || identity.Action == "" || identity.ResourceType == "" {
 		return false, nil
 	}
 	if resourceID == "" {
@@ -88,7 +88,7 @@ func recordAllowedMutationTx(ctx context.Context, tx pgx.Tx, resourceID string) 
 		return false, err
 	}
 	auditID, _ := MutationResourceID(ctx, "audit", "allowed")
-	err = insertAuditOnceTx(ctx, tx, AuditRecord{ID: auditID, TenantID: identity.TenantID,
+	err = insertAuditOnceTx(ctx, tx, AuditRecord{ID: auditID, OrganizationID: identity.OrganizationID,
 		ActorID: identity.ActorID, Action: identity.Action, ResourceType: identity.ResourceType,
 		ResourceID: resourceID, Outcome: AuditAllowed, Metadata: metadata})
 	return true, err

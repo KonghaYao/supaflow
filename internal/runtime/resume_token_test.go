@@ -18,7 +18,7 @@ func TestResumeTokenIssuerBindsInterruptClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := Interrupt{TenantID: "tenant-a", ID: "int-1", RunID: "run-1", NodeID: "approve",
+	base := Interrupt{OrganizationID: "organization-a", ID: "int-1", RunID: "run-1", NodeID: "approve",
 		AttemptID: "attempt-1", Kind: "approval", ExpiresAt: time.Unix(1234, 567).UTC()}
 	want, err := issuer.Issue(base)
 	if err != nil {
@@ -29,7 +29,7 @@ func TestResumeTokenIssuerBindsInterruptClaims(t *testing.T) {
 		t.Fatal("same claims must produce the same token")
 	}
 	mutations := []func(*Interrupt){
-		func(v *Interrupt) { v.TenantID = "tenant-b" }, func(v *Interrupt) { v.RunID = "run-2" },
+		func(v *Interrupt) { v.OrganizationID = "organization-b" }, func(v *Interrupt) { v.RunID = "run-2" },
 		func(v *Interrupt) { v.NodeID = "other" }, func(v *Interrupt) { v.AttemptID = "attempt-2" },
 		func(v *Interrupt) { v.ID = "int-2" }, func(v *Interrupt) { v.Kind = "wait" },
 		func(v *Interrupt) { v.ExpiresAt = v.ExpiresAt.Add(time.Second) },

@@ -29,7 +29,7 @@ The microbenchmarks use memory adapters to isolate API/domain allocation and sch
 The historical run used PostgreSQL 16 in Docker Desktop through
 `127.0.0.1:55432`, using an isolated `supaflow_pressure` database. The test
 configured the pgx pool with `MaxConns=32`, created a database-backed API key,
-service account and tenant membership, published through the PostgreSQL
+service account and organization membership, published through the PostgreSQL
 catalog, then released 1,000 client goroutines at the same start gate. Every
 request used a unique idempotency key and crossed a real TCP listener. It then
 used the PostgreSQL runtime/admission store and a real orchestrator to drain

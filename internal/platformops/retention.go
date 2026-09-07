@@ -13,23 +13,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// RetentionPolicy defines tenant output/event horizons and archival behavior.
+// RetentionPolicy defines organization output/event horizons and archival behavior.
 type RetentionPolicy struct {
-	TenantID            string `json:"-"`
+	OrganizationID      string `json:"-"`
 	EventDays           int    `json:"eventDays"`
 	OutputDays          int    `json:"outputDays"`
 	ArchiveBeforeDelete bool   `json:"archiveBeforeDelete"`
 }
 
-// TenantExport is a secret-free point-in-time tenant data export.
-type TenantExport struct {
-	ID          string     `json:"id"`
-	TenantID    string     `json:"-"`
-	Status      string     `json:"status"`
-	ObjectID    string     `json:"objectId,omitempty"`
-	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
+// OrganizationExport is a secret-free point-in-time organization data export.
+type OrganizationExport struct {
+	ID             string     `json:"id"`
+	OrganizationID string     `json:"-"`
+	Status         string     `json:"status"`
+	ObjectID       string     `json:"objectId,omitempty"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 }
 
 // RetentionSweep reports bounded policy enforcement work.
@@ -41,7 +41,7 @@ type RetentionSweep struct {
 	InlineOutputsDeleted  int
 }
 
-// Retention manages policy, archival, deletion, and tenant export metadata.
+// Retention manages policy, archival, deletion, and organization export metadata.
 type Retention struct {
 	pool      *pgxpool.Pool
 	objects   ObjectStore
@@ -59,8 +59,8 @@ func NewRetention(pool *pgxpool.Pool, objects ObjectStore, maxExportBytes int64)
 // ArchiveExpired marks expired active objects archived under a row lock. The
 // database clock is authoritative so a skewed control-plane replica cannot
 // archive data before its retention horizon.
-func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, limit int) (int, error) {
-	if tenantID == "" || limit <= 0 || limit > 1000 {
+func (r *Retention) ArchiveExpired(ctx context.Context, organizationID string, limit int) (int, error) {
+	if organizationID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -74,19 +74,19 @@ func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, limit i
 	}
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
-		    SELECT tenant_id,id FROM managed_objects
-		    WHERE tenant_id=$1 AND status='active' AND retention_until <= $2
+		    SELECT organization_id,id FROM managed_objects
+		    WHERE organization_id=$1 AND status='active' AND retention_until <= $2
 		    ORDER BY retention_until,id FOR UPDATE SKIP LOCKED LIMIT $3
 		)
 		UPDATE managed_objects o SET status='archived',archived_at=$2
-		FROM expired WHERE o.tenant_id=expired.tenant_id AND o.id=expired.id`, tenantID, now, limit)
+		FROM expired WHERE o.organization_id=expired.organization_id AND o.id=expired.id`, organizationID, now, limit)
 	if err != nil {
 		return 0, fmt.Errorf("archive expired objects: %w", err)
 	}
 	count := int(tag.RowsAffected())
 	if count > 0 {
 		metadata, _ := json.Marshal(map[string]any{"count": count, "retentionAt": now})
-		if _, err = insertAuditTx(ctx, tx, AuditRecord{TenantID: tenantID, ActorID: "system:retention",
+		if _, err = insertAuditTx(ctx, tx, AuditRecord{OrganizationID: organizationID, ActorID: "system:retention",
 			Action: "retention.objects.archive", ResourceType: "managed_object", ResourceID: "batch",
 			Outcome: AuditAllowed, Metadata: metadata}); err != nil {
 			return 0, err
@@ -100,15 +100,15 @@ func (r *Retention) ArchiveExpired(ctx context.Context, tenantID string, limit i
 
 // DeleteArchived idempotently removes archived bytes after the requested grace
 // period, measured from the database clock.
-func (r *Retention) DeleteArchived(ctx context.Context, tenantID string, grace time.Duration, limit int) (int, error) {
-	if tenantID == "" || grace < 0 || limit <= 0 || limit > 1000 {
+func (r *Retention) DeleteArchived(ctx context.Context, organizationID string, grace time.Duration, limit int) (int, error) {
+	if organizationID == "" || grace < 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id,kind FROM managed_objects
-		WHERE tenant_id=$1 AND status='archived'
+		WHERE organization_id=$1 AND status='archived'
 		  AND archived_at <= clock_timestamp() - make_interval(secs => $2)
-		ORDER BY archived_at,id LIMIT $3`, tenantID, grace.Seconds(), limit)
+		ORDER BY archived_at,id LIMIT $3`, organizationID, grace.Seconds(), limit)
 	if err != nil {
 		return 0, fmt.Errorf("select archived objects: %w", err)
 	}
@@ -125,11 +125,11 @@ func (r *Retention) DeleteArchived(ctx context.Context, tenantID string, grace t
 	rows.Close()
 	deleted := 0
 	for _, item := range targets {
-		audit := AuditRecord{TenantID: tenantID, ActorID: "system:retention",
+		audit := AuditRecord{OrganizationID: organizationID, ActorID: "system:retention",
 			Action: "retention.objects.delete", ResourceType: "managed_object", ResourceID: item.id,
 			Outcome: AuditAllowed}
 		var claimed bool
-		if claimed, err = deleteManagedObject(ctx, r.pool, r.objects, tenantID, item.id, item.kind, &audit); err != nil {
+		if claimed, err = deleteManagedObject(ctx, r.pool, r.objects, organizationID, item.id, item.kind, &audit); err != nil {
 			return deleted, err
 		}
 		if claimed {
@@ -139,36 +139,36 @@ func (r *Retention) DeleteArchived(ctx context.Context, tenantID string, grace t
 	return deleted, nil
 }
 
-// SweepTenant enforces one tenant policy without unbounded scans.
-func (r *Retention) SweepTenant(ctx context.Context, tenantID string, now time.Time, limit int) (RetentionSweep, error) {
-	if tenantID == "" || now.IsZero() || limit <= 0 || limit > 1000 {
+// SweepOrganization enforces one organization policy without unbounded scans.
+func (r *Retention) SweepOrganization(ctx context.Context, organizationID string, now time.Time, limit int) (RetentionSweep, error) {
+	if organizationID == "" || now.IsZero() || limit <= 0 || limit > 1000 {
 		return RetentionSweep{}, ErrInvalidArgument
 	}
 	result := RetentionSweep{}
 	var err error
-	result.EventsRemoved, err = r.sweepEventsAndBackfill(ctx, tenantID, limit)
+	result.EventsRemoved, err = r.sweepEventsAndBackfill(ctx, organizationID, limit)
 	if err != nil {
 		return result, err
 	}
-	result.ObjectsArchived, err = r.ArchiveExpired(ctx, tenantID, limit)
+	result.ObjectsArchived, err = r.ArchiveExpired(ctx, organizationID, limit)
 	if err != nil {
 		return result, err
 	}
-	result.InlineOutputsArchived, err = r.ArchiveNodeOutputs(ctx, tenantID, "system:retention", limit)
+	result.InlineOutputsArchived, err = r.ArchiveNodeOutputs(ctx, organizationID, "system:retention", limit)
 	if err != nil {
 		return result, err
 	}
-	result.ObjectsDeleted, err = r.DeleteArchived(ctx, tenantID, 24*time.Hour, limit)
+	result.ObjectsDeleted, err = r.DeleteArchived(ctx, organizationID, 24*time.Hour, limit)
 	if err != nil {
 		return result, err
 	}
-	result.InlineOutputsDeleted, err = r.DeleteArchivedNodeOutputs(ctx, tenantID, "system:retention", 24*time.Hour, limit)
+	result.InlineOutputsDeleted, err = r.DeleteArchivedNodeOutputs(ctx, organizationID, "system:retention", 24*time.Hour, limit)
 	return result, err
 }
 
 // ArchiveEvents writes a redacted immutable archive before deleting bounded terminal-run events.
-func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string, before time.Time, limit int) (ManagedObject, int, error) {
-	if tenantID == "" || actorID == "" || before.IsZero() || limit <= 0 || limit > 10000 {
+func (r *Retention) ArchiveEvents(ctx context.Context, organizationID, actorID string, before time.Time, limit int) (ManagedObject, int, error) {
+	if organizationID == "" || actorID == "" || before.IsZero() || limit <= 0 || limit > 10000 {
 		return ManagedObject{}, 0, ErrInvalidArgument
 	}
 	objectID, err := newID("obj")
@@ -176,7 +176,7 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 		return ManagedObject{}, 0, err
 	}
 	upload, err := beginObjectUpload(ctx, r.pool, r.objects, objectUploadSpec{
-		tenantID: tenantID, id: objectID, kind: "archive", key: objectID, contentType: "application/json",
+		organizationID: organizationID, id: objectID, kind: "archive", key: objectID, contentType: "application/json",
 	})
 	if err != nil {
 		return ManagedObject{}, 0, err
@@ -196,10 +196,10 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	rows, err := tx.Query(ctx, `
 		SELECT e.id,e.run_id,e.sequence,e.event_type,e.payload,e.created_at
-		FROM run_events e JOIN runs r ON r.tenant_id=e.tenant_id AND r.id=e.run_id
-		WHERE e.tenant_id=$1 AND e.created_at < $2
+		FROM run_events e JOIN runs r ON r.organization_id=e.organization_id AND r.id=e.run_id
+		WHERE e.organization_id=$1 AND e.created_at < $2
 		  AND r.status IN ('success','failed','error','cancelled')
-		ORDER BY e.created_at,e.id FOR UPDATE OF e SKIP LOCKED LIMIT $3`, tenantID, before, limit)
+		ORDER BY e.created_at,e.id FOR UPDATE OF e SKIP LOCKED LIMIT $3`, organizationID, before, limit)
 	if err != nil {
 		return ManagedObject{}, 0, fmt.Errorf("select event archive: %w", err)
 	}
@@ -278,20 +278,20 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 		return ManagedObject{}, 0, err
 	}
 	digest, _ := hex.DecodeString(stored.SHA256)
-	metadata := ManagedObject{TenantID: tenantID, ID: objectID, Kind: "archive", ObjectKey: stored.Key, ContentType: "application/json", Size: stored.Size, SHA256: stored.SHA256, Status: "archived"}
+	metadata := ManagedObject{OrganizationID: organizationID, ID: objectID, Kind: "archive", ObjectKey: stored.Key, ContentType: "application/json", Size: stored.Size, SHA256: stored.SHA256, Status: "archived"}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO managed_objects (tenant_id,id,kind,object_key,content_type,size_bytes,content_hash,status,archived_at)
+		INSERT INTO managed_objects (organization_id,id,kind,object_key,content_type,size_bytes,content_hash,status,archived_at)
 		VALUES ($1,$2,'archive',$3,'application/json',$4,$5,'archived',now()) RETURNING created_at`,
-		tenantID, objectID, stored.Key, stored.Size, digest).Scan(&metadata.CreatedAt)
+		organizationID, objectID, stored.Key, stored.Size, digest).Scan(&metadata.CreatedAt)
 	if err != nil {
 		return ManagedObject{}, 0, fmt.Errorf("register event archive: %w", err)
 	}
-	tag, err := tx.Exec(ctx, `DELETE FROM run_events WHERE tenant_id=$1 AND id=ANY($2)`, tenantID, ids)
+	tag, err := tx.Exec(ctx, `DELETE FROM run_events WHERE organization_id=$1 AND id=ANY($2)`, organizationID, ids)
 	if err != nil {
 		return ManagedObject{}, 0, fmt.Errorf("delete archived events: %w", err)
 	}
 	if _, err = insertAuditTx(ctx, tx, AuditRecord{
-		TenantID: tenantID, ActorID: actorID, Action: "retention.events.archive",
+		OrganizationID: organizationID, ActorID: actorID, Action: "retention.events.archive",
 		ResourceType: "managed_object", ResourceID: objectID, Outcome: AuditAllowed,
 	}); err != nil {
 		return ManagedObject{}, 0, err
@@ -306,29 +306,29 @@ func (r *Retention) ArchiveEvents(ctx context.Context, tenantID, actorID string,
 	return metadata, int(tag.RowsAffected()), nil
 }
 
-// ExportTenant creates a consistent JSON export without ciphertext, tokens, or secret values.
-func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, expiresAt time.Time) (TenantExport, error) {
-	if tenantID == "" || actorID == "" || expiresAt.IsZero() {
-		return TenantExport{}, ErrInvalidArgument
+// ExportOrganization creates a consistent JSON export without ciphertext, tokens, or secret values.
+func (r *Retention) ExportOrganization(ctx context.Context, organizationID, actorID string, expiresAt time.Time) (OrganizationExport, error) {
+	if organizationID == "" || actorID == "" || expiresAt.IsZero() {
+		return OrganizationExport{}, ErrInvalidArgument
 	}
-	exportID, stableOperation := MutationResourceID(ctx, "export", "tenant-export")
+	exportID, stableOperation := MutationResourceID(ctx, "export", "organization-export")
 	if stableOperation {
-		existing, found, err := r.findTenantExport(ctx, tenantID, exportID)
+		existing, found, err := r.findOrganizationExport(ctx, organizationID, exportID)
 		if err != nil {
-			return TenantExport{}, err
+			return OrganizationExport{}, err
 		}
 		if found {
 			replayTx, beginErr := r.pool.BeginTx(ctx, pgx.TxOptions{})
 			if beginErr != nil {
-				return TenantExport{}, fmt.Errorf("begin tenant export replay: %w", beginErr)
+				return OrganizationExport{}, fmt.Errorf("begin organization export replay: %w", beginErr)
 			}
 			defer func() { _ = replayTx.Rollback(context.WithoutCancel(ctx)) }()
 			audited, auditErr := recordAllowedMutationTx(ctx, replayTx, exportID)
 			if auditErr != nil {
-				return TenantExport{}, fmt.Errorf("audit tenant export replay: %w", auditErr)
+				return OrganizationExport{}, fmt.Errorf("audit organization export replay: %w", auditErr)
 			}
 			if commitErr := replayTx.Commit(ctx); commitErr != nil {
-				return TenantExport{}, fmt.Errorf("commit tenant export replay: %w", commitErr)
+				return OrganizationExport{}, fmt.Errorf("commit organization export replay: %w", commitErr)
 			}
 			if audited {
 				markMutationCommitted(ctx)
@@ -339,20 +339,20 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 	if !stableOperation {
 		generatedID, generateErr := newID("export")
 		if generateErr != nil {
-			return TenantExport{}, generateErr
+			return OrganizationExport{}, generateErr
 		}
 		exportID = generatedID
 	}
-	objectID, err := mutationResourceIDOrRandom(ctx, "obj", "tenant-export-object")
+	objectID, err := mutationResourceIDOrRandom(ctx, "obj", "organization-export-object")
 	if err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	upload, err := beginObjectUpload(ctx, r.pool, r.objects, objectUploadSpec{
-		tenantID: tenantID, id: objectID, kind: "tenant_export", key: exportID,
+		organizationID: organizationID, id: objectID, kind: "organization_export", key: exportID,
 		contentType: "application/json", retentionUntil: &expiresAt,
 	})
 	if err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	committed := false
 	defer func() {
@@ -364,75 +364,75 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 	}()
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return TenantExport{}, fmt.Errorf("begin tenant export snapshot: %w", err)
+		return OrganizationExport{}, fmt.Errorf("begin organization export snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var exportedAt time.Time
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&exportedAt); err != nil {
-		return TenantExport{}, fmt.Errorf("read database clock for tenant export: %w", err)
+		return OrganizationExport{}, fmt.Errorf("read database clock for organization export: %w", err)
 	}
-	exportFile, err := os.CreateTemp("", "supaflow-tenant-export-*.json")
+	exportFile, err := os.CreateTemp("", "supaflow-organization-export-*.json")
 	if err != nil {
-		return TenantExport{}, fmt.Errorf("create bounded tenant export spool: %w", err)
+		return OrganizationExport{}, fmt.Errorf("create bounded organization export spool: %w", err)
 	}
 	exportPath := exportFile.Name()
 	defer func() {
 		_ = exportFile.Close()
 		_ = os.Remove(exportPath)
 	}()
-	if err = streamTenantExport(ctx, tx, exportFile, r.maxExport, tenantID, exportedAt); err != nil {
-		return TenantExport{}, err
+	if err = streamOrganizationExport(ctx, tx, exportFile, r.maxExport, organizationID, exportedAt); err != nil {
+		return OrganizationExport{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return TenantExport{}, fmt.Errorf("commit tenant export snapshot: %w", err)
+		return OrganizationExport{}, fmt.Errorf("commit organization export snapshot: %w", err)
 	}
 	if _, err = exportFile.Seek(0, 0); err != nil {
-		return TenantExport{}, fmt.Errorf("rewind tenant export spool: %w", err)
+		return OrganizationExport{}, fmt.Errorf("rewind organization export spool: %w", err)
 	}
 	stored, err := upload.put(ctx, exportFile, r.maxExport)
 	if err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	digest, _ := hex.DecodeString(stored.SHA256)
 	writeTx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	defer func() { _ = writeTx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = upload.publishTx(ctx, writeTx); err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	if _, err = writeTx.Exec(ctx, `
-		INSERT INTO managed_objects (tenant_id,id,kind,object_key,content_type,size_bytes,content_hash,retention_until)
-		VALUES ($1,$2,'tenant_export',$3,'application/json',$4,$5,$6)`, tenantID, objectID,
+		INSERT INTO managed_objects (organization_id,id,kind,object_key,content_type,size_bytes,content_hash,retention_until)
+		VALUES ($1,$2,'organization_export',$3,'application/json',$4,$5,$6)`, organizationID, objectID,
 		stored.Key, stored.Size, digest, expiresAt); err != nil {
-		return TenantExport{}, fmt.Errorf("register tenant export object: %w", err)
+		return OrganizationExport{}, fmt.Errorf("register organization export object: %w", err)
 	}
-	result := TenantExport{ID: exportID, TenantID: tenantID, Status: "ready", ObjectID: objectID, ExpiresAt: &expiresAt}
+	result := OrganizationExport{ID: exportID, OrganizationID: organizationID, Status: "ready", ObjectID: objectID, ExpiresAt: &expiresAt}
 	err = writeTx.QueryRow(ctx, `
-		INSERT INTO tenant_exports (tenant_id,id,requested_by,status,object_id,expires_at,completed_at)
-		VALUES ($1,$2,$3,'ready',$4,$5,now()) RETURNING created_at,completed_at`, tenantID,
+		INSERT INTO organization_exports (organization_id,id,requested_by,status,object_id,expires_at,completed_at)
+		VALUES ($1,$2,$3,'ready',$4,$5,now()) RETURNING created_at,completed_at`, organizationID,
 		exportID, actorID, objectID, expiresAt).Scan(&result.CreatedAt, &result.CompletedAt)
 	if err != nil {
-		return TenantExport{}, fmt.Errorf("record tenant export: %w", err)
+		return OrganizationExport{}, fmt.Errorf("record organization export: %w", err)
 	}
 	audited, err := recordAllowedMutationTx(ctx, writeTx, exportID)
 	if err != nil {
-		return TenantExport{}, fmt.Errorf("audit tenant export mutation: %w", err)
+		return OrganizationExport{}, fmt.Errorf("audit organization export mutation: %w", err)
 	}
 	if !audited {
 		if _, err = insertAuditTx(ctx, writeTx, AuditRecord{
-			TenantID: tenantID, ActorID: actorID, Action: "tenant.export",
-			ResourceType: "tenant_export", ResourceID: exportID, Outcome: AuditAllowed,
+			OrganizationID: organizationID, ActorID: actorID, Action: "organization.export",
+			ResourceType: "organization_export", ResourceID: exportID, Outcome: AuditAllowed,
 		}); err != nil {
-			return TenantExport{}, err
+			return OrganizationExport{}, err
 		}
 	}
 	if err = upload.completeTx(ctx, writeTx); err != nil {
-		return TenantExport{}, err
+		return OrganizationExport{}, err
 	}
 	if err = writeTx.Commit(ctx); err != nil {
-		return TenantExport{}, fmt.Errorf("commit tenant export: %w", err)
+		return OrganizationExport{}, fmt.Errorf("commit organization export: %w", err)
 	}
 	if audited {
 		markMutationCommitted(ctx)
@@ -441,18 +441,18 @@ func (r *Retention) ExportTenant(ctx context.Context, tenantID, actorID string, 
 	return result, nil
 }
 
-func (r *Retention) findTenantExport(ctx context.Context, tenantID, exportID string) (TenantExport, bool, error) {
-	var result TenantExport
+func (r *Retention) findOrganizationExport(ctx context.Context, organizationID, exportID string) (OrganizationExport, bool, error) {
+	var result OrganizationExport
 	err := r.pool.QueryRow(ctx, `
-		SELECT id,tenant_id,status,object_id,created_at,completed_at,expires_at
-		FROM tenant_exports WHERE tenant_id=$1 AND id=$2`, tenantID, exportID).Scan(
-		&result.ID, &result.TenantID, &result.Status, &result.ObjectID,
+		SELECT id,organization_id,status,object_id,created_at,completed_at,expires_at
+		FROM organization_exports WHERE organization_id=$1 AND id=$2`, organizationID, exportID).Scan(
+		&result.ID, &result.OrganizationID, &result.Status, &result.ObjectID,
 		&result.CreatedAt, &result.CompletedAt, &result.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return TenantExport{}, false, nil
+		return OrganizationExport{}, false, nil
 	}
 	if err != nil {
-		return TenantExport{}, false, fmt.Errorf("recover tenant export: %w", err)
+		return OrganizationExport{}, false, fmt.Errorf("recover organization export: %w", err)
 	}
 	return result, true, nil
 }

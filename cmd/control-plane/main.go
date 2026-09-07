@@ -60,9 +60,9 @@ func run() error {
 	if err := pool.Ping(ctx); err != nil {
 		return fmt.Errorf("database readiness check failed: %w", err)
 	}
-	auth, identityRoutes, err := configureIdentity()
+	auth, err := configureAuthentication()
 	if err != nil {
-		return fmt.Errorf("configure identity: %w", err)
+		return fmt.Errorf("configure authentication: %w", err)
 	}
 
 	registry := workflow.BuiltinRegistry()
@@ -135,7 +135,7 @@ func run() error {
 	if address == "" {
 		address = "127.0.0.1:8080"
 	}
-	rootHandler := mountHandlers(handler.Routes(), operations.handler, auth, identityRoutes, operations.telemetry)
+	rootHandler := mountHandlers(handler.Routes(), operations.handler, auth, operations.telemetry)
 	server := &http.Server{
 		Addr: address, Handler: rootHandler, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,

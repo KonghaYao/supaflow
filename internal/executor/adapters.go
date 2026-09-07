@@ -11,13 +11,13 @@ import (
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
-// AttemptScope is the minimum identity adapters need for tenant and fencing checks.
+// AttemptScope is the minimum identity adapters need for organization and fencing checks.
 type AttemptScope struct {
-	TenantID     workflowruntime.TenantID
-	RunID        string
-	AttemptID    string
-	ExecutionID  string
-	FencingToken uint64
+	OrganizationID workflowruntime.OrganizationID
+	RunID          string
+	AttemptID      string
+	ExecutionID    string
+	FencingToken   uint64
 }
 
 func attemptScope(request workflowruntime.ExecutionRequest) AttemptScope {
@@ -25,10 +25,10 @@ func attemptScope(request workflowruntime.ExecutionRequest) AttemptScope {
 	if executionID == "" {
 		executionID = request.AttemptID
 	}
-	return AttemptScope{TenantID: request.TenantID, RunID: request.RunID, AttemptID: request.AttemptID, ExecutionID: executionID, FencingToken: request.FencingToken}
+	return AttemptScope{OrganizationID: request.OrganizationID, RunID: request.RunID, AttemptID: request.AttemptID, ExecutionID: executionID, FencingToken: request.FencingToken}
 }
 
-// ModelRegistry resolves and invokes tenant-configured Eino chat models.
+// ModelRegistry resolves and invokes organization-configured Eino chat models.
 // Implementations own provider credentials; plan config only contains a name.
 type ModelRegistry interface {
 	Generate(context.Context, AttemptScope, string, string, json.RawMessage) (json.RawMessage, error)
@@ -68,7 +68,7 @@ type SubworkflowOutput struct {
 
 // SubworkflowRequest preserves parent-child lineage across retry and takeover.
 type SubworkflowRequest struct {
-	TenantID        workflowruntime.TenantID
+	OrganizationID  workflowruntime.OrganizationID
 	ParentRun       string
 	ParentNode      string
 	ParentAttempt   string
@@ -85,17 +85,17 @@ type IsolationRunner interface {
 
 // IsolationRequest binds isolated work to the current fenced attempt.
 type IsolationRequest struct {
-	TenantID     workflowruntime.TenantID
-	RunID        string
-	NodeID       string
-	AttemptID    string
-	FencingToken uint64
-	Language     string
-	Source       string
-	Args         []string
-	EnvAllowlist []string
-	Network      bool
-	Input        json.RawMessage
+	OrganizationID workflowruntime.OrganizationID
+	RunID          string
+	NodeID         string
+	AttemptID      string
+	FencingToken   uint64
+	Language       string
+	Source         string
+	Args           []string
+	EnvAllowlist   []string
+	Network        bool
+	Input          json.RawMessage
 }
 
 type namedAdapterConfig struct {
@@ -179,7 +179,7 @@ func executeSubworkflow(ctx context.Context, runner SubworkflowRunner, req workf
 		return SubworkflowOutput{}, unavailableAdapter("subworkflow")
 	}
 	output, err := runner.Run(ctx, SubworkflowRequest{
-		TenantID: req.TenantID, ParentRun: req.RunID, ParentNode: req.NodeID,
+		OrganizationID: req.OrganizationID, ParentRun: req.RunID, ParentNode: req.NodeID,
 		ParentAttempt: req.AttemptID, ParentExecution: attemptScope(req).ExecutionID,
 		PlanID: cfg.PlanID, PlanHash: cfg.PlanHash, Input: cloneJSON(req.Input),
 	})
@@ -205,7 +205,7 @@ func executeIsolated(ctx context.Context, runner IsolationRunner, req workflowru
 	}
 	return invokeAdapter(func() (json.RawMessage, error) {
 		return runner.Run(ctx, IsolationRequest{
-			TenantID: req.TenantID, RunID: req.RunID, NodeID: req.NodeID,
+			OrganizationID: req.OrganizationID, RunID: req.RunID, NodeID: req.NodeID,
 			AttemptID: req.AttemptID, FencingToken: req.FencingToken,
 			Language: strings.TrimPrefix(node.Executor.Kind, "isolated."), Source: cfg.Source,
 			Args: append([]string(nil), cfg.Args...), EnvAllowlist: append([]string(nil), cfg.Env...),

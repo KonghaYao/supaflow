@@ -8,7 +8,7 @@ The following artifacts are the compatibility boundary for Phase 0–4. Changes 
 - Run state: `PENDING`, `RUNNING`, `SUSPENDED`, `CANCELLING`, and terminal `SUCCESS`, `FAILED`, `ERROR`, `CANCELLED`.
 - Node/attempt state: logical node projection is distinct from retry/takeover attempts; the attempt fencing token is monotonic and mandatory on commits.
 - Event protocol: cursor is positive, monotonic per run, replayed strictly after `afterCursor`/`Last-Event-ID`, and committed with the state it describes.
-- Tenant model: tenant comes from an authenticated principal; all durable workflow, version, plan, run, event, output, credential, trigger and audit records carry the tenant key.
+- Organization model: organization comes from an authenticated principal; all durable workflow, version, plan, run, event, output, credential, trigger and audit records carry the organization key.
 - Stable transport: `contracts/openapi/openapi.yaml`; error codes are stable and never contain stack traces, SQL, internal addresses or secrets.
 - Shadow execution: `/shadow-runs` requires the exact reviewed stub binding for every non-pure node; each durable attempt carries its `shadow-v1:` real-or-stub executor selection.
 

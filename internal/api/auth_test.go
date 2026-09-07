@@ -27,7 +27,7 @@ func testAuthenticator(t *testing.T) *Authenticator {
 	return authenticator
 }
 
-// 验证可信 Fenix master key 与兼容非 UUID 的组织 ID 会形成组织 Principal。
+// 验证可信 Fenix master key 与兼容非 UUID 的组织 ID 会形成中立组织 Principal，且不伪造 Supaflow role。
 func TestAuthenticatorInjectsFenixOrganization(t *testing.T) {
 	authenticator := testAuthenticator(t)
 	var received Principal
@@ -37,8 +37,8 @@ func TestAuthenticatorInjectsFenixOrganization(t *testing.T) {
 	}))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, authenticatedRequest("org_xxx"))
-	if response.Code != http.StatusNoContent || received.TenantID != "org_xxx" {
-		t.Fatalf("status=%d tenant=%q", response.Code, received.TenantID)
+	if response.Code != http.StatusNoContent || received.OrganizationID != "org_xxx" || received.ActorID != "fenix" {
+		t.Fatalf("status=%d organization=%q actor=%q", response.Code, received.OrganizationID, received.ActorID)
 	}
 }
 

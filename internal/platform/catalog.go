@@ -14,19 +14,19 @@ import (
 )
 
 var (
-	// ErrPlanNotFound hides whether a plan belongs to another tenant.
+	// ErrPlanNotFound hides whether a plan belongs to another organization.
 	ErrPlanNotFound = errors.New("published execution plan not found")
 	// ErrPublicationConflict reports idempotency-key reuse with different content.
 	ErrPublicationConflict = errors.New("publication idempotency conflict")
-	// ErrTenantVersionLimit rejects publication after a tenant reaches its durable history quota.
-	ErrTenantVersionLimit = errors.New("tenant workflow version limit exceeded")
+	// ErrOrganizationVersionLimit rejects publication after a organization reaches its durable history quota.
+	ErrOrganizationVersionLimit = errors.New("organization workflow version limit exceeded")
 	// ErrWorkflowVersionLimit rejects publication after one workflow reaches its history quota.
 	ErrWorkflowVersionLimit = errors.New("workflow version limit exceeded")
 )
 
 const (
-	// MaxVersionsPerTenant bounds immutable publication history owned by one tenant.
-	MaxVersionsPerTenant = 10000
+	// MaxVersionsPerOrganization bounds immutable publication history owned by one organization.
+	MaxVersionsPerOrganization = 10000
 	// MaxVersionsPerWorkflow bounds immutable publication history for one workflow.
 	MaxVersionsPerWorkflow = 1000
 )
@@ -63,59 +63,59 @@ type publicationRecord struct {
 // MemoryCatalog is a concurrency-safe executable specification for local runs
 // and protocol tests. Production deployments use a PostgreSQL catalog adapter.
 type MemoryCatalog struct {
-	mu           sync.RWMutex
-	registry     *workflow.Registry
-	policy       workflow.CompilePolicy
-	plans        map[string]PublishedPlan
-	versions     map[string]uint64
-	tenantCounts map[string]uint64
-	publications map[string]publicationRecord
-	now          func() time.Time
+	mu                 sync.RWMutex
+	registry           *workflow.Registry
+	policy             workflow.CompilePolicy
+	plans              map[string]PublishedPlan
+	versions           map[string]uint64
+	organizationCounts map[string]uint64
+	publications       map[string]publicationRecord
+	now                func() time.Time
 }
 
-// NewMemoryCatalog creates an isolated tenant-scoped catalog.
+// NewMemoryCatalog creates an isolated organization-scoped catalog.
 func NewMemoryCatalog(registry *workflow.Registry, policy workflow.CompilePolicy) *MemoryCatalog {
 	return &MemoryCatalog{
 		registry: registry, policy: policy, plans: make(map[string]PublishedPlan),
-		versions: make(map[string]uint64), tenantCounts: make(map[string]uint64), publications: make(map[string]publicationRecord),
+		versions: make(map[string]uint64), organizationCounts: make(map[string]uint64), publications: make(map[string]publicationRecord),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
 
 // Compile validates a definition without mutating publication state.
-func (c *MemoryCatalog) Compile(_ context.Context, tenantID string, definition workflow.WorkflowDefinition) (*workflow.ExecutionPlan, error) {
-	if tenantID == "" {
-		return nil, errors.New("tenant is required")
+func (c *MemoryCatalog) Compile(_ context.Context, organizationID string, definition workflow.WorkflowDefinition) (*workflow.ExecutionPlan, error) {
+	if organizationID == "" {
+		return nil, errors.New("organization is required")
 	}
 	return workflow.Compile(definition, c.registry, c.policy)
 }
 
-// Publish atomically assigns a workflow-local version and enforces tenant-scoped idempotency.
-func (c *MemoryCatalog) Publish(ctx context.Context, tenantID, workflowID string, definition workflow.WorkflowDefinition, idempotencyKey string) (PublishedPlan, bool, error) {
-	if tenantID == "" || workflowID == "" || idempotencyKey == "" || definition.ID != workflowID {
-		return PublishedPlan{}, false, errors.New("tenant, matching workflow id, and idempotency key are required")
+// Publish atomically assigns a workflow-local version and enforces organization-scoped idempotency.
+func (c *MemoryCatalog) Publish(ctx context.Context, organizationID, workflowID string, definition workflow.WorkflowDefinition, idempotencyKey string) (PublishedPlan, bool, error) {
+	if organizationID == "" || workflowID == "" || idempotencyKey == "" || definition.ID != workflowID {
+		return PublishedPlan{}, false, errors.New("organization, matching workflow id, and idempotency key are required")
 	}
-	plan, err := c.Compile(ctx, tenantID, definition)
+	plan, err := c.Compile(ctx, organizationID, definition)
 	if err != nil {
 		return PublishedPlan{}, false, err
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	idempotencyScope := tenantID + "\x00" + idempotencyKey
+	idempotencyScope := organizationID + "\x00" + idempotencyKey
 	if recorded, ok := c.publications[idempotencyScope]; ok {
 		if recorded.hash != plan.Hash() {
 			return PublishedPlan{}, false, ErrPublicationConflict
 		}
-		return c.plans[tenantID+"\x00"+recorded.planID], false, nil
+		return c.plans[organizationID+"\x00"+recorded.planID], false, nil
 	}
 	planID, err := randomID("plan")
 	if err != nil {
 		return PublishedPlan{}, false, err
 	}
-	workflowScope := tenantID + "\x00" + workflowID
-	if c.tenantCounts[tenantID] >= MaxVersionsPerTenant {
-		return PublishedPlan{}, false, ErrTenantVersionLimit
+	workflowScope := organizationID + "\x00" + workflowID
+	if c.organizationCounts[organizationID] >= MaxVersionsPerOrganization {
+		return PublishedPlan{}, false, ErrOrganizationVersionLimit
 	}
 	if c.versions[workflowScope] >= MaxVersionsPerWorkflow {
 		return PublishedPlan{}, false, ErrWorkflowVersionLimit
@@ -126,16 +126,16 @@ func (c *MemoryCatalog) Publish(ctx context.Context, tenantID, workflowID string
 		Plan: plan, PublishedAt: c.now(),
 	}
 	c.versions[workflowScope] = version
-	c.tenantCounts[tenantID]++
-	c.plans[tenantID+"\x00"+planID] = published
+	c.organizationCounts[organizationID]++
+	c.plans[organizationID+"\x00"+planID] = published
 	c.publications[idempotencyScope] = publicationRecord{planID: planID, hash: plan.Hash()}
 	return published, true, nil
 }
 
-// Resolve verifies both tenant ownership and the caller-provided immutable hash.
-func (c *MemoryCatalog) Resolve(_ context.Context, tenantID, planID, hash string) (PublishedPlan, error) {
+// Resolve verifies both organization ownership and the caller-provided immutable hash.
+func (c *MemoryCatalog) Resolve(_ context.Context, organizationID, planID, hash string) (PublishedPlan, error) {
 	c.mu.RLock()
-	published, ok := c.plans[tenantID+"\x00"+planID]
+	published, ok := c.plans[organizationID+"\x00"+planID]
 	c.mu.RUnlock()
 	if !ok || published.Hash != hash {
 		return PublishedPlan{}, ErrPlanNotFound

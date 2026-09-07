@@ -12,11 +12,11 @@ import (
 
 const maximumPreviewAdapterDuration = 5 * time.Second
 
-// PreviewAdapterRequest is the bounded, tenant-scoped command accepted by a
+// PreviewAdapterRequest is the bounded, organization-scoped command accepted by a
 // controlled validation or sandbox adapter. It must never route to production
 // credentials or live external destinations.
 type PreviewAdapterRequest struct {
-	TenantID       string
+	OrganizationID string
 	Node           workflow.PlanNode
 	Input          json.RawMessage
 	OutputLimit    int64
@@ -65,11 +65,11 @@ type NodeTestResult struct {
 }
 
 // DryRun compiles and simulates all nodes without invoking external executors.
-func (s *Service) DryRun(ctx context.Context, tenantID, workflowID string, sampleInput json.RawMessage) (DryRunResult, error) {
+func (s *Service) DryRun(ctx context.Context, organizationID, workflowID string, sampleInput json.RawMessage) (DryRunResult, error) {
 	if !json.Valid(sampleInput) {
 		return DryRunResult{}, errors.New("sample input must be valid JSON")
 	}
-	plan, err := s.CompileDraft(ctx, tenantID, workflowID)
+	plan, err := s.CompileDraft(ctx, organizationID, workflowID)
 	if err != nil {
 		return DryRunResult{}, err
 	}
@@ -80,7 +80,7 @@ func (s *Service) DryRun(ctx context.Context, tenantID, workflowID string, sampl
 		if !found {
 			return DryRunResult{}, errors.New("compiled plan topology is incomplete")
 		}
-		step, err := s.previewNode(ctx, tenantID, node, current)
+		step, err := s.previewNode(ctx, organizationID, node, current)
 		if err != nil {
 			return DryRunResult{}, err
 		}
@@ -94,11 +94,11 @@ func (s *Service) DryRun(ctx context.Context, tenantID, workflowID string, sampl
 }
 
 // TestNode compiles and simulates a selected node without external side effects.
-func (s *Service) TestNode(ctx context.Context, tenantID, workflowID, nodeID string, sampleInput json.RawMessage) (NodeTestResult, error) {
+func (s *Service) TestNode(ctx context.Context, organizationID, workflowID, nodeID string, sampleInput json.RawMessage) (NodeTestResult, error) {
 	if nodeID == "" || !json.Valid(sampleInput) {
 		return NodeTestResult{}, errors.New("node and valid sample input are required")
 	}
-	plan, err := s.CompileDraft(ctx, tenantID, workflowID)
+	plan, err := s.CompileDraft(ctx, organizationID, workflowID)
 	if err != nil {
 		return NodeTestResult{}, err
 	}
@@ -106,14 +106,14 @@ func (s *Service) TestNode(ctx context.Context, tenantID, workflowID, nodeID str
 	if !found {
 		return NodeTestResult{}, ErrNotFound
 	}
-	preview, err := s.previewNode(ctx, tenantID, node, sampleInput)
+	preview, err := s.previewNode(ctx, organizationID, node, sampleInput)
 	if err != nil {
 		return NodeTestResult{}, err
 	}
 	return NodeTestResult{NodeID: node.ID, NodeType: node.Type, Executor: node.Executor, Status: preview.Status, SelectedPort: preview.SelectedPort, Output: preview.Output}, nil
 }
 
-func (s *Service) previewNode(ctx context.Context, tenantID string, node workflow.PlanNode, input json.RawMessage) (PreviewStep, error) {
+func (s *Service) previewNode(ctx context.Context, organizationID string, node workflow.PlanNode, input json.RawMessage) (PreviewStep, error) {
 	step := PreviewStep{NodeID: node.ID, Type: node.Type}
 	switch node.Type {
 	case workflow.NodeTypeCondition, workflow.NodeTypeSwitch, workflow.NodeTypeTransform, workflow.NodeTypeLoop:
@@ -141,7 +141,7 @@ func (s *Service) previewNode(ctx context.Context, tenantID string, node workflo
 		bounded, cancel := context.WithTimeout(ctx, limit)
 		defer cancel()
 		output, err := adapter.PreviewNode(bounded, PreviewAdapterRequest{
-			TenantID: tenantID, Node: node, Input: cloneJSON(input), OutputLimit: node.OutputLimit, ExecutionLimit: limit,
+			OrganizationID: organizationID, Node: node, Input: cloneJSON(input), OutputLimit: node.OutputLimit, ExecutionLimit: limit,
 		})
 		if err != nil {
 			return PreviewStep{}, fmt.Errorf("preview adapter for node %s: %w", node.ID, err)

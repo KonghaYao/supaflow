@@ -12,8 +12,8 @@ import (
 // ArchiveNodeOutputs marks expired runtime output metadata archived and writes
 // durable audit evidence in the same transaction. Payload bytes remain
 // available during the archive grace period.
-func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID string, limit int) (int, error) {
-	if tenantID == "" || actorID == "" || limit <= 0 || limit > 1000 {
+func (r *Retention) ArchiveNodeOutputs(ctx context.Context, organizationID, actorID string, limit int) (int, error) {
+	if organizationID == "" || actorID == "" || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -27,12 +27,12 @@ func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID st
 	}
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
-			SELECT tenant_id,id FROM node_outputs
-			WHERE tenant_id=$1 AND retention_status='active' AND retention_until <= $2
+			SELECT organization_id,id FROM node_outputs
+			WHERE organization_id=$1 AND retention_status='active' AND retention_until <= $2
 			ORDER BY retention_until,id FOR UPDATE SKIP LOCKED LIMIT $3
 		)
 		UPDATE node_outputs output SET retention_status='archived',archived_at=$2
-		FROM expired WHERE output.tenant_id=expired.tenant_id AND output.id=expired.id`, tenantID, now, limit)
+		FROM expired WHERE output.organization_id=expired.organization_id AND output.id=expired.id`, organizationID, now, limit)
 	if err != nil {
 		return 0, fmt.Errorf("archive node outputs: %w", err)
 	}
@@ -40,7 +40,7 @@ func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID st
 	if count > 0 {
 		metadata, _ := json.Marshal(map[string]any{"count": count, "retentionAt": now})
 		if _, err = insertAuditTx(ctx, tx, AuditRecord{
-			TenantID: tenantID, ActorID: actorID, Action: "retention.outputs.archive",
+			OrganizationID: organizationID, ActorID: actorID, Action: "retention.outputs.archive",
 			ResourceType: "node_output", ResourceID: "batch", Outcome: AuditAllowed, Metadata: metadata,
 		}); err != nil {
 			return 0, err
@@ -54,8 +54,8 @@ func (r *Retention) ArchiveNodeOutputs(ctx context.Context, tenantID, actorID st
 
 // DeleteArchivedNodeOutputs removes inline bytes and tombstones metadata. An
 // external output is tombstoned only after its managed object is deleted.
-func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, actorID string, grace time.Duration, limit int) (int, error) {
-	if tenantID == "" || actorID == "" || grace < 0 || limit <= 0 || limit > 1000 {
+func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, organizationID, actorID string, grace time.Duration, limit int) (int, error) {
+	if organizationID == "" || actorID == "" || grace < 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -65,16 +65,16 @@ func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, act
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	tag, err := tx.Exec(ctx, `
 		WITH expired AS (
-			SELECT output.tenant_id,output.id FROM node_outputs output
+			SELECT output.organization_id,output.id FROM node_outputs output
 			LEFT JOIN managed_objects object
-			  ON object.tenant_id=output.tenant_id AND object.id=output.object_ref
-			WHERE output.tenant_id=$1 AND output.retention_status='archived'
+			  ON object.organization_id=output.organization_id AND object.id=output.object_ref
+			WHERE output.organization_id=$1 AND output.retention_status='archived'
 			  AND output.archived_at <= clock_timestamp() - make_interval(secs => $2)
 			  AND (output.inline_value IS NOT NULL OR object.status='deleted')
 			ORDER BY output.archived_at,output.id FOR UPDATE OF output SKIP LOCKED LIMIT $3
 		)
 		UPDATE node_outputs output SET retention_status='deleted',inline_value=NULL,object_ref=NULL,deleted_at=now()
-		FROM expired WHERE output.tenant_id=expired.tenant_id AND output.id=expired.id`, tenantID, grace.Seconds(), limit)
+		FROM expired WHERE output.organization_id=expired.organization_id AND output.id=expired.id`, organizationID, grace.Seconds(), limit)
 	if err != nil {
 		return 0, fmt.Errorf("tombstone node outputs: %w", err)
 	}
@@ -82,7 +82,7 @@ func (r *Retention) DeleteArchivedNodeOutputs(ctx context.Context, tenantID, act
 	if count > 0 {
 		metadata, _ := json.Marshal(map[string]any{"count": count, "grace": grace.String()})
 		if _, err = insertAuditTx(ctx, tx, AuditRecord{
-			TenantID: tenantID, ActorID: actorID, Action: "retention.outputs.delete",
+			OrganizationID: organizationID, ActorID: actorID, Action: "retention.outputs.delete",
 			ResourceType: "node_output", ResourceID: "batch", Outcome: AuditAllowed, Metadata: metadata,
 		}); err != nil {
 			return 0, err

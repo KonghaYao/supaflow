@@ -73,7 +73,7 @@ func TestValidateDefinitionRejectsStructuralErrors(t *testing.T) {
 	}{
 		{
 			name: "invalid workflow id", code: "invalid_id",
-			mutate: func(definition *WorkflowDefinition) { definition.ID = "../tenant" },
+			mutate: func(definition *WorkflowDefinition) { definition.ID = "../organization" },
 		},
 		{
 			name: "duplicate node", code: "duplicate_node",

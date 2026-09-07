@@ -33,7 +33,7 @@ func TestStartRunAPIPressure(t *testing.T) {
 			for index := range jobs {
 				req := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewReader(payload))
 				req.Header.Set("Authorization", "Bearer "+benchmarkAPIKey)
-				req.Header.Set("X-Fenix-Organization-Id", "benchmark-tenant")
+				req.Header.Set("X-Fenix-Organization-Id", "benchmark-organization")
 				req.Header.Set("Idempotency-Key", fmt.Sprintf("pressure-%08d", index))
 				response := httptest.NewRecorder()
 				handler.ServeHTTP(response, req)

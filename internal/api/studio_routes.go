@@ -14,21 +14,21 @@ func (h *Handler) registerStudioRoutes(mux *http.ServeMux) {
 	if h.definitions == nil || h.nodeTypeCatalog == nil {
 		return
 	}
-	mux.Handle("POST /v1/workflows", h.require(RoleEditor, http.HandlerFunc(h.createWorkflow)))
-	mux.Handle("GET /v1/workflows", h.require(RoleViewer, http.HandlerFunc(h.listWorkflows)))
-	mux.Handle("GET /v1/workflows/{workflowID}", h.require(RoleViewer, http.HandlerFunc(h.getWorkflow)))
-	mux.Handle("PUT /v1/workflows/{workflowID}", h.require(RoleEditor, http.HandlerFunc(h.updateWorkflow)))
-	mux.Handle("DELETE /v1/workflows/{workflowID}", h.require(RoleEditor, http.HandlerFunc(h.deleteWorkflow)))
-	mux.Handle("POST /v1/workflows/{workflowID}/compile", h.require(RoleEditor, http.HandlerFunc(h.compileDraft)))
-	mux.Handle("POST /v1/workflows/{workflowID}/publish-draft", h.require(RolePublisher, http.HandlerFunc(h.publishDraft)))
-	mux.Handle("GET /v1/workflows/{workflowID}/versions", h.require(RoleViewer, http.HandlerFunc(h.listVersions)))
-	mux.Handle("GET /v1/workflows/{workflowID}/versions/latest", h.require(RoleViewer, http.HandlerFunc(h.latestVersion)))
-	mux.Handle("GET /v1/workflows/{workflowID}/versions/diff", h.require(RoleViewer, http.HandlerFunc(h.diffVersions)))
-	mux.Handle("GET /v1/workflows/{workflowID}/versions/{version}", h.require(RoleViewer, http.HandlerFunc(h.getVersion)))
-	mux.Handle("POST /v1/workflows/{workflowID}/versions/{version}/republish", h.require(RolePublisher, http.HandlerFunc(h.republishVersion)))
-	mux.Handle("POST /v1/workflows/{workflowID}/dry-run", h.require(RoleEditor, http.HandlerFunc(h.dryRun)))
-	mux.Handle("POST /v1/workflows/{workflowID}/node-test", h.require(RoleEditor, http.HandlerFunc(h.nodeTest)))
-	mux.Handle("GET /v1/node-types", h.require(RoleViewer, http.HandlerFunc(h.nodeTypes)))
+	mux.Handle("POST /v1/workflows", h.require(http.HandlerFunc(h.createWorkflow)))
+	mux.Handle("GET /v1/workflows", h.require(http.HandlerFunc(h.listWorkflows)))
+	mux.Handle("GET /v1/workflows/{workflowID}", h.require(http.HandlerFunc(h.getWorkflow)))
+	mux.Handle("PUT /v1/workflows/{workflowID}", h.require(http.HandlerFunc(h.updateWorkflow)))
+	mux.Handle("DELETE /v1/workflows/{workflowID}", h.require(http.HandlerFunc(h.deleteWorkflow)))
+	mux.Handle("POST /v1/workflows/{workflowID}/compile", h.require(http.HandlerFunc(h.compileDraft)))
+	mux.Handle("POST /v1/workflows/{workflowID}/publish-draft", h.require(http.HandlerFunc(h.publishDraft)))
+	mux.Handle("GET /v1/workflows/{workflowID}/versions", h.require(http.HandlerFunc(h.listVersions)))
+	mux.Handle("GET /v1/workflows/{workflowID}/versions/latest", h.require(http.HandlerFunc(h.latestVersion)))
+	mux.Handle("GET /v1/workflows/{workflowID}/versions/diff", h.require(http.HandlerFunc(h.diffVersions)))
+	mux.Handle("GET /v1/workflows/{workflowID}/versions/{version}", h.require(http.HandlerFunc(h.getVersion)))
+	mux.Handle("POST /v1/workflows/{workflowID}/versions/{version}/republish", h.require(http.HandlerFunc(h.republishVersion)))
+	mux.Handle("POST /v1/workflows/{workflowID}/dry-run", h.require(http.HandlerFunc(h.dryRun)))
+	mux.Handle("POST /v1/workflows/{workflowID}/node-test", h.require(http.HandlerFunc(h.nodeTest)))
+	mux.Handle("GET /v1/node-types", h.require(http.HandlerFunc(h.nodeTypes)))
 }
 
 func (h *Handler) createWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +44,7 @@ func (h *Handler) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	result, err := h.definitions.CreateDraft(r.Context(), principal.TenantID, definition.CreateDraftCommand{
+	result, err := h.definitions.CreateDraft(r.Context(), principal.OrganizationID, definition.CreateDraftCommand{
 		WorkflowID: body.WorkflowID, Document: body.Document, ActorID: principal.ActorID, IdempotencyKey: key,
 	})
 	if err != nil {
@@ -65,7 +65,7 @@ func (h *Handler) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_pagination", "cursor is invalid")
 		return
 	}
-	page, err := h.definitions.ListDrafts(r.Context(), principal.TenantID, cursor, limit)
+	page, err := h.definitions.ListDrafts(r.Context(), principal.OrganizationID, cursor, limit)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -80,7 +80,7 @@ func (h *Handler) listWorkflows(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	result, err := h.definitions.GetDraft(r.Context(), principal.TenantID, r.PathValue("workflowID"))
+	result, err := h.definitions.GetDraft(r.Context(), principal.OrganizationID, r.PathValue("workflowID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -101,7 +101,7 @@ func (h *Handler) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	result, err := h.definitions.UpdateDraft(r.Context(), principal.TenantID, definition.UpdateDraftCommand{
+	result, err := h.definitions.UpdateDraft(r.Context(), principal.OrganizationID, definition.UpdateDraftCommand{
 		WorkflowID: r.PathValue("workflowID"), Document: body.Document, ExpectedRevision: body.ExpectedRevision,
 		ActorID: principal.ActorID, IdempotencyKey: key,
 	})
@@ -124,7 +124,7 @@ func (h *Handler) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	err := h.definitions.DeleteDraft(r.Context(), principal.TenantID, definition.DeleteDraftCommand{
+	err := h.definitions.DeleteDraft(r.Context(), principal.OrganizationID, definition.DeleteDraftCommand{
 		WorkflowID: r.PathValue("workflowID"), ExpectedRevision: body.ExpectedRevision,
 		ActorID: principal.ActorID, IdempotencyKey: key,
 	})
@@ -137,7 +137,7 @@ func (h *Handler) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) compileDraft(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	plan, err := h.definitions.CompileDraft(r.Context(), principal.TenantID, r.PathValue("workflowID"))
+	plan, err := h.definitions.CompileDraft(r.Context(), principal.OrganizationID, r.PathValue("workflowID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -151,7 +151,7 @@ func (h *Handler) publishDraft(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	published, created, err := h.definitions.PublishDraft(r.Context(), principal.TenantID, r.PathValue("workflowID"), key)
+	published, created, err := h.definitions.PublishDraft(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), key)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -174,7 +174,7 @@ func (h *Handler) listVersions(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_pagination", "cursor is invalid")
 		return
 	}
-	page, err := h.definitions.ListVersions(r.Context(), principal.TenantID, r.PathValue("workflowID"), cursor, limit)
+	page, err := h.definitions.ListVersions(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), cursor, limit)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -229,7 +229,7 @@ func writeStudioPageHeaders(w http.ResponseWriter, r *http.Request, limit int, c
 
 func (h *Handler) latestVersion(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	item, err := h.definitions.LatestVersion(r.Context(), principal.TenantID, r.PathValue("workflowID"))
+	item, err := h.definitions.LatestVersion(r.Context(), principal.OrganizationID, r.PathValue("workflowID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -243,7 +243,7 @@ func (h *Handler) getVersion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := h.definitions.GetVersion(r.Context(), principal.TenantID, r.PathValue("workflowID"), version)
+	item, err := h.definitions.GetVersion(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), version)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -261,7 +261,7 @@ func (h *Handler) diffVersions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := h.definitions.DiffVersions(r.Context(), principal.TenantID, r.PathValue("workflowID"), from, to)
+	result, err := h.definitions.DiffVersions(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), from, to)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -279,7 +279,7 @@ func (h *Handler) republishVersion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, created, err := h.definitions.Republish(r.Context(), principal.TenantID, r.PathValue("workflowID"), version, key)
+	result, created, err := h.definitions.Republish(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), version, key)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -299,7 +299,7 @@ func (h *Handler) dryRun(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	result, err := h.definitions.DryRun(r.Context(), principal.TenantID, r.PathValue("workflowID"), body.SampleInput)
+	result, err := h.definitions.DryRun(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), body.SampleInput)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -316,7 +316,7 @@ func (h *Handler) nodeTest(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	result, err := h.definitions.TestNode(r.Context(), principal.TenantID, r.PathValue("workflowID"), body.NodeID, body.SampleInput)
+	result, err := h.definitions.TestNode(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), body.NodeID, body.SampleInput)
 	if err != nil {
 		h.writeError(w, r, err)
 		return

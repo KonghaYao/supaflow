@@ -39,7 +39,7 @@ func benchmarkHandler(tb testing.TB) (http.Handler, platform.PublishedPlan) {
 	catalog := platform.NewMemoryCatalog(workflow.BuiltinRegistry(), workflow.CompilePolicy{
 		AllowedCapabilities: workflow.CapabilitySet{Idempotent: true},
 	})
-	published, _, err := catalog.Publish(context.Background(), "benchmark-tenant", "benchmark-flow", benchmarkDefinition(), "benchmark-publish")
+	published, _, err := catalog.Publish(context.Background(), "benchmark-organization", "benchmark-flow", benchmarkDefinition(), "benchmark-publish")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func BenchmarkStartRunHTTP(b *testing.B) {
 			id := sequence.Add(1)
 			req := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewReader(payload))
 			req.Header.Set("Authorization", "Bearer "+benchmarkAPIKey)
-			req.Header.Set("X-Fenix-Organization-Id", "benchmark-tenant")
+			req.Header.Set("X-Fenix-Organization-Id", "benchmark-organization")
 			req.Header.Set("Idempotency-Key", fmt.Sprintf("load-%016d", id))
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)

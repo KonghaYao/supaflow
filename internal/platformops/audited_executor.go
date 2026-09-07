@@ -44,7 +44,7 @@ func (e *AuditedExecutor) ExecuteStream(ctx context.Context, request workflowrun
 
 func (e *AuditedExecutor) execute(ctx context.Context, request workflowruntime.ExecutionRequest, emit func(json.RawMessage) error) (workflowruntime.ExecutionResult, error) {
 	metadata, _ := json.Marshal(map[string]any{"runId": request.RunID, "nodeId": request.NodeID, "executor": request.Executor, "fencingToken": request.FencingToken})
-	base := AuditRecord{TenantID: string(request.TenantID), ActorID: request.AttemptID, Action: "execution.execute", ResourceType: "attempt", ResourceID: request.AttemptID, Metadata: metadata}
+	base := AuditRecord{OrganizationID: string(request.OrganizationID), ActorID: request.AttemptID, Action: "execution.execute", ResourceType: "attempt", ResourceID: request.AttemptID, Metadata: metadata}
 	base.Outcome = AuditAllowed
 	if _, err := e.audit.Record(ctx, base); err != nil {
 		return workflowruntime.ExecutionResult{}, &workflowruntime.ExecutionError{Code: "audit_unavailable", Retryable: true, Cause: err}
@@ -76,7 +76,7 @@ func (e *AuditedExecutor) Cancel(ctx context.Context, request workflowruntime.Ex
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.auditTimeout)
 	defer cancel()
 	_, auditErr := e.audit.Record(auditCtx, AuditRecord{
-		TenantID: string(request.TenantID), ActorID: request.AttemptID, Action: "execution.cancel",
+		OrganizationID: string(request.OrganizationID), ActorID: request.AttemptID, Action: "execution.cancel",
 		ResourceType: "attempt", ResourceID: request.AttemptID, Outcome: outcome,
 	})
 	return errors.Join(err, auditErr)

@@ -18,13 +18,13 @@ import (
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
-const viewerKey = "tenant-a-viewer-api-key-at-least-24-bytes"
+const viewerKey = "organization-a-viewer-api-key-at-least-24-bytes"
 
 // 验证 Studio 列表保留数组响应，同时用 cursor/header 分页且不返回完整草稿文档。
 func TestStudioListsUseBoundedCompatiblePagination(t *testing.T) {
 	handler := studioHandler(t)
 	for index, workflowID := range []string{"alpha", "beta", "gamma"} {
-		response := requestJSON(t, handler, http.MethodPost, "/v1/workflows", tenantAKey, fmt.Sprintf("create-page-%02d", index),
+		response := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey, fmt.Sprintf("create-page-%02d", index),
 			map[string]any{"workflowId": workflowID, "document": flowgramDocument(workflowID)})
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create %s status=%d body=%s", workflowID, response.Code, response.Body.String())
@@ -47,7 +47,7 @@ func TestStudioListsUseBoundedCompatiblePagination(t *testing.T) {
 		t.Fatalf("invalid page status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 	for index := 0; index < 3; index++ {
-		published := requestJSON(t, handler, http.MethodPost, "/v1/workflows/alpha/publish-draft", tenantAKey, fmt.Sprintf("publish-page-%02d", index), nil)
+		published := requestJSON(t, handler, http.MethodPost, "/v1/workflows/alpha/publish-draft", organizationAKey, fmt.Sprintf("publish-page-%02d", index), nil)
 		if published.Code != http.StatusCreated {
 			t.Fatalf("publish status=%d body=%s", published.Code, published.Body.String())
 		}
@@ -65,7 +65,7 @@ func TestStudioListsUseBoundedCompatiblePagination(t *testing.T) {
 
 // 验证不可重试的 Studio 持久资源硬配额统一返回稳定 429 problem code。
 func TestStudioResourceLimitsReturnTooManyRequests(t *testing.T) {
-	for _, limitErr := range []error{definition.ErrTenantDraftLimit, platform.ErrTenantVersionLimit, platform.ErrWorkflowVersionLimit} {
+	for _, limitErr := range []error{definition.ErrOrganizationDraftLimit, platform.ErrOrganizationVersionLimit, platform.ErrWorkflowVersionLimit} {
 		request := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
 		response := httptest.NewRecorder()
 		new(Handler).writeError(response, request, limitErr)
@@ -77,7 +77,7 @@ func TestStudioResourceLimitsReturnTooManyRequests(t *testing.T) {
 
 func studioHandler(t *testing.T) http.Handler {
 	t.Helper()
-	auth, err := NewMasterKeyAuthenticator(tenantAKey)
+	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,8 +114,8 @@ func flowgramDocument(id string) json.RawMessage {
 func TestStudioDraftLifecycle(t *testing.T) {
 	handler := studioHandler(t)
 	body := map[string]any{"workflowId": "flow", "document": flowgramDocument("flow")}
-	created := requestJSON(t, handler, http.MethodPost, "/v1/workflows", tenantAKey, "draft-create-0001", body)
-	replayed := requestJSON(t, handler, http.MethodPost, "/v1/workflows", tenantAKey, "draft-create-0001", body)
+	created := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey, "draft-create-0001", body)
+	replayed := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey, "draft-create-0001", body)
 	if created.Code != http.StatusCreated || replayed.Code != http.StatusCreated || created.Body.String() != replayed.Body.String() {
 		t.Fatalf("create=%d %s replay=%d %s", created.Code, created.Body.String(), replayed.Code, replayed.Body.String())
 	}
@@ -123,23 +123,23 @@ func TestStudioDraftLifecycle(t *testing.T) {
 	if duplicate.Code != http.StatusConflict {
 		t.Fatalf("same organization duplicate create status=%d", duplicate.Code)
 	}
-	otherTenant := requestJSON(t, handler, http.MethodGet, "/v1/workflows/flow", tenantBKey, "", nil)
-	if otherTenant.Code != http.StatusNotFound {
-		t.Fatalf("cross tenant status=%d body=%s", otherTenant.Code, otherTenant.Body.String())
+	otherOrganization := requestJSON(t, handler, http.MethodGet, "/v1/workflows/flow", organizationBKey, "", nil)
+	if otherOrganization.Code != http.StatusNotFound {
+		t.Fatalf("cross organization status=%d body=%s", otherOrganization.Code, otherOrganization.Body.String())
 	}
-	compiled := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/compile", tenantAKey, "", nil)
+	compiled := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/compile", organizationAKey, "", nil)
 	if compiled.Code != http.StatusOK {
 		t.Fatalf("compile status=%d body=%s", compiled.Code, compiled.Body.String())
 	}
-	published := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish-draft", tenantAKey, "draft-publish-0001", nil)
+	published := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish-draft", organizationAKey, "draft-publish-0001", nil)
 	if published.Code != http.StatusCreated {
 		t.Fatalf("publish draft status=%d body=%s", published.Code, published.Body.String())
 	}
-	dryRun := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/dry-run", tenantAKey, "", map[string]any{"sampleInput": map[string]any{"message": "hello"}})
+	dryRun := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/dry-run", organizationAKey, "", map[string]any{"sampleInput": map[string]any{"message": "hello"}})
 	if dryRun.Code != http.StatusOK {
 		t.Fatalf("dry run status=%d body=%s", dryRun.Code, dryRun.Body.String())
 	}
-	nodeTest := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/node-test", tenantAKey, "", map[string]any{"nodeId": "end", "sampleInput": map[string]any{}})
+	nodeTest := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/node-test", organizationAKey, "", map[string]any{"nodeId": "end", "sampleInput": map[string]any{}})
 	if nodeTest.Code != http.StatusOK {
 		t.Fatalf("node test status=%d body=%s", nodeTest.Code, nodeTest.Body.String())
 	}
@@ -148,7 +148,7 @@ func TestStudioDraftLifecycle(t *testing.T) {
 // 验证最新版本解析契约稳定返回 planId/planHash，且版本历史不会跨租户泄漏。
 func TestLatestPublishedVersionContract(t *testing.T) {
 	handler := studioHandler(t)
-	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", tenantAKey, "publish-latest-0001", minimalDefinition("flow"))
+	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", organizationAKey, "publish-latest-0001", minimalDefinition("flow"))
 	if publish.Code != http.StatusCreated {
 		t.Fatalf("publish status=%d body=%s", publish.Code, publish.Body.String())
 	}
@@ -174,9 +174,9 @@ func TestLatestPublishedVersionContract(t *testing.T) {
 	if immutable.WorkflowID != response.WorkflowID || immutable.PlanID != response.PlanID || immutable.Definition.ID != "flow" {
 		t.Fatalf("specific=%+v", immutable)
 	}
-	isolated := requestJSON(t, handler, http.MethodGet, "/v1/workflows/flow/versions/latest", tenantBKey, "", nil)
+	isolated := requestJSON(t, handler, http.MethodGet, "/v1/workflows/flow/versions/latest", organizationBKey, "", nil)
 	if isolated.Code != http.StatusNotFound {
-		t.Fatalf("cross tenant latest status=%d body=%s", isolated.Code, isolated.Body.String())
+		t.Fatalf("cross organization latest status=%d body=%s", isolated.Code, isolated.Body.String())
 	}
 }
 
@@ -213,7 +213,7 @@ func (s *nodeTypeProjectionStub) ListNodeTypes(context.Context) ([]workflow.Node
 
 // 验证节点发现从配置的持久化 projection 读取，而不是从 compiler 内存缓存读取。
 func TestNodeTypeDiscoveryReadsConfiguredProjection(t *testing.T) {
-	auth, err := NewMasterKeyAuthenticator(tenantAKey)
+	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
 	}

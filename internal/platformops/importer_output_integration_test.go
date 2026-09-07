@@ -36,18 +36,18 @@ func TestPostgresImportRunProjectsClassifiedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenantID, workflowID := "import_output_"+suffix, "workflow_"+suffix
-	if err = seedPlatformTenant(ctx, pool, tenantID, workflowID); err != nil {
+	organizationID, workflowID := "import_output_"+suffix, "workflow_"+suffix
+	if err = seedPlatformOrganization(ctx, pool, organizationID, workflowID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = seedRunningAttempt(ctx, pool, tenantID, workflowID, suffix); err != nil {
+	if _, _, err = seedRunningAttempt(ctx, pool, organizationID, workflowID, suffix); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	value := json.RawMessage(`{"result":"legacy-value","token":"classified"}`)
 	digest := sha256.Sum256(value)
 	request := ImportRunProjectionRequest{
-		TenantID: tenantID, ActorID: "migration", SourceSystem: "fenix", RunID: "legacy_" + suffix,
+		OrganizationID: organizationID, ActorID: "migration", SourceSystem: "fenix", RunID: "legacy_" + suffix,
 		WorkflowID: workflowID, WorkflowVersionID: "version_" + suffix, ExecutionPlanID: "plan_" + suffix,
 		PlanHash: hex.EncodeToString(sha256Sum("seed-" + suffix)), Status: "success", Input: json.RawMessage(`{}`),
 		Output:    &ImportedRunOutput{Value: value, ContentType: "application/json", Size: int64(len(value)), SHA256: hex.EncodeToString(digest[:]), Sensitive: true},
@@ -69,8 +69,8 @@ func TestPostgresImportRunProjectsClassifiedOutput(t *testing.T) {
 	err = pool.QueryRow(ctx, `
 		SELECT r.output_id,o.id,o.content_type,o.inline_value,o.size_bytes,o.content_hash,
 		       o.sensitivity,o.retention_status,o.retention_until
-		FROM runs r JOIN node_outputs o ON o.tenant_id=r.tenant_id AND o.id=r.output_id
-		WHERE r.tenant_id=$1 AND r.id=$2`, tenantID, request.RunID).Scan(
+		FROM runs r JOIN node_outputs o ON o.organization_id=r.organization_id AND o.id=r.output_id
+		WHERE r.organization_id=$1 AND r.id=$2`, organizationID, request.RunID).Scan(
 		&runOutputID, &outputID, &contentType, &inline, &size, &storedHash, &sensitivity, &retentionStatus, &retentionUntil)
 	if err != nil {
 		t.Fatal(err)

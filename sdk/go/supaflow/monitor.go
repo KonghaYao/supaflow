@@ -54,7 +54,7 @@ type RunDetails struct {
 	LastEventCursor uint64           `json:"lastEventCursor"`
 }
 
-// ListRuns returns recent tenant-owned runs.
+// ListRuns returns recent organization-owned runs.
 func (c *Client) ListRuns(ctx context.Context, filter RunFilter) ([]RunSummary, error) {
 	query := url.Values{}
 	if filter.WorkflowID != "" {

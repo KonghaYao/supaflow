@@ -12,7 +12,7 @@ import (
 func TestMemoryStoreConcurrentFanInCreatesOneAttempt(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(50, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	start := claimDAGAttempt(t, store, now)
@@ -27,7 +27,7 @@ func TestMemoryStoreConcurrentFanInCreatesOneAttempt(t *testing.T) {
 			defer wait.Done()
 			edge := []string{"left_join", "right_join"}[index]
 			_, err := store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-				TenantID: "tenant", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
+				OrganizationID: "organization", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
 				RunStatus: RunRunning, Next: []NewAttempt{{NodeID: "join", Executor: "join", Input: json.RawMessage(`1`), EdgeID: edge, SourceNodeID: work.Attempt.NodeID, TargetPort: work.Attempt.NodeID, RequiredEdges: []string{"left_join", "right_join"}}},
 			})
 			errors <- err
@@ -49,7 +49,7 @@ func TestMemoryStoreConcurrentFanInCreatesOneAttempt(t *testing.T) {
 func TestMemoryStoreDurableFanInCAS(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(100, 0).UTC()
 	created, err := store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
 		Status: RunPending, Input: json.RawMessage(`{"seed":1}`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	if err != nil || !created.Created {
@@ -92,7 +92,7 @@ func TestMemoryStoreDurableFanInCAS(t *testing.T) {
 func TestMemoryStoreMultiEndWaitsForAllActivePaths(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(200, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	start := claimDAGAttempt(t, store, now)
@@ -113,7 +113,7 @@ func TestMemoryStoreMultiEndWaitsForAllActivePaths(t *testing.T) {
 func TestMemoryStoreProjectsTerminalOutput(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(250, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	start := claimDAGAttempt(t, store, now)
@@ -121,7 +121,7 @@ func TestMemoryStoreProjectsTerminalOutput(t *testing.T) {
 	end := claimDAGAttempt(t, store, now)
 	value := json.RawMessage(`{"answer":42}`)
 	completed, err := store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-		TenantID: "tenant", RunID: "run", AttemptID: end.Attempt.ID, WorkerID: "worker",
+		OrganizationID: "organization", RunID: "run", AttemptID: end.Attempt.ID, WorkerID: "worker",
 		FencingToken: end.Lease.FencingToken, Now: now, RunStatus: RunRunning,
 		Output: &Output{ContentType: "application/json", Size: int64(len(value)), SHA256: "digest", Inline: value},
 	})
@@ -131,7 +131,7 @@ func TestMemoryStoreProjectsTerminalOutput(t *testing.T) {
 	if string(completed.Output.Inline) != string(value) || completed.Output.External {
 		t.Fatalf("terminal output = %+v", completed.Output)
 	}
-	stored, err := store.GetRun(context.Background(), "tenant", "run")
+	stored, err := store.GetRun(context.Background(), "organization", "run")
 	if err != nil || stored.Output == nil || string(stored.Output.Inline) != string(value) {
 		t.Fatalf("GetRun() = %+v, %v", stored, err)
 	}
@@ -141,23 +141,23 @@ func TestMemoryStoreProjectsTerminalOutput(t *testing.T) {
 func TestMemoryStoreAutoResumesDueWait(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(300, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "delay", Executor: "delay"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "delay", Executor: "delay"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	work := claimDAGAttempt(t, store, now)
 	digest := [32]byte{1}
 	_, err := store.SuspendAttempt(context.Background(), SuspendAttemptRequest{
-		TenantID: "tenant", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
+		OrganizationID: "organization", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
 		Interrupt: Interrupt{ID: "timer", Kind: "wait", TokenDigest: digest, ExpiresAt: now.Add(time.Second), AutoResume: true},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant", WorkerID: "worker", Now: now.Add(time.Millisecond), LeaseDuration: time.Minute})
+	before, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization", WorkerID: "worker", Now: now.Add(time.Millisecond), LeaseDuration: time.Minute})
 	if err != nil || before != nil {
 		t.Fatalf("early claim = %+v, err = %v", before, err)
 	}
-	after, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant", WorkerID: "worker", Now: now.Add(time.Second), LeaseDuration: time.Minute})
+	after, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization", WorkerID: "worker", Now: now.Add(time.Second), LeaseDuration: time.Minute})
 	if err != nil || after == nil || string(after.Attempt.ResumeData) != `{"expired":true}` || after.Lease.FencingToken <= work.Lease.FencingToken {
 		t.Fatalf("due claim = %+v, err = %v", after, err)
 	}
@@ -167,32 +167,32 @@ func TestMemoryStoreAutoResumesDueWait(t *testing.T) {
 func TestMemoryStoreFinalizesExpiredApprovalNode(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(350, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "approval", Executor: "approval"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "approval", Executor: "approval"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	work := claimDAGAttempt(t, store, now)
 	_, err := store.SuspendAttempt(context.Background(), SuspendAttemptRequest{
-		TenantID: "tenant", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
+		OrganizationID: "organization", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now,
 		Interrupt: Interrupt{ID: "approval", Kind: "approval", TokenDigest: [32]byte{1}, ExpiresAt: now.Add(time.Second)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	count, err := store.ExpireRuns(context.Background(), "tenant", now.Add(time.Second), 10)
+	count, err := store.ExpireRuns(context.Background(), "organization", now.Add(time.Second), 10)
 	if err != nil || count != 1 {
 		t.Fatalf("ExpireRuns() count=%d err=%v", count, err)
 	}
-	details, err := store.GetRunDetails(context.Background(), "tenant", "run")
+	details, err := store.GetRunDetails(context.Background(), "organization", "run")
 	if err != nil || details.Run.Status != RunError || len(details.Nodes) != 1 || details.Nodes[0].Node.Status != NodeError ||
 		len(details.Nodes[0].Attempts) != 1 || details.Nodes[0].Attempts[0].Attempt.Status != AttemptError ||
 		details.Nodes[0].Attempts[0].Attempt.ErrorCode != "node_timeout" {
 		t.Fatalf("expired approval details=%+v err=%v", details, err)
 	}
-	interrupts, err := store.ListInterrupts(context.Background(), "tenant", "run")
+	interrupts, err := store.ListInterrupts(context.Background(), "organization", "run")
 	if err != nil || len(interrupts) != 0 {
 		t.Fatalf("expired approval interrupts=%+v err=%v", interrupts, err)
 	}
-	events, err := store.ListEvents(context.Background(), "tenant", "run", 0, 100)
+	events, err := store.ListEvents(context.Background(), "organization", "run", 0, 100)
 	if err != nil || !eventTypeExists(events, "node.timed_out") || !eventTypeExists(events, "run.error") {
 		t.Fatalf("expired approval events=%+v err=%v", events, err)
 	}
@@ -211,7 +211,7 @@ func eventTypeExists(events []Event, expected string) bool {
 func TestMemoryStoreSuspendedBranchDoesNotBlockFanOut(t *testing.T) {
 	store, now := NewMemoryStore(), time.Unix(400, 0).UTC()
 	_, _ = store.CreateRun(context.Background(), CreateRunRequest{Run: Run{
-		TenantID: "tenant", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
+		OrganizationID: "organization", ID: "run", Plan: PlanRef{ID: "plan", Hash: "hash", EntryNodeID: "start", Executor: "start"},
 		Status: RunPending, Input: json.RawMessage(`null`), IdempotencyKey: "idem", RequestFingerprint: "fingerprint", CreatedAt: now, UpdatedAt: now,
 	}})
 	start := claimDAGAttempt(t, store, now)
@@ -219,13 +219,13 @@ func TestMemoryStoreSuspendedBranchDoesNotBlockFanOut(t *testing.T) {
 	approval := claimDAGAttempt(t, store, now)
 	digest := [32]byte{9}
 	_, err := store.SuspendAttempt(context.Background(), SuspendAttemptRequest{
-		TenantID: "tenant", RunID: "run", AttemptID: approval.Attempt.ID, WorkerID: "worker", FencingToken: approval.Lease.FencingToken, Now: now,
+		OrganizationID: "organization", RunID: "run", AttemptID: approval.Attempt.ID, WorkerID: "worker", FencingToken: approval.Lease.FencingToken, Now: now,
 		Interrupt: Interrupt{ID: "approval", Kind: "approval", TokenDigest: digest, ExpiresAt: now.Add(time.Hour)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, _ := store.GetRun(context.Background(), "tenant", "run")
+	run, _ := store.GetRun(context.Background(), "organization", "run")
 	if run.Status != RunRunning {
 		t.Fatalf("run status while sibling is runnable = %s", run.Status)
 	}
@@ -235,7 +235,7 @@ func TestMemoryStoreSuspendedBranchDoesNotBlockFanOut(t *testing.T) {
 		t.Fatalf("run status after sibling completed = %s", run.Status)
 	}
 	resolved, err := store.ResolveInterrupt(context.Background(), ResolveInterruptRequest{
-		TenantID: "tenant", InterruptID: "approval", TokenDigest: digest, IdempotencyKey: "approval-1", DecidedBy: "user",
+		OrganizationID: "organization", InterruptID: "approval", TokenDigest: digest, IdempotencyKey: "approval-1", DecidedBy: "user",
 		Decision: ApprovalDecision{Approved: true, DecidedBy: "user"}, Now: now.Add(time.Second),
 	})
 	if err != nil || resolved.Run.Status != RunPending {
@@ -245,7 +245,7 @@ func TestMemoryStoreSuspendedBranchDoesNotBlockFanOut(t *testing.T) {
 
 func claimDAGAttempt(t *testing.T, store *MemoryStore, now time.Time) *WorkItem {
 	t.Helper()
-	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant", WorkerID: "worker", Now: now, LeaseDuration: time.Minute})
+	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization", WorkerID: "worker", Now: now, LeaseDuration: time.Minute})
 	if err != nil || work == nil {
 		t.Fatalf("ClaimAttempt() = %+v, %v", work, err)
 	}
@@ -255,7 +255,7 @@ func claimDAGAttempt(t *testing.T, store *MemoryStore, now time.Time) *WorkItem 
 func completeDAGAttempt(t *testing.T, store *MemoryStore, work *WorkItem, now time.Time, next []NewAttempt) Run {
 	t.Helper()
 	run, err := store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-		TenantID: "tenant", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker",
+		OrganizationID: "organization", RunID: "run", AttemptID: work.Attempt.ID, WorkerID: "worker",
 		FencingToken: work.Lease.FencingToken, Now: now, RunStatus: RunRunning, Next: next,
 	})
 	if err != nil {

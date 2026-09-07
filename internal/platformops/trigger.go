@@ -35,9 +35,9 @@ const (
 	MisfireCatchUp  MisfirePolicy = "catch_up"
 )
 
-// Trigger is a tenant-scoped durable trigger definition. It never contains secrets.
+// Trigger is a organization-scoped durable trigger definition. It never contains secrets.
 type Trigger struct {
-	TenantID            string          `json:"-"`
+	OrganizationID      string          `json:"-"`
 	ID                  string          `json:"id"`
 	PublicHash          string          `json:"publicHash"`
 	WorkflowID          string          `json:"workflowId"`
@@ -57,7 +57,7 @@ type Trigger struct {
 
 // Firing is one idempotent trigger occurrence queued through the outbox.
 type Firing struct {
-	TenantID          string          `json:"-"`
+	OrganizationID    string          `json:"-"`
 	ID                string          `json:"id"`
 	TriggerID         string          `json:"triggerId"`
 	WorkflowID        string          `json:"workflowId"`
@@ -72,7 +72,7 @@ type Firing struct {
 
 // CreateTriggerRequest contains validated trigger configuration.
 type CreateTriggerRequest struct {
-	TenantID            string
+	OrganizationID      string
 	ActorID             string
 	WorkflowID          string
 	Kind                TriggerKind
@@ -89,7 +89,7 @@ type CreateTriggerRequest struct {
 
 // FireRequest describes one API, manual, or event occurrence.
 type FireRequest struct {
-	TenantID         string
+	OrganizationID   string
 	TriggerID        string
 	ExpectedKind     TriggerKind
 	DeduplicationKey string
@@ -102,13 +102,13 @@ type FireRequest struct {
 
 // WebhookRequest is the untrusted signed webhook envelope.
 type WebhookRequest struct {
-	TenantID  string
-	TriggerID string
-	RequestID string
-	Timestamp time.Time
-	Signature string
-	Body      []byte
-	Now       time.Time
+	OrganizationID string
+	TriggerID      string
+	RequestID      string
+	Timestamp      time.Time
+	Signature      string
+	Body           []byte
+	Now            time.Time
 }
 
 // PublicWebhookRequest identifies a webhook by its non-secret public route hash.
@@ -141,20 +141,20 @@ type TriggerStore interface {
 	FireEvent(context.Context, string, string, string, json.RawMessage, time.Time) ([]Firing, error)
 }
 
-// ReceivePublicWebhook resolves server-owned tenant context from publicHash before verification.
+// ReceivePublicWebhook resolves server-owned organization context from publicHash before verification.
 func (s *TriggerService) ReceivePublicWebhook(ctx context.Context, request PublicWebhookRequest) (Firing, bool, error) {
 	trigger, err := s.ResolvePublicWebhook(ctx, request.PublicHash)
 	if err != nil {
 		return Firing{}, false, err
 	}
 	return s.ReceiveWebhook(ctx, WebhookRequest{
-		TenantID: trigger.TenantID, TriggerID: trigger.ID, RequestID: request.RequestID,
+		OrganizationID: trigger.OrganizationID, TriggerID: trigger.ID, RequestID: request.RequestID,
 		Timestamp: request.Timestamp, Signature: request.Signature, Body: request.Body, Now: request.Now,
 	})
 }
 
 // ResolvePublicWebhook converts an untrusted public route into server-owned
-// tenant and trigger identity. Callers may use the resolved tenant only for
+// organization and trigger identity. Callers may use the resolved organization only for
 // request-scoped attribution before delegating signature verification here.
 func (s *TriggerService) ResolvePublicWebhook(ctx context.Context, publicHash string) (Trigger, error) {
 	if publicHash == "" {
@@ -198,11 +198,11 @@ func (s *TriggerService) Create(ctx context.Context, request CreateTriggerReques
 }
 
 // SetEnabled changes whether a trigger accepts new firings.
-func (s *TriggerService) SetEnabled(ctx context.Context, tenantID, triggerID string, enabled bool, now time.Time) (Trigger, error) {
-	if tenantID == "" || triggerID == "" {
+func (s *TriggerService) SetEnabled(ctx context.Context, organizationID, triggerID string, enabled bool, now time.Time) (Trigger, error) {
+	if organizationID == "" || triggerID == "" {
 		return Trigger{}, ErrInvalidArgument
 	}
-	return s.store.SetTriggerEnabled(ctx, tenantID, triggerID, enabled, now)
+	return s.store.SetTriggerEnabled(ctx, organizationID, triggerID, enabled, now)
 }
 
 // Fire creates an idempotent API or manual firing.
@@ -218,13 +218,13 @@ func (s *TriggerService) Fire(ctx context.Context, request FireRequest) (Firing,
 
 // ReceiveWebhook verifies timestamp and signature before atomically consuming replay identity and firing.
 func (s *TriggerService) ReceiveWebhook(ctx context.Context, request WebhookRequest) (Firing, bool, error) {
-	if s.secrets == nil || request.TenantID == "" || request.TriggerID == "" || request.RequestID == "" || request.Now.IsZero() {
+	if s.secrets == nil || request.OrganizationID == "" || request.TriggerID == "" || request.RequestID == "" || request.Now.IsZero() {
 		return Firing{}, false, ErrInvalidArgument
 	}
 	if request.Timestamp.Before(request.Now.Add(-s.webhookWindow)) || request.Timestamp.After(request.Now.Add(s.webhookWindow)) {
 		return Firing{}, false, ErrSignature
 	}
-	secret, err := s.secrets.ResolveTriggerSecret(ctx, request.TenantID, request.TriggerID)
+	secret, err := s.secrets.ResolveTriggerSecret(ctx, request.OrganizationID, request.TriggerID)
 	if err != nil {
 		return Firing{}, false, err
 	}
@@ -241,7 +241,7 @@ func (s *TriggerService) ReceiveWebhook(ctx context.Context, request WebhookRequ
 		payload, _ = json.Marshal(map[string]string{"bodySHA256": hex.EncodeToString(digest[:])})
 	}
 	return s.store.FireWebhook(ctx, FireRequest{
-		TenantID: request.TenantID, TriggerID: request.TriggerID, ExpectedKind: TriggerWebhook,
+		OrganizationID: request.OrganizationID, TriggerID: request.TriggerID, ExpectedKind: TriggerWebhook,
 		DeduplicationKey: request.RequestID, SourceTime: &request.Timestamp, Payload: payload,
 	}, request.RequestID, digest, request.Timestamp.Add(s.webhookWindow))
 }
@@ -256,11 +256,11 @@ func (s *TriggerService) Tick(ctx context.Context, options ScheduleOptions) ([]F
 }
 
 // ReceiveEvent creates firings for matching enabled event triggers.
-func (s *TriggerService) ReceiveEvent(ctx context.Context, tenantID, eventType, eventID string, payload json.RawMessage, at time.Time) ([]Firing, error) {
-	if tenantID == "" || eventType == "" || eventID == "" || at.IsZero() || !validJSONObject(payload) {
+func (s *TriggerService) ReceiveEvent(ctx context.Context, organizationID, eventType, eventID string, payload json.RawMessage, at time.Time) ([]Firing, error) {
+	if organizationID == "" || eventType == "" || eventID == "" || at.IsZero() || !validJSONObject(payload) {
 		return nil, ErrInvalidArgument
 	}
-	return s.store.FireEvent(ctx, tenantID, eventType, eventID, payload, at)
+	return s.store.FireEvent(ctx, organizationID, eventType, eventID, payload, at)
 }
 
 // SignWebhook is provided for SDK/tests; production senders implement the same versioned scheme.
@@ -280,7 +280,7 @@ func webhookSignature(secret []byte, requestID string, timestamp time.Time, body
 }
 
 func validateTriggerRequest(request CreateTriggerRequest) error {
-	if request.TenantID == "" || request.ActorID == "" || request.WorkflowID == "" || request.Name == "" || !validJSONObject(request.Config) {
+	if request.OrganizationID == "" || request.ActorID == "" || request.WorkflowID == "" || request.Name == "" || !validJSONObject(request.Config) {
 		return ErrInvalidArgument
 	}
 	switch request.Kind {
@@ -305,7 +305,7 @@ func validateTriggerRequest(request CreateTriggerRequest) error {
 }
 
 func validateFireRequest(request FireRequest) error {
-	if request.TenantID == "" || request.TriggerID == "" || len(request.DeduplicationKey) == 0 || len(request.DeduplicationKey) > 255 || !validJSONObject(request.Payload) {
+	if request.OrganizationID == "" || request.TriggerID == "" || len(request.DeduplicationKey) == 0 || len(request.DeduplicationKey) > 255 || !validJSONObject(request.Payload) {
 		return ErrInvalidArgument
 	}
 	return nil

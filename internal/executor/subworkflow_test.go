@@ -17,14 +17,14 @@ import (
 type subworkflowIDs struct{ next atomic.Uint64 }
 
 type recordingChildOutputReader struct {
-	value    json.RawMessage
-	tenantID workflowruntime.TenantID
-	runID    string
-	expected workflowruntime.RunOutput
+	value          json.RawMessage
+	organizationID workflowruntime.OrganizationID
+	runID          string
+	expected       workflowruntime.RunOutput
 }
 
-func (r *recordingChildOutputReader) ReadRunOutput(_ context.Context, tenantID workflowruntime.TenantID, runID string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
-	r.tenantID, r.runID, r.expected = tenantID, runID, expected
+func (r *recordingChildOutputReader) ReadRunOutput(_ context.Context, organizationID workflowruntime.OrganizationID, runID string, expected workflowruntime.RunOutput) (json.RawMessage, error) {
+	r.organizationID, r.runID, r.expected = organizationID, runID, expected
 	return append(json.RawMessage(nil), r.value...), nil
 }
 
@@ -57,7 +57,7 @@ func TestRuntimeSubworkflowRunnerReturnsSuccessfulChildOutput(t *testing.T) {
 	if string(output.Value) != `{"approved":true}` {
 		t.Fatalf("Run() output = %s", output.Value)
 	}
-	observed, err := service.GetRun(context.Background(), "tenant_a", child.ChildRunID)
+	observed, err := service.GetRun(context.Background(), "organization_a", child.ChildRunID)
 	if err != nil || observed.Status != workflowruntime.RunSuccess {
 		t.Fatalf("GetRun() = %+v, error = %v", observed, err)
 	}
@@ -89,10 +89,10 @@ func TestRuntimeSubworkflowRunnerReadsExternalChildOutputAndPreservesSensitivity
 	if string(output.Value) != string(reader.value) || !output.Sensitive {
 		t.Fatalf("external child output = %+v", output)
 	}
-	if reader.tenantID != "tenant_a" || reader.runID != child.ChildRunID || !reader.expected.External || !reader.expected.Sensitive {
-		t.Fatalf("reader scope/metadata = tenant=%s run=%s output=%+v", reader.tenantID, reader.runID, reader.expected)
+	if reader.organizationID != "organization_a" || reader.runID != child.ChildRunID || !reader.expected.External || !reader.expected.Sensitive {
+		t.Fatalf("reader scope/metadata = organization=%s run=%s output=%+v", reader.organizationID, reader.runID, reader.expected)
 	}
-	observed, err := service.GetRun(context.Background(), "tenant_a", child.ChildRunID)
+	observed, err := service.GetRun(context.Background(), "organization_a", child.ChildRunID)
 	if err != nil || observed.Output == nil || !observed.Output.External {
 		t.Fatalf("GetRun() = %+v, error = %v", observed, err)
 	}
@@ -113,7 +113,7 @@ func TestRuntimeSubworkflowRunnerScopesReplayByAttemptAndCanonicalInput(t *testi
 	failAt := time.Now().UTC()
 	retryAt := failAt
 	if _, err := store.FailAttempt(context.Background(), workflowruntime.FailAttemptRequest{
-		TenantID: "tenant_a", RunID: parentRunID, AttemptID: parentAttemptID, WorkerID: "parent-worker", FencingToken: 1,
+		OrganizationID: "organization_a", RunID: parentRunID, AttemptID: parentAttemptID, WorkerID: "parent-worker", FencingToken: 1,
 		Now: failAt, ErrorCode: "adapter_failed", RetryAt: &retryAt,
 	}); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestRuntimeSubworkflowRunnerScopesReplayByAttemptAndCanonicalInput(t *testi
 	var retryWork *workflowruntime.WorkItem
 	for index := 0; index < 2; index++ {
 		claimed, claimErr := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{
-			TenantID: "tenant_a", WorkerID: fmt.Sprintf("retry-worker-%d", index), Now: failAt.Add(time.Second), LeaseDuration: time.Minute,
+			OrganizationID: "organization_a", WorkerID: fmt.Sprintf("retry-worker-%d", index), Now: failAt.Add(time.Second), LeaseDuration: time.Minute,
 		})
 		if claimErr != nil {
 			t.Fatal(claimErr)
@@ -173,13 +173,13 @@ func subworkflowFixture(t *testing.T) (*RuntimeSubworkflowRunner, *workflowrunti
 		},
 		Edges: []workflow.EdgeDefinition{{ID: "start-end", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}},
 	}
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", definition.ID, definition, "publish-child")
+	published, _, err := catalog.Publish(context.Background(), "organization_a", definition.ID, definition, "publish-child")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := workflowruntime.NewMemoryStore()
 	service := workflowruntime.NewService(store, nil, &subworkflowIDs{})
-	parent, err := service.StartRun(context.Background(), "tenant_a", workflowruntime.StartRunRequest{
+	parent, err := service.StartRun(context.Background(), "organization_a", workflowruntime.StartRunRequest{
 		Plan:  workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash, EntryNodeID: "start", Executor: "builtin.start"},
 		Input: json.RawMessage(`null`), IdempotencyKey: "parent-run",
 	})
@@ -188,7 +188,7 @@ func subworkflowFixture(t *testing.T) (*RuntimeSubworkflowRunner, *workflowrunti
 	}
 	now := time.Now().UTC()
 	parentAttempt, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "parent-worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "parent-worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || parentAttempt == nil {
 		t.Fatalf("claim parent: %+v, error = %v", parentAttempt, err)
@@ -202,7 +202,7 @@ func subworkflowFixture(t *testing.T) (*RuntimeSubworkflowRunner, *workflowrunti
 
 func subworkflowRequest(published platform.PublishedPlan, parentRunID, attempt string, input json.RawMessage) SubworkflowRequest {
 	return SubworkflowRequest{
-		TenantID: "tenant_a", ParentRun: parentRunID, ParentNode: "start", ParentAttempt: attempt, ParentExecution: attempt,
+		OrganizationID: "organization_a", ParentRun: parentRunID, ParentNode: "start", ParentAttempt: attempt, ParentExecution: attempt,
 		PlanID: published.ID, PlanHash: published.Hash, Input: input,
 	}
 }
@@ -226,14 +226,14 @@ func finishExternalSubworkflow(t *testing.T, store *workflowruntime.MemoryStore,
 	t.Helper()
 	now := time.Now().UTC()
 	claimed, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "child-worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "child-worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || claimed == nil || claimed.Attempt.RunID != runID {
 		t.Fatalf("ClaimAttempt() = %+v, error = %v", claimed, err)
 	}
 	digest := sha256.Sum256(output)
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: runID, AttemptID: claimed.Attempt.ID, WorkerID: "child-worker",
+		OrganizationID: "organization_a", RunID: runID, AttemptID: claimed.Attempt.ID, WorkerID: "child-worker",
 		FencingToken: claimed.Lease.FencingToken, Now: now.Add(time.Second), RunStatus: workflowruntime.RunSuccess,
 		Output: &workflowruntime.Output{ContentType: "application/json", Size: int64(len(output)), SHA256: fmt.Sprintf("%x", digest[:]), Sensitive: sensitive, ObjectRef: "obj-child"},
 	})
@@ -246,13 +246,13 @@ func finishSubworkflow(t *testing.T, store *workflowruntime.MemoryStore, runID s
 	t.Helper()
 	now := time.Now().UTC()
 	claimed, err := store.ClaimAttempt(context.Background(), workflowruntime.ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "child-worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "child-worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || claimed == nil || claimed.Attempt.RunID != runID {
 		t.Fatalf("ClaimAttempt() = %+v, error = %v", claimed, err)
 	}
 	_, err = store.CompleteAttempt(context.Background(), workflowruntime.CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: runID, AttemptID: claimed.Attempt.ID, WorkerID: "child-worker",
+		OrganizationID: "organization_a", RunID: runID, AttemptID: claimed.Attempt.ID, WorkerID: "child-worker",
 		FencingToken: claimed.Lease.FencingToken, Now: now.Add(time.Second), RunStatus: workflowruntime.RunSuccess,
 		Output: &workflowruntime.Output{ContentType: "application/json", Size: int64(len(output)), Inline: output},
 	})

@@ -25,7 +25,7 @@ func TestShadowRunHTTPRequiresExplicitReviewedStubs(t *testing.T) {
 			{ID: "to_end", FromNode: "request", FromPort: "response", ToNode: "end", ToPort: "result"},
 		},
 	}
-	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/shadow_http_flow/publish", tenantAKey, "publish-shadow-http", definition)
+	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/shadow_http_flow/publish", organizationAKey, "publish-shadow-http", definition)
 	if publish.Code != http.StatusCreated {
 		t.Fatalf("publish status=%d body=%s", publish.Code, publish.Body.String())
 	}
@@ -34,21 +34,21 @@ func TestShadowRunHTTPRequiresExplicitReviewedStubs(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := map[string]any{"planId": published.ID, "planHash": published.Hash, "input": map[string]any{}, "stubBindings": map[string]string{}}
-	missing := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", tenantAKey, "shadow-http-run-1", body)
+	missing := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", organizationAKey, "shadow-http-run-1", body)
 	assertProblemCode(t, missing, http.StatusConflict, "shadow_stub_required")
 	body["stubBindings"] = map[string]string{"request": "custom.unreviewed"}
-	invalid := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", tenantAKey, "shadow-http-run-2", body)
+	invalid := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", organizationAKey, "shadow-http-run-2", body)
 	assertProblemCode(t, invalid, http.StatusBadRequest, "invalid_shadow_stub_binding")
 	body["stubBindings"] = map[string]string{"request": workflow.ShadowStubExecutorKind}
-	crossTenant := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", tenantBKey, "shadow-http-run-cross", body)
-	assertProblemCode(t, crossTenant, http.StatusNotFound, "not_found")
-	started := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", tenantAKey, "shadow-http-run-3", body)
+	crossOrganization := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", organizationBKey, "shadow-http-run-cross", body)
+	assertProblemCode(t, crossOrganization, http.StatusNotFound, "not_found")
+	started := requestJSON(t, handler, http.MethodPost, "/v1/shadow-runs", organizationAKey, "shadow-http-run-3", body)
 	if started.Code != http.StatusAccepted {
 		t.Fatalf("start status=%d body=%s", started.Code, started.Body.String())
 	}
 
 	// 普通 Run 的既有契约不要求 shadow 字段或 stub 绑定。
-	normal := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "normal-http-run-1", map[string]any{
+	normal := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "normal-http-run-1", map[string]any{
 		"planId": published.ID, "planHash": published.Hash, "input": map[string]any{},
 	})
 	if normal.Code != http.StatusAccepted {

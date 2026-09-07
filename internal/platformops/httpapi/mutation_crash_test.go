@@ -35,7 +35,7 @@ func TestCredentialMutationTakeoverDoesNotDuplicateCommittedResource(t *testing.
 		request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(
 			`{"name":"signer","purpose":"webhook_signing","secret":"value"}`))
 		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-		request.Header.Set("X-Fenix-Organization-Id", "tenant")
+		request.Header.Set("X-Fenix-Organization-Id", "organization")
 		request.Header.Set("Idempotency-Key", "credential-crash-window")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)

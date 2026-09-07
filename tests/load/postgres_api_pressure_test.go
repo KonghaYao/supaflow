@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/executor"
-	"github.com/pazhou/supaflow/internal/identity"
 	"github.com/pazhou/supaflow/internal/postgres"
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 	"github.com/pazhou/supaflow/internal/workflow"
@@ -60,23 +59,9 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
-	tenantID := "pressure_tenant_" + suffix
+	organizationID := "pressure_organization_" + suffix
 	workflowID := "pressure_workflow_" + suffix
-	actorID := "pressure_actor_" + suffix
 	apiKey := "pressure-api-key-at-least-24-bytes-" + suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _, _ = pool.Exec(context.Background(), `DELETE FROM tenants WHERE id=$1`, tenantID) }()
-	identityStore, err := identity.NewPostgresStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = identityStore.BootstrapAPIKey(ctx, identity.BootstrapAPIKey{
-		Value: apiKey, TenantID: tenantID, ActorID: actorID, Name: "pressure", Role: identity.RoleAdmin,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	auth, err := api.NewMasterKeyAuthenticator(apiKey)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +70,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	catalog := postgres.NewPlanCatalog(pool, registry, workflow.CompilePolicy{
 		AllowedCapabilities: workflow.CapabilitySet{Idempotent: true},
 	})
-	published, _, err := catalog.Publish(ctx, tenantID, workflowID, pressureDefinition(workflowID), "pressure-publish")
+	published, _, err := catalog.Publish(ctx, organizationID, workflowID, pressureDefinition(workflowID), "pressure-publish")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +117,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 				return
 			}
 			req.Header.Set("Authorization", "Bearer "+apiKey)
-			req.Header.Set("X-Fenix-Organization-Id", tenantID)
+			req.Header.Set("X-Fenix-Organization-Id", organizationID)
 			req.Header.Set("Idempotency-Key", fmt.Sprintf("postgres-pressure-%08d", index))
 			requestStarted := time.Now()
 			response, requestErr := client.Do(req)
@@ -166,7 +151,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 		t.Fatalf("successful requests=%d want=%d", succeeded.Load(), requests)
 	}
 	var durableRuns int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE tenant_id=$1`, tenantID).Scan(&durableRuns); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE organization_id=$1`, organizationID).Scan(&durableRuns); err != nil {
 		t.Fatal(err)
 	}
 	if durableRuns != requests {
@@ -202,7 +187,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	var queuedRunsBeforeDrain int
 	var oldestQueueAgeBeforeDrainMS float64
 	if err = pool.QueryRow(ctx, `SELECT count(*), COALESCE((EXTRACT(EPOCH FROM (clock_timestamp()-min(created_at)))*1000)::double precision,0)
-		FROM admission_entries WHERE tenant_id=$1 AND resource_type='run' AND status='queued'`, tenantID).
+		FROM admission_entries WHERE organization_id=$1 AND resource_type='run' AND status='queued'`, organizationID).
 		Scan(&queuedRunsBeforeDrain, &oldestQueueAgeBeforeDrainMS); err != nil {
 		t.Fatal(err)
 	}
@@ -211,8 +196,8 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	}
 	var eventsBeforeDrain, outboxBeforeDrain int64
 	if err = pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM run_events WHERE tenant_id=$1),
-		(SELECT count(*) FROM outbox_messages WHERE tenant_id=$1)`, tenantID).
+		(SELECT count(*) FROM run_events WHERE organization_id=$1),
+		(SELECT count(*) FROM outbox_messages WHERE organization_id=$1)`, organizationID).
 		Scan(&eventsBeforeDrain, &outboxBeforeDrain); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +229,7 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 					return
 				}
 				callStarted := time.Now()
-				result, advanceErr := orchestrator.Advance(drainCtx, workflowruntime.TenantID(tenantID))
+				result, advanceErr := orchestrator.Advance(drainCtx, workflowruntime.OrganizationID(organizationID))
 				callElapsed := time.Since(callStarted)
 				latencyMu.Lock()
 				advanceLatencies = append(advanceLatencies, callElapsed)
@@ -270,15 +255,15 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 		t.Fatalf("worker advances=%d want=%d", advances.Load(), expectedAdvances)
 	}
 	drainElapsed := time.Since(drainStarted)
-	result, err := orchestrators[0].Advance(ctx, workflowruntime.TenantID(tenantID))
+	result, err := orchestrators[0].Advance(ctx, workflowruntime.OrganizationID(organizationID))
 	if err != nil || result.Worked {
 		t.Fatalf("queue was not drained: result=%+v error=%v", result, err)
 	}
 	var successfulRuns, activeRuns, queuedRuns int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE tenant_id=$1 AND status='success'`, tenantID).Scan(&successfulRuns); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE organization_id=$1 AND status='success'`, organizationID).Scan(&successfulRuns); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT active_runs,queued_runs FROM tenant_quota_counters WHERE tenant_id=$1`, tenantID).Scan(&activeRuns, &queuedRuns); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT active_runs,queued_runs FROM organization_quota_counters WHERE organization_id=$1`, organizationID).Scan(&activeRuns, &queuedRuns); err != nil {
 		t.Fatal(err)
 	}
 	if successfulRuns != requests || activeRuns != 0 || queuedRuns != 0 {
@@ -287,11 +272,11 @@ func TestPostgresControlPlanePressure(t *testing.T) {
 	var eventsAfterDrain, outboxAfterDrain, leaseTakeovers int64
 	var maximumQueueAdmissionDelayMS float64
 	if err = pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM run_events WHERE tenant_id=$1),
-		(SELECT count(*) FROM outbox_messages WHERE tenant_id=$1),
-		(SELECT count(*) FROM run_events WHERE tenant_id=$1 AND event_type='attempt.lease_taken_over'),
+		(SELECT count(*) FROM run_events WHERE organization_id=$1),
+		(SELECT count(*) FROM outbox_messages WHERE organization_id=$1),
+		(SELECT count(*) FROM run_events WHERE organization_id=$1 AND event_type='attempt.lease_taken_over'),
 		(SELECT COALESCE((max(EXTRACT(EPOCH FROM (admitted_at-created_at))*1000))::double precision,0)
-		 FROM admission_entries WHERE tenant_id=$1 AND resource_type='run')`, tenantID).
+		 FROM admission_entries WHERE organization_id=$1 AND resource_type='run')`, organizationID).
 		Scan(&eventsAfterDrain, &outboxAfterDrain, &leaseTakeovers, &maximumQueueAdmissionDelayMS); err != nil {
 		t.Fatal(err)
 	}

@@ -56,13 +56,13 @@ func TestConditionAlternativeMergeDoesNotDeadlockJoin(t *testing.T) {
 		AllowedCapabilities: workflow.CapabilitySet{Cancellable: true, Interruptible: true, Idempotent: true},
 		AllowedPermissions:  workflow.PermissionSet{Network: true, Credentials: true, Filesystem: true, Compute: true},
 	})
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", "choice_merge", definition, "publish")
+	published, _, err := catalog.Publish(context.Background(), "organization_a", "choice_merge", definition, "publish")
 	if err != nil {
 		t.Fatal(err)
 	}
 	executor, _ := NewPlanExecutor(catalog, Config{})
 	result, err := executor.Execute(context.Background(), workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run", Plan: workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash},
+		OrganizationID: "organization_a", RunID: "run", Plan: workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash},
 		NodeID: "choice", AttemptID: "attempt", Attempt: 1, Executor: "builtin.condition",
 		Input: json.RawMessage(`{"ok":true}`), FencingToken: 1,
 	})
@@ -201,7 +201,7 @@ func publishNodePlan(t *testing.T, nodeType, config string, ports []string) publ
 		AllowedCapabilities: workflow.CapabilitySet{Streaming: true, Cancellable: true, Interruptible: true, Idempotent: true},
 		AllowedPermissions:  workflow.PermissionSet{Network: true, Credentials: true, Filesystem: true, Compute: true},
 	})
-	published, _, err := catalog.Publish(context.Background(), "tenant_a", "node_flow", workflow.WorkflowDefinition{SchemaVersion: workflow.DefinitionSchemaV1, ID: "node_flow", Nodes: nodes, Edges: edges}, "publish")
+	published, _, err := catalog.Publish(context.Background(), "organization_a", "node_flow", workflow.WorkflowDefinition{SchemaVersion: workflow.DefinitionSchemaV1, ID: "node_flow", Nodes: nodes, Edges: edges}, "publish")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func publishNodePlan(t *testing.T, nodeType, config string, ports []string) publ
 
 func nodeRequest(published publishedFixture, input, snapshot string) workflowruntime.ExecutionRequest {
 	return workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
+		OrganizationID: "organization_a", RunID: "run_1", Plan: workflowruntime.PlanRef{ID: published.plan.ID, Hash: published.plan.Hash},
 		NodeID: "node", AttemptID: "attempt_1", ExecutionID: "execution_1", Attempt: 1, Executor: publishedExecutor(published),
 		Input: json.RawMessage(input), Snapshot: json.RawMessage(snapshot), FencingToken: 1,
 	}

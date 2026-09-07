@@ -76,14 +76,14 @@ func (m *MemoryStore) RerunRun(_ context.Context, req RerunRunRequest) (CreateRu
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	run := req.Run
-	idemKey := scoped(run.TenantID, run.IdempotencyKey)
+	idemKey := scoped(run.OrganizationID, run.IdempotencyKey)
 	if existing, ok := m.idempotency[idemKey]; ok {
 		if existing.fingerprint != run.RequestFingerprint {
 			return CreateRunResult{}, errorf(CodeIdempotencyConflict, "idempotency key was used for a different request")
 		}
-		return CreateRunResult{Run: cloneRun(m.runs[scoped(run.TenantID, existing.runID)])}, nil
+		return CreateRunResult{Run: cloneRun(m.runs[scoped(run.OrganizationID, existing.runID)])}, nil
 	}
-	source, ok := m.runs[scoped(run.TenantID, req.SourceRunID)]
+	source, ok := m.runs[scoped(run.OrganizationID, req.SourceRunID)]
 	if !ok {
 		return CreateRunResult{}, errorf(CodeNotFound, "source run not found")
 	}
@@ -95,7 +95,7 @@ func (m *MemoryStore) RerunRun(_ context.Context, req RerunRunRequest) (CreateRu
 		var latest *Attempt
 		for _, attempt := range m.attempts {
 			candidate := attempt
-			if candidate.TenantID == run.TenantID && candidate.RunID == source.ID && candidate.NodeID == req.FromNodeID && (latest == nil || candidate.Number > latest.Number) {
+			if candidate.OrganizationID == run.OrganizationID && candidate.RunID == source.ID && candidate.NodeID == req.FromNodeID && (latest == nil || candidate.Number > latest.Number) {
 				latest = &candidate
 			}
 		}
@@ -107,10 +107,10 @@ func (m *MemoryStore) RerunRun(_ context.Context, req RerunRunRequest) (CreateRu
 	run.Plan.ID, run.Plan.Hash, run.Input = source.Plan.ID, source.Plan.Hash, cloneJSON(input)
 	lineage := RerunLineage{SourceRunID: source.ID, FromNodeID: req.FromNodeID, CreatedAt: run.CreatedAt}
 	run.Rerun = &lineage
-	m.runs[scoped(run.TenantID, run.ID)] = run
+	m.runs[scoped(run.OrganizationID, run.ID)] = run
 	m.idempotency[idemKey] = idempotencyRecord{runID: run.ID, fingerprint: run.RequestFingerprint}
-	m.rerunLineage[scoped(run.TenantID, run.ID)] = lineage
-	m.appendEventLocked(run.TenantID, run.ID, Event{Type: "run.created", At: run.CreatedAt})
+	m.rerunLineage[scoped(run.OrganizationID, run.ID)] = lineage
+	m.appendEventLocked(run.OrganizationID, run.ID, Event{Type: "run.created", At: run.CreatedAt})
 	m.createAttemptLocked(run, run.Plan.EntryNodeID, run.Plan.Executor, run.Input, run.CreatedAt, 1, "")
 	return CreateRunResult{Run: cloneRun(run), Created: true}, nil
 }
@@ -120,22 +120,22 @@ func (m *MemoryStore) CreateSubworkflow(_ context.Context, req CreateSubworkflow
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	link := req.Link
-	key := scoped(link.TenantID, link.ParentExecutionID)
+	key := scoped(link.OrganizationID, link.ParentExecutionID)
 	if existing, ok := m.subworkflowLinks[key]; ok {
-		record, found := m.idempotency[scoped(req.Run.TenantID, req.Run.IdempotencyKey)]
+		record, found := m.idempotency[scoped(req.Run.OrganizationID, req.Run.IdempotencyKey)]
 		if !found || existing.ChildRunID != record.runID || record.fingerprint != req.Run.RequestFingerprint {
 			return CreateRunResult{}, errorf(CodeConflict, "parent execution already links another child")
 		}
-		return CreateRunResult{Run: cloneRun(m.runs[scoped(req.Run.TenantID, record.runID)])}, nil
+		return CreateRunResult{Run: cloneRun(m.runs[scoped(req.Run.OrganizationID, record.runID)])}, nil
 	}
-	parent, ok := m.runs[scoped(link.TenantID, link.ParentRunID)]
+	parent, ok := m.runs[scoped(link.OrganizationID, link.ParentRunID)]
 	if !ok {
 		return CreateRunResult{}, errorf(CodeNotFound, "parent run not found")
 	}
 	if IsTerminalRun(parent.Status) || parent.CancelRequestedAt != nil {
 		return CreateRunResult{}, errorf(CodeInvalidTransition, "parent run cannot start a subworkflow")
 	}
-	parentAttempt, ok := m.attempts[scoped(link.TenantID, link.ParentAttemptID)]
+	parentAttempt, ok := m.attempts[scoped(link.OrganizationID, link.ParentAttemptID)]
 	if !ok || parentAttempt.RunID != link.ParentRunID || parentAttempt.NodeID != link.ParentNodeID || parentAttempt.ExecutionID != link.ParentExecutionID {
 		return CreateRunResult{}, errorf(CodeNotFound, "parent attempt not found")
 	}
@@ -148,7 +148,7 @@ func (m *MemoryStore) CreateSubworkflow(_ context.Context, req CreateSubworkflow
 	return result, nil
 }
 
-// CreateRun atomically enforces tenant-scoped idempotency and seeds entry work.
+// CreateRun atomically enforces organization-scoped idempotency and seeds entry work.
 func (m *MemoryStore) CreateRun(_ context.Context, req CreateRunRequest) (CreateRunResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -156,18 +156,18 @@ func (m *MemoryStore) CreateRun(_ context.Context, req CreateRunRequest) (Create
 }
 
 func (m *MemoryStore) createRunLocked(run Run) (CreateRunResult, error) {
-	if err := validateTenantAndID(run.TenantID, run.ID); err != nil {
+	if err := validateOrganizationAndID(run.OrganizationID, run.ID); err != nil {
 		return CreateRunResult{}, err
 	}
-	idemKey := scoped(run.TenantID, run.IdempotencyKey)
+	idemKey := scoped(run.OrganizationID, run.IdempotencyKey)
 	if existing, ok := m.idempotency[idemKey]; ok {
 		if existing.fingerprint != run.RequestFingerprint {
 			return CreateRunResult{}, errorf(CodeIdempotencyConflict, "idempotency key was used for a different request")
 		}
-		found := cloneRun(m.runs[scoped(run.TenantID, existing.runID)])
+		found := cloneRun(m.runs[scoped(run.OrganizationID, existing.runID)])
 		return CreateRunResult{Run: found, Created: false}, nil
 	}
-	if _, exists := m.runs[scoped(run.TenantID, run.ID)]; exists {
+	if _, exists := m.runs[scoped(run.OrganizationID, run.ID)]; exists {
 		return CreateRunResult{}, errorf(CodeConflict, "run id already exists")
 	}
 	if run.Status != RunPending || run.Plan.ID == "" || run.Plan.Hash == "" {
@@ -177,20 +177,20 @@ func (m *MemoryStore) createRunLocked(run Run) (CreateRunResult, error) {
 		return CreateRunResult{}, errorf(CodeInvalidArgument, "entry node executor is required")
 	}
 	run.Input = cloneJSON(run.Input)
-	m.runs[scoped(run.TenantID, run.ID)] = run
+	m.runs[scoped(run.OrganizationID, run.ID)] = run
 	m.idempotency[idemKey] = idempotencyRecord{runID: run.ID, fingerprint: run.RequestFingerprint}
-	m.appendEventLocked(run.TenantID, run.ID, Event{Type: "run.created", At: run.CreatedAt})
+	m.appendEventLocked(run.OrganizationID, run.ID, Event{Type: "run.created", At: run.CreatedAt})
 	if run.Plan.EntryNodeID != "" {
 		m.createAttemptLocked(run, run.Plan.EntryNodeID, run.Plan.Executor, run.Input, run.CreatedAt, 1, "")
 	}
 	return CreateRunResult{Run: cloneRun(run), Created: true}, nil
 }
 
-// GetRun returns a tenant-scoped run.
-func (m *MemoryStore) GetRun(_ context.Context, tenantID TenantID, runID string) (Run, error) {
+// GetRun returns a organization-scoped run.
+func (m *MemoryStore) GetRun(_ context.Context, organizationID OrganizationID, runID string) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	run, ok := m.runs[scoped(tenantID, runID)]
+	run, ok := m.runs[scoped(organizationID, runID)]
 	if !ok {
 		return Run{}, errorf(CodeNotFound, "run not found")
 	}
@@ -198,19 +198,19 @@ func (m *MemoryStore) GetRun(_ context.Context, tenantID TenantID, runID string)
 }
 
 // RequestCancel persists intent atomically and immediately finalizes idle work.
-func (m *MemoryStore) RequestCancel(_ context.Context, tenantID TenantID, runID string, now time.Time) (CancelRunResult, error) {
+func (m *MemoryStore) RequestCancel(_ context.Context, organizationID OrganizationID, runID string, now time.Time) (CancelRunResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result, err := m.requestCancelLocked(tenantID, runID, now)
+	result, err := m.requestCancelLocked(organizationID, runID, now)
 	if err != nil {
 		return CancelRunResult{}, err
 	}
-	m.cancelDescendantsLocked(tenantID, runID, now, map[string]bool{runID: true})
+	m.cancelDescendantsLocked(organizationID, runID, now, map[string]bool{runID: true})
 	return result, nil
 }
 
-func (m *MemoryStore) requestCancelLocked(tenantID TenantID, runID string, now time.Time) (CancelRunResult, error) {
-	key := scoped(tenantID, runID)
+func (m *MemoryStore) requestCancelLocked(organizationID OrganizationID, runID string, now time.Time) (CancelRunResult, error) {
+	key := scoped(organizationID, runID)
 	run, ok := m.runs[key]
 	if !ok {
 		return CancelRunResult{}, errorf(CodeNotFound, "run not found")
@@ -222,7 +222,7 @@ func (m *MemoryStore) requestCancelLocked(tenantID TenantID, runID string, now t
 		return CancelRunResult{}, errorf(CodeInvalidTransition, "terminal run cannot be cancelled")
 	}
 	run.CancelRequestedAt = timePointer(now)
-	active := m.hasActiveAttemptLocked(tenantID, runID)
+	active := m.hasActiveAttemptLocked(organizationID, runID)
 	if active {
 		if err := requireRunTransition(run.Status, RunCancelling); err != nil {
 			return CancelRunResult{}, err
@@ -233,37 +233,37 @@ func (m *MemoryStore) requestCancelLocked(tenantID TenantID, runID string, now t
 			return CancelRunResult{}, err
 		}
 		run.Status = RunCancelled
-		m.cancelIdleAttemptsLocked(tenantID, runID, now)
+		m.cancelIdleAttemptsLocked(organizationID, runID, now)
 	}
 	run.Version++
 	run.UpdatedAt = now
 	m.runs[key] = run
-	m.appendEventLocked(tenantID, runID, Event{Type: "run.cancel_requested", At: now})
+	m.appendEventLocked(organizationID, runID, Event{Type: "run.cancel_requested", At: now})
 	if run.Status == RunCancelled {
-		m.appendEventLocked(tenantID, runID, Event{Type: "run.cancelled", At: now})
+		m.appendEventLocked(organizationID, runID, Event{Type: "run.cancelled", At: now})
 	}
 	return CancelRunResult{Run: cloneRun(run)}, nil
 }
 
-func (m *MemoryStore) cancelDescendantsLocked(tenantID TenantID, parentRunID string, now time.Time, visited map[string]bool) {
+func (m *MemoryStore) cancelDescendantsLocked(organizationID OrganizationID, parentRunID string, now time.Time, visited map[string]bool) {
 	for _, link := range m.subworkflowLinks {
-		if link.TenantID != tenantID || link.ParentRunID != parentRunID || visited[link.ChildRunID] {
+		if link.OrganizationID != organizationID || link.ParentRunID != parentRunID || visited[link.ChildRunID] {
 			continue
 		}
 		visited[link.ChildRunID] = true
-		_, _ = m.requestCancelLocked(tenantID, link.ChildRunID, now)
-		m.cancelDescendantsLocked(tenantID, link.ChildRunID, now, visited)
+		_, _ = m.requestCancelLocked(organizationID, link.ChildRunID, now)
+		m.cancelDescendantsLocked(organizationID, link.ChildRunID, now, visited)
 	}
 }
 
 // ListEvents returns ordered events strictly after afterCursor.
-func (m *MemoryStore) ListEvents(_ context.Context, tenantID TenantID, runID string, afterCursor uint64, limit int) ([]Event, error) {
+func (m *MemoryStore) ListEvents(_ context.Context, organizationID OrganizationID, runID string, afterCursor uint64, limit int) ([]Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.runs[scoped(tenantID, runID)]; !ok {
+	if _, ok := m.runs[scoped(organizationID, runID)]; !ok {
 		return nil, errorf(CodeNotFound, "run not found")
 	}
-	stored := m.events[scoped(tenantID, runID)]
+	stored := m.events[scoped(organizationID, runID)]
 	result := make([]Event, 0, min(limit, len(stored)))
 	for _, event := range stored {
 		if event.Cursor <= afterCursor {
@@ -278,15 +278,15 @@ func (m *MemoryStore) ListEvents(_ context.Context, tenantID TenantID, runID str
 }
 
 // ListInterrupts returns only unresolved interrupts in deterministic creation order.
-func (m *MemoryStore) ListInterrupts(_ context.Context, tenantID TenantID, runID string) ([]Interrupt, error) {
+func (m *MemoryStore) ListInterrupts(_ context.Context, organizationID OrganizationID, runID string) ([]Interrupt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.runs[scoped(tenantID, runID)]; !ok {
+	if _, ok := m.runs[scoped(organizationID, runID)]; !ok {
 		return nil, errorf(CodeNotFound, "run not found")
 	}
 	result := make([]Interrupt, 0)
 	for _, interrupt := range m.interrupts {
-		if interrupt.TenantID == tenantID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
+		if interrupt.OrganizationID == organizationID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
 			result = append(result, cloneInterrupt(interrupt))
 		}
 	}
@@ -306,14 +306,14 @@ func (m *MemoryStore) ResolveInterrupt(_ context.Context, req ResolveInterruptRe
 	if len(req.IdempotencyKey) < 8 || len(req.IdempotencyKey) > 128 {
 		return ResolveInterruptResult{}, errorf(CodeInvalidArgument, "idempotency key must contain 8 to 128 characters")
 	}
-	idempotencyKey := scoped(req.TenantID, req.IdempotencyKey)
+	idempotencyKey := scoped(req.OrganizationID, req.IdempotencyKey)
 	if existing, found := m.approvalIdempotency[idempotencyKey]; found {
 		if subtle.ConstantTimeCompare(existing.requestHash[:], req.RequestHash[:]) != 1 {
 			return ResolveInterruptResult{}, errorf(CodeIdempotencyConflict, "idempotency key was used for a different request")
 		}
 		return cloneResolveInterruptResult(existing.result), nil
 	}
-	key := scoped(req.TenantID, req.InterruptID)
+	key := scoped(req.OrganizationID, req.InterruptID)
 	interrupt, ok := m.interrupts[key]
 	if !ok || subtle.ConstantTimeCompare(interrupt.TokenDigest[:], req.TokenDigest[:]) != 1 {
 		return ResolveInterruptResult{}, errorf(CodeApprovalInvalid, "approval token is invalid")
@@ -330,12 +330,12 @@ func (m *MemoryStore) ResolveInterrupt(_ context.Context, req ResolveInterruptRe
 	if req.DecidedBy == "" || req.Decision.DecidedBy != req.DecidedBy {
 		return ResolveInterruptResult{}, errorf(CodeInvalidArgument, "approval actor is required and must match the decision")
 	}
-	runKey := scoped(req.TenantID, interrupt.RunID)
+	runKey := scoped(req.OrganizationID, interrupt.RunID)
 	run := m.runs[runKey]
 	if run.Status != RunSuspended && run.Status != RunRunning {
 		return ResolveInterruptResult{}, errorf(CodeInvalidTransition, "run cannot resume an interrupt")
 	}
-	attemptKey := scoped(req.TenantID, interrupt.AttemptID)
+	attemptKey := scoped(req.OrganizationID, interrupt.AttemptID)
 	attempt := m.attempts[attemptKey]
 	if attempt.Status != AttemptSuspended {
 		return ResolveInterruptResult{}, errorf(CodeConflict, "attempt is not suspended")
@@ -353,7 +353,7 @@ func (m *MemoryStore) ResolveInterrupt(_ context.Context, req ResolveInterruptRe
 	attempt.NextAttemptAt = req.Now
 	attempt.UpdatedAt = req.Now
 	m.attempts[attemptKey] = attempt
-	nodeKey := nodeScoped(req.TenantID, attempt.RunID, attempt.NodeID)
+	nodeKey := nodeScoped(req.OrganizationID, attempt.RunID, attempt.NodeID)
 	node := m.nodes[nodeKey]
 	node.Status = NodePending
 	node.UpdatedAt = req.Now
@@ -364,7 +364,7 @@ func (m *MemoryStore) ResolveInterrupt(_ context.Context, req ResolveInterruptRe
 	run.UpdatedAt = req.Now
 	run.Version++
 	m.runs[runKey] = run
-	m.appendEventLocked(req.TenantID, run.ID, Event{Type: "approval.resolved", At: req.Now})
+	m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "approval.resolved", At: req.Now})
 	result := ResolveInterruptResult{Interrupt: cloneInterrupt(interrupt), Run: cloneRun(run)}
 	m.approvalIdempotency[idempotencyKey] = approvalIdempotencyRecord{requestHash: req.RequestHash, result: result}
 	return cloneResolveInterruptResult(result), nil
@@ -374,9 +374,9 @@ func cloneResolveInterruptResult(result ResolveInterruptResult) ResolveInterrupt
 	return ResolveInterruptResult{Interrupt: cloneInterrupt(result.Interrupt), Run: cloneRun(result.Run)}
 }
 
-func (m *MemoryStore) appendEventLocked(tenantID TenantID, runID string, event Event) {
-	key := scoped(tenantID, runID)
-	event.TenantID = tenantID
+func (m *MemoryStore) appendEventLocked(organizationID OrganizationID, runID string, event Event) {
+	key := scoped(organizationID, runID)
+	event.OrganizationID = organizationID
 	event.RunID = runID
 	event.Cursor = uint64(len(m.events[key]) + 1)
 	event.Data = cloneJSON(event.Data)
@@ -384,7 +384,7 @@ func (m *MemoryStore) appendEventLocked(tenantID TenantID, runID string, event E
 }
 
 func (m *MemoryStore) createAttemptLocked(run Run, nodeID, executor string, input []byte, at time.Time, number int, executionID string) Attempt {
-	if existing, ok := m.nodes[nodeScoped(run.TenantID, run.ID, nodeID)]; ok && number <= existing.AttemptCount {
+	if existing, ok := m.nodes[nodeScoped(run.OrganizationID, run.ID, nodeID)]; ok && number <= existing.AttemptCount {
 		number = existing.AttemptCount + 1
 	}
 	m.nextID++
@@ -393,38 +393,40 @@ func (m *MemoryStore) createAttemptLocked(run Run, nodeID, executor string, inpu
 		executionID = attemptID
 	}
 	attempt := Attempt{
-		TenantID: run.TenantID, ID: attemptID, ExecutionID: executionID, RunID: run.ID,
+		OrganizationID: run.OrganizationID, ID: attemptID, ExecutionID: executionID, RunID: run.ID,
 		NodeID: nodeID, Executor: executor, Number: number, Status: AttemptPending,
 		Input: cloneJSON(input), NextAttemptAt: at, CreatedAt: at, UpdatedAt: at,
 	}
-	key := scoped(run.TenantID, attempt.ID)
+	key := scoped(run.OrganizationID, attempt.ID)
 	m.attempts[key] = attempt
 	m.attemptOrder = append(m.attemptOrder, key)
-	m.nodes[nodeScoped(run.TenantID, run.ID, nodeID)] = NodeState{
-		TenantID: run.TenantID, RunID: run.ID, NodeID: nodeID, Status: NodePending,
+	m.nodes[nodeScoped(run.OrganizationID, run.ID, nodeID)] = NodeState{
+		OrganizationID: run.OrganizationID, RunID: run.ID, NodeID: nodeID, Status: NodePending,
 		AttemptCount: number, LatestAttemptID: attempt.ID, UpdatedAt: at,
 	}
 	return attempt
 }
 
-func scoped(tenantID TenantID, id string) string { return string(tenantID) + "\x00" + id }
-
-func nodeScoped(tenantID TenantID, runID, nodeID string) string {
-	return string(tenantID) + "\x00" + runID + "\x00" + nodeID
+func scoped(organizationID OrganizationID, id string) string {
+	return string(organizationID) + "\x00" + id
 }
 
-func (m *MemoryStore) hasActiveAttemptLocked(tenantID TenantID, runID string) bool {
+func nodeScoped(organizationID OrganizationID, runID, nodeID string) string {
+	return string(organizationID) + "\x00" + runID + "\x00" + nodeID
+}
+
+func (m *MemoryStore) hasActiveAttemptLocked(organizationID OrganizationID, runID string) bool {
 	for _, attempt := range m.attempts {
-		if attempt.TenantID == tenantID && attempt.RunID == runID && attempt.Status == AttemptRunning {
+		if attempt.OrganizationID == organizationID && attempt.RunID == runID && attempt.Status == AttemptRunning {
 			return true
 		}
 	}
 	return false
 }
 
-func (m *MemoryStore) cancelIdleAttemptsLocked(tenantID TenantID, runID string, now time.Time) {
+func (m *MemoryStore) cancelIdleAttemptsLocked(organizationID OrganizationID, runID string, now time.Time) {
 	for key, attempt := range m.attempts {
-		if attempt.TenantID != tenantID || attempt.RunID != runID {
+		if attempt.OrganizationID != organizationID || attempt.RunID != runID {
 			continue
 		}
 		if attempt.Status == AttemptPending || attempt.Status == AttemptSuspended {
@@ -432,7 +434,7 @@ func (m *MemoryStore) cancelIdleAttemptsLocked(tenantID TenantID, runID string, 
 			attempt.FinishedAt = timePointer(now)
 			attempt.UpdatedAt = now
 			m.attempts[key] = attempt
-			nodeKey := nodeScoped(tenantID, runID, attempt.NodeID)
+			nodeKey := nodeScoped(organizationID, runID, attempt.NodeID)
 			node := m.nodes[nodeKey]
 			node.Status = NodeCancelled
 			node.UpdatedAt = now
@@ -440,7 +442,7 @@ func (m *MemoryStore) cancelIdleAttemptsLocked(tenantID TenantID, runID string, 
 		}
 	}
 	for key, interrupt := range m.interrupts {
-		if interrupt.TenantID == tenantID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
+		if interrupt.OrganizationID == organizationID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
 			interrupt.Status = InterruptCancelled
 			interrupt.ResolvedAt = timePointer(now)
 			m.interrupts[key] = interrupt

@@ -47,7 +47,7 @@ func TestSourceReaderRejectsPathEscape(t *testing.T) {
 // 验证合法文件按原始字节读取，供迁移 hash 和 YAML 解析共同使用。
 func TestSourceReaderReadsBoundedDefinition(t *testing.T) {
 	root := t.TempDir()
-	directory := filepath.Join(root, "tenant", "flow")
+	directory := filepath.Join(root, "organization", "flow")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestSourceReaderReadsBoundedDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := &SourceReader{root: root}
-	got, err := reader.readDefinition(filepath.Join("tenant", "flow"), "v1.yaml")
+	got, err := reader.readDefinition(filepath.Join("organization", "flow"), "v1.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

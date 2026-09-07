@@ -27,8 +27,8 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 	}
 	defer pool.Close()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenantID, workflowID := "delivery_tenant_"+suffix, "delivery_flow_"+suffix
-	if err = seedPlatformTenant(ctx, pool, tenantID, workflowID); err != nil {
+	organizationID, workflowID := "delivery_organization_"+suffix, "delivery_flow_"+suffix
+	if err = seedPlatformOrganization(ctx, pool, organizationID, workflowID); err != nil {
 		t.Fatal(err)
 	}
 	registry := workflow.BuiltinRegistry()
@@ -41,7 +41,7 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 		},
 		Edges: []workflow.EdgeDefinition{{ID: "edge", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}},
 	}
-	versionOne, _, err := catalog.Publish(ctx, tenantID, workflowID, definitionValue, "delivery-publication")
+	versionOne, _, err := catalog.Publish(ctx, organizationID, workflowID, definitionValue, "delivery-publication")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,44 +55,44 @@ func TestPostgresTriggerRunDeliveryIsIdempotentAndTopicScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trigger, err := triggers.Create(ctx, CreateTriggerRequest{TenantID: tenantID, ActorID: "operator", WorkflowID: workflowID, Kind: TriggerAPI, Name: "api"})
+	trigger, err := triggers.Create(ctx, CreateTriggerRequest{OrganizationID: organizationID, ActorID: "operator", WorkflowID: workflowID, Kind: TriggerAPI, Name: "api"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	firing, created, err := triggers.Fire(ctx, FireRequest{TenantID: tenantID, TriggerID: trigger.ID, ExpectedKind: TriggerAPI, DeduplicationKey: "delivery-request", Payload: json.RawMessage(`{"value":1}`)})
+	firing, created, err := triggers.Fire(ctx, FireRequest{OrganizationID: organizationID, TriggerID: trigger.ID, ExpectedKind: TriggerAPI, DeduplicationKey: "delivery-request", Payload: json.RawMessage(`{"value":1}`)})
 	if err != nil || !created {
 		t.Fatalf("firing=%+v created=%v err=%v", firing, created, err)
 	}
 	definitionValue.Metadata = map[string]json.RawMessage{"revision": json.RawMessage(`2`)}
-	versionTwo, _, err := catalog.Publish(ctx, tenantID, workflowID, definitionValue, "delivery-publication-v2")
+	versionTwo, _, err := catalog.Publish(ctx, organizationID, workflowID, definitionValue, "delivery-publication-v2")
 	if err != nil || versionTwo.ID == versionOne.ID {
 		t.Fatalf("publish v2=%+v err=%v", versionTwo, err)
 	}
-	if err = triggers.Delete(ctx, DeleteTriggerRequest{TenantID: tenantID, ActorID: "operator", TriggerID: trigger.ID,
+	if err = triggers.Delete(ctx, DeleteTriggerRequest{OrganizationID: organizationID, ActorID: "operator", TriggerID: trigger.ID,
 		ExpectedUpdatedAt: trigger.UpdatedAt, IdempotencyKey: "delete-accepted-trigger"}); err != nil {
 		t.Fatalf("delete accepted trigger: %v", err)
 	}
-	if _, err = pool.Exec(ctx, `INSERT INTO outbox_messages (id,tenant_id,aggregate_type,aggregate_id,topic,payload) VALUES ($1,$2,'run','unrelated','run.created','{}')`, "unrelated_"+suffix, tenantID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO outbox_messages (id,organization_id,aggregate_type,aggregate_id,topic,payload) VALUES ($1,$2,'run','unrelated','run.created','{}')`, "unrelated_"+suffix, organizationID); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher, err := NewOutboxDispatcher(NewPostgresTopicDeliveryStore(pool, "trigger.fired"), delivery, "delivery-worker", time.Minute, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := dispatcher.DispatchOne(ctx, tenantID, time.Now().UTC())
+	result, err := dispatcher.DispatchOne(ctx, organizationID, time.Now().UTC())
 	if err != nil || !result.Delivered {
 		t.Fatalf("delivery=%+v err=%v", result, err)
 	}
-	if replay, replayErr := dispatcher.DispatchOne(ctx, tenantID, time.Now().UTC()); replayErr != nil || replay.MessageID != "" {
+	if replay, replayErr := dispatcher.DispatchOne(ctx, organizationID, time.Now().UTC()); replayErr != nil || replay.MessageID != "" {
 		t.Fatalf("replay delivery=%+v err=%v", replay, replayErr)
 	}
 	var runCount, unrelatedPending int
 	var deliveredPlanID string
 	if err = pool.QueryRow(ctx, `SELECT count(*),max(execution_plan_id) FROM runs
-		WHERE tenant_id=$1 AND idempotency_key=$2`, tenantID, "trigger:"+firing.ID).Scan(&runCount, &deliveredPlanID); err != nil {
+		WHERE organization_id=$1 AND idempotency_key=$2`, organizationID, "trigger:"+firing.ID).Scan(&runCount, &deliveredPlanID); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM outbox_messages WHERE tenant_id=$1 AND id=$2 AND topic='run.created' AND delivered_at IS NULL`, tenantID, "unrelated_"+suffix).Scan(&unrelatedPending); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM outbox_messages WHERE organization_id=$1 AND id=$2 AND topic='run.created' AND delivered_at IS NULL`, organizationID, "unrelated_"+suffix).Scan(&unrelatedPending); err != nil {
 		t.Fatal(err)
 	}
 	if runCount != 1 || unrelatedPending != 1 || deliveredPlanID != versionOne.ID || deliveredPlanID == versionTwo.ID {

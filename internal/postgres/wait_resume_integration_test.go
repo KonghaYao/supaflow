@@ -35,10 +35,7 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
-	tenantID, workflowID := "tenant_wait_"+suffix, "wait_"+suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1, $1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
+	organizationID, workflowID := "organization_wait_"+suffix, "wait_"+suffix
 	definition := workflow.WorkflowDefinition{
 		SchemaVersion: workflow.DefinitionSchemaV1, ID: workflowID,
 		Nodes: []workflow.NodeDefinition{
@@ -54,13 +51,13 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 	catalog := NewPlanCatalog(pool, workflow.BuiltinRegistry(), workflow.CompilePolicy{
 		AllowedCapabilities: workflow.CapabilitySet{Cancellable: true, Interruptible: true, Idempotent: true},
 	})
-	published, _, err := catalog.Publish(ctx, tenantID, workflowID, definition, "publish-wait")
+	published, _, err := catalog.Publish(ctx, organizationID, workflowID, definition, "publish-wait")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := NewRuntimeStore(pool)
 	service := workflowruntime.NewService(store, nil, nil)
-	created, err := service.StartRun(ctx, workflowruntime.TenantID(tenantID), workflowruntime.StartRunRequest{
+	created, err := service.StartRun(ctx, workflowruntime.OrganizationID(organizationID), workflowruntime.StartRunRequest{
 		Plan:  workflowruntime.PlanRef{ID: published.ID, Hash: published.Hash, EntryNodeID: "start", Executor: "builtin.start"},
 		Input: json.RawMessage(`{"value":1}`), IdempotencyKey: "run-wait",
 	})
@@ -69,13 +66,13 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	start, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || start == nil {
 		t.Fatalf("claim start=%+v err=%v", start, err)
 	}
 	_, err = store.CompleteAttempt(ctx, workflowruntime.CompleteAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), RunID: created.Run.ID, AttemptID: start.Attempt.ID,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), RunID: created.Run.ID, AttemptID: start.Attempt.ID,
 		WorkerID: "worker", FencingToken: start.Lease.FencingToken, Now: now,
 		RunStatus: workflowruntime.RunRunning, Next: []workflowruntime.NewAttempt{{
 			NodeID: "wait", Executor: "builtin.wait", Input: json.RawMessage(`{"value":1}`),
@@ -85,14 +82,14 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || wait == nil || wait.Attempt.NodeID != "wait" {
 		t.Fatalf("claim wait=%+v err=%v", wait, err)
 	}
 	token := sha256.Sum256([]byte("wait-resume-" + suffix))
 	_, err = store.SuspendAttempt(ctx, workflowruntime.SuspendAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), RunID: created.Run.ID, AttemptID: wait.Attempt.ID,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), RunID: created.Run.ID, AttemptID: wait.Attempt.ID,
 		WorkerID: "worker", FencingToken: wait.Lease.FencingToken, Now: now,
 		Interrupt: workflowruntime.Interrupt{ID: "wait_" + suffix, Kind: "wait", TokenDigest: token, ExpiresAt: now.Add(time.Second), AutoResume: true},
 	})
@@ -100,11 +97,11 @@ func TestPostgresAutoResumesDueWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE interrupts SET expires_at=clock_timestamp()-interval '1 second'
-		WHERE tenant_id=$1 AND id=$2`, tenantID, "wait_"+suffix); err != nil {
+		WHERE organization_id=$1 AND id=$2`, organizationID, "wait_"+suffix); err != nil {
 		t.Fatal(err)
 	}
 	resumed, err := store.ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "worker-2", Now: now.Add(time.Second), LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), WorkerID: "worker-2", Now: now.Add(time.Second), LeaseDuration: time.Minute,
 	})
 	if err != nil || resumed == nil || resumed.Attempt.ID != wait.Attempt.ID || !jsonSemanticallyEqual(resumed.Attempt.ResumeData, []byte(`{"expired":true}`)) || resumed.Lease.FencingToken <= wait.Lease.FencingToken {
 		t.Fatalf("resumed wait=%+v err=%v", resumed, err)

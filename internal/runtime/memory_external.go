@@ -17,7 +17,7 @@ const (
 )
 
 // ExpireRuns atomically terminalizes a bounded deterministic batch.
-func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.Time, limit int) (int, error) {
+func (m *MemoryStore) ExpireRuns(_ context.Context, organizationID OrganizationID, now time.Time, limit int) (int, error) {
 	if limit < 1 || limit > 1000 {
 		return 0, errorf(CodeInvalidArgument, "expiry limit must be between 1 and 1000")
 	}
@@ -25,7 +25,7 @@ func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.
 	defer m.mu.Unlock()
 	ids := make([]string, 0)
 	for _, run := range m.runs {
-		if run.TenantID == tenantID && !IsTerminalRun(run.Status) && run.DeadlineAt != nil && !now.Before(*run.DeadlineAt) {
+		if run.OrganizationID == organizationID && !IsTerminalRun(run.Status) && run.DeadlineAt != nil && !now.Before(*run.DeadlineAt) {
 			ids = append(ids, run.ID)
 		}
 	}
@@ -34,7 +34,7 @@ func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.
 		ids = ids[:limit]
 	}
 	for _, runID := range ids {
-		m.expireRunLocked(tenantID, runID, now)
+		m.expireRunLocked(organizationID, runID, now)
 	}
 	remaining := limit - len(ids)
 	if remaining <= 0 {
@@ -46,8 +46,8 @@ func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.
 	}
 	due := make([]dueApproval, 0)
 	for key, interrupt := range m.interrupts {
-		run := m.runs[scoped(tenantID, interrupt.RunID)]
-		if interrupt.TenantID == tenantID && interrupt.Kind == "approval" && interrupt.Status == InterruptPending &&
+		run := m.runs[scoped(organizationID, interrupt.RunID)]
+		if interrupt.OrganizationID == organizationID && interrupt.Kind == "approval" && interrupt.Status == InterruptPending &&
 			!now.Before(interrupt.ExpiresAt) && !IsTerminalRun(run.Status) {
 			due = append(due, dueApproval{key: key, interrupt: interrupt})
 		}
@@ -63,7 +63,7 @@ func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.
 	}
 	expired := 0
 	for _, item := range due {
-		runKey := scoped(tenantID, item.interrupt.RunID)
+		runKey := scoped(organizationID, item.interrupt.RunID)
 		run := m.runs[runKey]
 		if IsTerminalRun(run.Status) {
 			continue
@@ -75,25 +75,25 @@ func (m *MemoryStore) ExpireRuns(_ context.Context, tenantID TenantID, now time.
 }
 
 // ExpireRun terminalizes exactly one due run and invalidates its leases.
-func (m *MemoryStore) ExpireRun(_ context.Context, tenantID TenantID, runID string, now time.Time) (bool, error) {
-	if err := validateTenantAndID(tenantID, runID); err != nil {
+func (m *MemoryStore) ExpireRun(_ context.Context, organizationID OrganizationID, runID string, now time.Time) (bool, error) {
+	if err := validateOrganizationAndID(organizationID, runID); err != nil {
 		return false, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	run, exists := m.runs[scoped(tenantID, runID)]
+	run, exists := m.runs[scoped(organizationID, runID)]
 	if !exists {
 		return false, errorf(CodeNotFound, "run not found")
 	}
 	if IsTerminalRun(run.Status) || run.DeadlineAt == nil || now.Before(*run.DeadlineAt) {
 		return false, nil
 	}
-	m.expireRunLocked(tenantID, runID, now)
+	m.expireRunLocked(organizationID, runID, now)
 	return true, nil
 }
 
-func (m *MemoryStore) expireRunLocked(tenantID TenantID, runID string, now time.Time) {
-	key := scoped(tenantID, runID)
+func (m *MemoryStore) expireRunLocked(organizationID OrganizationID, runID string, now time.Time) {
+	key := scoped(organizationID, runID)
 	run := m.runs[key]
 	if IsTerminalRun(run.Status) {
 		return
@@ -101,36 +101,36 @@ func (m *MemoryStore) expireRunLocked(tenantID TenantID, runID string, now time.
 	run.Status, run.UpdatedAt, run.Version = RunError, now, run.Version+1
 	m.runs[key] = run
 	for attemptKey, attempt := range m.attempts {
-		if attempt.TenantID != tenantID || attempt.RunID != runID || isTerminalAttempt(attempt.Status) {
+		if attempt.OrganizationID != organizationID || attempt.RunID != runID || isTerminalAttempt(attempt.Status) {
 			continue
 		}
 		attempt.Status, attempt.ErrorCode, attempt.FinishedAt, attempt.UpdatedAt = AttemptError, "run_timeout", timePointer(now), now
 		m.attempts[attemptKey] = attempt
 		delete(m.leases, attemptKey)
-		nodeKey := nodeScoped(tenantID, runID, attempt.NodeID)
+		nodeKey := nodeScoped(organizationID, runID, attempt.NodeID)
 		node := m.nodes[nodeKey]
 		node.Status, node.UpdatedAt = NodeError, now
 		m.nodes[nodeKey] = node
 	}
 	for interruptKey, interrupt := range m.interrupts {
-		if interrupt.TenantID == tenantID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
+		if interrupt.OrganizationID == organizationID && interrupt.RunID == runID && interrupt.Status == InterruptPending {
 			interrupt.Status, interrupt.ResolvedAt = InterruptCancelled, timePointer(now)
 			m.interrupts[interruptKey] = interrupt
 		}
 	}
 	payload := json.RawMessage(`{"code":"run_timeout"}`)
-	m.appendEventLocked(tenantID, runID, Event{Type: "run.timed_out", Data: payload, At: now})
-	m.appendEventLocked(tenantID, runID, Event{Type: "run.error", Data: payload, At: now})
+	m.appendEventLocked(organizationID, runID, Event{Type: "run.timed_out", Data: payload, At: now})
+	m.appendEventLocked(organizationID, runID, Event{Type: "run.error", Data: payload, At: now})
 	for _, link := range m.subworkflowLinks {
-		if link.TenantID == tenantID && link.ParentRunID == runID {
-			m.expireRunLocked(tenantID, link.ChildRunID, now)
+		if link.OrganizationID == organizationID && link.ParentRunID == runID {
+			m.expireRunLocked(organizationID, link.ChildRunID, now)
 		}
 	}
 }
 
 func (m *MemoryStore) finalizeExpiredApprovalLocked(run Run, interruptKey string, interrupt Interrupt, now time.Time) {
 	for key, attempt := range m.attempts {
-		if attempt.TenantID != run.TenantID || attempt.RunID != run.ID || isTerminalAttempt(attempt.Status) {
+		if attempt.OrganizationID != run.OrganizationID || attempt.RunID != run.ID || isTerminalAttempt(attempt.Status) {
 			continue
 		}
 		attempt.Status, attempt.FinishedAt, attempt.UpdatedAt = AttemptCancelled, timePointer(now), now
@@ -139,7 +139,7 @@ func (m *MemoryStore) finalizeExpiredApprovalLocked(run Run, interruptKey string
 		}
 		m.attempts[key] = attempt
 		delete(m.leases, key)
-		nodeKey := nodeScoped(run.TenantID, run.ID, attempt.NodeID)
+		nodeKey := nodeScoped(run.OrganizationID, run.ID, attempt.NodeID)
 		node := m.nodes[nodeKey]
 		node.Status, node.UpdatedAt = NodeCancelled, now
 		if attempt.ID == interrupt.AttemptID {
@@ -148,7 +148,7 @@ func (m *MemoryStore) finalizeExpiredApprovalLocked(run Run, interruptKey string
 		m.nodes[nodeKey] = node
 	}
 	for key, candidate := range m.interrupts {
-		if candidate.TenantID != run.TenantID || candidate.RunID != run.ID || candidate.Status != InterruptPending {
+		if candidate.OrganizationID != run.OrganizationID || candidate.RunID != run.ID || candidate.Status != InterruptPending {
 			continue
 		}
 		candidate.Status, candidate.ResolvedAt = InterruptCancelled, timePointer(now)
@@ -158,10 +158,10 @@ func (m *MemoryStore) finalizeExpiredApprovalLocked(run Run, interruptKey string
 		m.interrupts[key] = candidate
 	}
 	run.Status, run.UpdatedAt, run.Version = RunError, now, run.Version+1
-	m.runs[scoped(run.TenantID, run.ID)] = run
+	m.runs[scoped(run.OrganizationID, run.ID)] = run
 	payload, _ := json.Marshal(map[string]string{"code": "node_timeout", "nodeId": interrupt.NodeID})
-	m.appendEventLocked(run.TenantID, run.ID, Event{Type: "node.timed_out", Data: payload, At: now})
-	m.appendEventLocked(run.TenantID, run.ID, Event{Type: "run.error", Data: payload, At: now})
+	m.appendEventLocked(run.OrganizationID, run.ID, Event{Type: "node.timed_out", Data: payload, At: now})
+	m.appendEventLocked(run.OrganizationID, run.ID, Event{Type: "run.error", Data: payload, At: now})
 }
 
 func isTerminalAttempt(status AttemptStatus) bool {
@@ -175,10 +175,10 @@ func (m *MemoryStore) AppendStreamChunk(_ context.Context, req AppendStreamChunk
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, attempt, _, err := m.requireLeaseLocked(req.TenantID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now); err != nil {
+	if _, attempt, _, err := m.requireLeaseLocked(req.OrganizationID, req.RunID, req.AttemptID, req.WorkerID, req.FencingToken, req.Now); err != nil {
 		return Event{}, err
 	} else {
-		key := scoped(req.TenantID, req.AttemptID)
+		key := scoped(req.OrganizationID, req.AttemptID)
 		digest := sha256.Sum256(req.Chunk)
 		if record, ok := m.streamRecords[key][req.Sequence]; ok {
 			if subtle.ConstantTimeCompare(record.digest[:], digest[:]) != 1 {
@@ -199,8 +199,8 @@ func (m *MemoryStore) AppendStreamChunk(_ context.Context, req AppendStreamChunk
 			"sequence": req.Sequence, "chunk": json.RawMessage(req.Chunk),
 		})
 		event := Event{Type: "stream.chunk", Data: payload, At: req.Now}
-		m.appendEventLocked(req.TenantID, req.RunID, event)
-		stored := m.events[scoped(req.TenantID, req.RunID)]
+		m.appendEventLocked(req.OrganizationID, req.RunID, event)
+		stored := m.events[scoped(req.OrganizationID, req.RunID)]
 		storedEvent := cloneEvent(stored[len(stored)-1])
 		if m.streamRecords[key] == nil {
 			m.streamRecords[key] = make(map[int]streamChunkRecord)
@@ -217,14 +217,14 @@ func (m *MemoryStore) ResumeWebhook(_ context.Context, req ResumeWebhookRequest)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	idemKey := scoped(req.TenantID, req.IdempotencyKey)
+	idemKey := scoped(req.OrganizationID, req.IdempotencyKey)
 	if existing, ok := m.webhookIdempotency[idemKey]; ok {
 		if subtle.ConstantTimeCompare(existing.requestHash[:], req.RequestHash[:]) != 1 {
 			return ResumeWebhookResult{}, errorf(CodeIdempotencyConflict, "idempotency key was used for a different request")
 		}
 		return cloneWebhookResult(existing.result), nil
 	}
-	key := scoped(req.TenantID, req.InterruptID)
+	key := scoped(req.OrganizationID, req.InterruptID)
 	interrupt, ok := m.interrupts[key]
 	if !ok || interrupt.Kind != "webhook" || interrupt.RunID != req.RunID || interrupt.NodeID != req.NodeID || interrupt.AttemptID != req.AttemptID || subtle.ConstantTimeCompare(interrupt.TokenDigest[:], req.TokenDigest[:]) != 1 {
 		return ResumeWebhookResult{}, errorf(CodeApprovalInvalid, "webhook resume token is invalid")
@@ -235,9 +235,9 @@ func (m *MemoryStore) ResumeWebhook(_ context.Context, req ResumeWebhookRequest)
 	if !req.Now.Before(interrupt.ExpiresAt) {
 		return ResumeWebhookResult{}, errorf(CodeApprovalExpired, "webhook resume token has expired")
 	}
-	attemptKey := scoped(req.TenantID, interrupt.AttemptID)
+	attemptKey := scoped(req.OrganizationID, interrupt.AttemptID)
 	attempt := m.attempts[attemptKey]
-	runKey := scoped(req.TenantID, interrupt.RunID)
+	runKey := scoped(req.OrganizationID, interrupt.RunID)
 	run := m.runs[runKey]
 	if attempt.Status != AttemptSuspended || (run.Status != RunSuspended && run.Status != RunRunning) {
 		return ResumeWebhookResult{}, errorf(CodeInvalidTransition, "run cannot resume webhook interrupt")
@@ -246,7 +246,7 @@ func (m *MemoryStore) ResumeWebhook(_ context.Context, req ResumeWebhookRequest)
 	m.interrupts[key] = interrupt
 	attempt.Status, attempt.ResumeData, attempt.NextAttemptAt, attempt.UpdatedAt = AttemptPending, cloneJSON(req.Data), req.Now, req.Now
 	m.attempts[attemptKey] = attempt
-	nodeKey := nodeScoped(req.TenantID, run.ID, attempt.NodeID)
+	nodeKey := nodeScoped(req.OrganizationID, run.ID, attempt.NodeID)
 	node := m.nodes[nodeKey]
 	node.Status, node.UpdatedAt = NodePending, req.Now
 	m.nodes[nodeKey] = node
@@ -255,7 +255,7 @@ func (m *MemoryStore) ResumeWebhook(_ context.Context, req ResumeWebhookRequest)
 	}
 	run.UpdatedAt, run.Version = req.Now, run.Version+1
 	m.runs[runKey] = run
-	m.appendEventLocked(req.TenantID, run.ID, Event{Type: "webhook.resumed", Data: cloneJSON(req.Data), At: req.Now})
+	m.appendEventLocked(req.OrganizationID, run.ID, Event{Type: "webhook.resumed", Data: cloneJSON(req.Data), At: req.Now})
 	result := ResumeWebhookResult{Interrupt: cloneInterrupt(interrupt), Run: cloneRun(run)}
 	m.webhookIdempotency[idemKey] = webhookIdempotencyRecord{requestHash: req.RequestHash, result: result}
 	return cloneWebhookResult(result), nil

@@ -37,12 +37,12 @@ func (h *Handler) rerunRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	source, err := h.runtime.GetRun(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
+	source, err := h.runtime.GetRun(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	published, err := h.catalog.Resolve(r.Context(), principal.TenantID, source.Plan.ID, source.Plan.Hash)
+	published, err := h.catalog.Resolve(r.Context(), principal.OrganizationID, source.Plan.ID, source.Plan.Hash)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -65,7 +65,7 @@ func (h *Handler) rerunRun(w http.ResponseWriter, r *http.Request) {
 	if workflow.IsShadowAttemptExecutor(source.Plan.Executor) {
 		entryExecutor = workflow.ShadowAttemptExecutor(entry)
 	}
-	result, err := h.runtime.Rerun(r.Context(), runtime.TenantID(principal.TenantID), runtime.RerunRequest{
+	result, err := h.runtime.Rerun(r.Context(), runtime.OrganizationID(principal.OrganizationID), runtime.RerunRequest{
 		SourceRunID: source.ID, FromNodeID: fromNodeID, EntryNodeID: entry.ID,
 		EntryExecutor: entryExecutor, IdempotencyKey: idempotencyKey, Priority: body.Priority,
 		Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,

@@ -102,14 +102,14 @@ type NodeType struct {
 	Migrations         []json.RawMessage          `json:"migrations"`
 }
 
-// ListWorkflowDrafts returns tenant-owned drafts.
+// ListWorkflowDrafts returns organization-owned drafts.
 func (c *Client) ListWorkflowDrafts(ctx context.Context) ([]WorkflowDraft, error) {
 	var result []WorkflowDraft
 	err := c.request(ctx, http.MethodGet, "/v1/workflows", "", nil, &result)
 	return result, err
 }
 
-// GetWorkflowDraft returns one tenant-owned draft.
+// GetWorkflowDraft returns one organization-owned draft.
 func (c *Client) GetWorkflowDraft(ctx context.Context, workflowID string) (WorkflowDraft, error) {
 	var result WorkflowDraft
 	err := c.request(ctx, http.MethodGet, "/v1/workflows/"+url.PathEscape(workflowID), "", nil, &result)

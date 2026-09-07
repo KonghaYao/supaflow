@@ -22,7 +22,7 @@ The production processes use these environment variables:
 | `SUPAFLOW_RESUME_TOKEN_SECRET` | all | yes | Shared HMAC secret of at least 32 bytes used to derive approval resume tokens. Every control-plane and worker replica must use the same value. |
 | `SUPAFLOW_ADDR` | control plane | no | Listen address; defaults to `127.0.0.1:8080`. |
 | `SUPAFLOW_WORKER_ID` | worker | no | Stable, unique identity for one worker process. A random ID is generated when absent; set it explicitly in production for diagnostics. Never share it between live replicas. |
-| `SUPAFLOW_WORKER_TENANTS` | worker | yes | Comma-separated allowlist of tenant IDs this worker polls. |
+| `SUPAFLOW_WORKER_TENANTS` | worker | yes | Transitional env contract: comma-separated organization IDs this worker polls. PR 2 preserves this name and behavior; PR 3 removes static enumeration in favor of organization-aware discovery and fair claiming. |
 | `SUPAFLOW_HTTP_ALLOWED_HOSTS` | worker | yes | Comma-separated exact hostname/IP allowlist for HTTP nodes. Empty configuration fails closed. |
 | `SUPAFLOW_WEBHOOK_EGRESS_ALLOWLIST` | control plane | no | Comma-separated DNS suffix allowlist for outbound event webhooks. When empty, public HTTPS destinations are permitted; private, loopback, link-local, multicast and rebinding targets remain blocked. |
 | `SUPAFLOW_CREDENTIAL_MASTER_KEY` | control plane, worker | yes | Exactly 32 bytes encoded as hex or base64. Deployment-injected local envelope key; use an external KMS provider in managed deployments. |
@@ -40,20 +40,20 @@ The production processes use these environment variables:
 | `SUPAFLOW_OBJECT_STORE_DIR` | control plane, worker | no | Traversal-safe local object-store root; defaults to `./data/objects`. Every replica must share the same durable volume; replace this adapter for distributed deployments. |
 | `SUPAFLOW_OUTPUT_MAX_BYTES` | worker | no | Hard bound for one externally stored node output; defaults to 64 MiB and cannot exceed 1 GiB. Outputs larger than a node's inline limit or marked `sensitiveOutput` are stored externally. |
 | `SUPAFLOW_OTEL_ENDPOINT` | control plane, worker | no | OTLP gRPC endpoint. When set, real trace and metric exporters are enabled. |
-| `SUPAFLOW_TENANT_HASH_KEY` | control plane | with OTLP | Exactly 32 bytes encoded as hex or base64, used for privacy-preserving tenant attribution. |
+| `SUPAFLOW_ORGANIZATION_HASH_KEY` | control plane | with OTLP | Exactly 32 bytes encoded as hex or base64, used for privacy-preserving organization attribution. |
 | `SUPAFLOW_OTEL_INSECURE` | control plane | no | Set to `true` only for a trusted plaintext OTLP development endpoint. |
-| `SUPAFLOW_DELIVERY_BATCH` | control plane | no | Total outbox claims per delivery tick; defaults to 100 and is capped at 1000. Work is rotated across active tenants. |
+| `SUPAFLOW_DELIVERY_BATCH` | control plane | no | Total outbox claims per delivery tick; defaults to 100 and is capped at 1000. Work is rotated across active organizations. |
 | `SUPAFLOW_DELIVERY_CONCURRENCY` | control plane | no | Maximum simultaneous outbound deliveries; defaults to 4 and is capped at 64. |
 | `SUPAFLOW_DELIVERY_TIMEOUT_MS` | control plane | no | Per-delivery deadline including DNS/connect/write/read; defaults to 20000 and is capped at 30000. |
 | `SUPAFLOW_SSE_GLOBAL_LIMIT` | control plane | no | Process-wide concurrent event-stream cap; defaults to 512. Size ingress routing across replicas accordingly. |
-| `SUPAFLOW_SSE_TENANT_LIMIT` | control plane | no | Per-process, per-tenant concurrent event-stream cap; defaults to 64 and cannot exceed the global cap. |
+| `SUPAFLOW_SSE_ORGANIZATION_LIMIT` | control plane | no | Per-process, per-organization concurrent event-stream cap; defaults to 64 and cannot exceed the global cap. |
 | `SUPAFLOW_SSE_POLL_MIN_MS` | control plane | no | Minimum empty-stream database polling delay; defaults to 250. |
 | `SUPAFLOW_SSE_POLL_MAX_MS` | control plane | no | Maximum exponential empty-stream polling delay; defaults to 2000. |
 | `SUPAFLOW_SSE_WRITE_TIMEOUT_MS` | control plane | no | Deadline for every event or heartbeat socket write; defaults to 5000 and is capped at 30000. |
 
 Authenticated HTTP telemetry is installed inside the Fenix trust boundary: successful requests use an HMAC-derived organization hash, rejected authentication remains anonymous, and HTTP status codes drive the span/metric outcome. Public webhook telemetry starts one request span before routing, attributes it only after `publicHash` resolves to a server-owned organization, and leaves unresolved or early-invalid requests anonymous. Raw organization IDs, bearer master keys, and request bodies are never attached to telemetry.
 
-Normal organization-scoped requests require `Authorization: Bearer <master-key>` and `X-Fenix-Organization-Id`. The master key authenticates the trusted Fenix backend; the organization header becomes `Principal.TenantID` and is the only request organization scope. Fenix is the only IAM and business-RBAC authority. Supaflow does not evaluate Fenix users or roles. Legacy `X-API-Key`, database API-key, bootstrap, session, and OIDC paths are not production request authentication; identity tables remain unchanged for later migration work.
+Normal organization-scoped requests require `Authorization: Bearer <master-key>` and `X-Fenix-Organization-Id`. The master key authenticates the trusted Fenix backend; the organization header becomes `organization.Principal.OrganizationID` and is the only request organization scope. Fenix is the only organization registry, IAM, and business-RBAC authority. Supaflow has no local users, memberships, API keys, service accounts, sessions, OIDC endpoints, or role checks. Migration `000026` removes those tables and renames current persisted scope to `organization_id`; old `tenant` terms remain only in immutable migrations `000001`–`000025`.
 
 Keep the current/previous master-key files, resume-token secret, credential key, and connection strings in a secret manager. Do not commit them, put them in images, or log their values or file paths. During rotation, deploy the new current file while mounting the old file as previous, update Fenix, then remove previous after the bounded overlap.
 
@@ -70,7 +70,7 @@ export SUPAFLOW_CREDENTIAL_MASTER_KEY='07070707070707070707070707070707070707070
 export SUPAFLOW_CREDENTIAL_KEY_ID='local-key-1'
 export SUPAFLOW_ADDR='127.0.0.1:8080'
 export SUPAFLOW_WORKER_ID='local-worker-1'
-export SUPAFLOW_WORKER_TENANTS='tenant-a'
+export SUPAFLOW_WORKER_TENANTS='organization-a'
 export SUPAFLOW_HTTP_ALLOWED_HOSTS='example.com'
 export SUPAFLOW_WEBHOOK_EGRESS_ALLOWLIST='events.example.com'
 export SUPAFLOW_EINO_MODELS_JSON='[{"name":"chat","credentialRef":"cred_provider","model":"gpt-5"}]'
@@ -130,15 +130,15 @@ The crash-window recovery contract for each mutation family is:
 
 | Mutation | Durable side-effect recovery |
 | --- | --- |
-| quota and retention policy | tenant-keyed upsert |
+| quota and retention policy | organization-keyed upsert |
 | trigger create/update/state/delete | `trigger_mutations` request hash and stored result |
 | trigger fire and event receive | firing/event deduplication keys in the trigger transaction |
 | credential create | resource ID derived from ledger `operation_id`; duplicate insert returns the existing reference |
 | credential rotate/revoke | requested version and terminal revoked state are replay-safe |
-| tenant export | export/object IDs derived from `operation_id`; an existing export is returned before rebuilding bytes |
+| organization export | export/object IDs derived from `operation_id`; an existing export is returned before rebuilding bytes |
 | outbound webhook create/state/delete | stable subscription ID plus idempotent lifecycle transitions |
 | DLQ requeue | stable outbox ID plus the durable `requeued_at` marker |
-| worker drain | tenant/worker-keyed terminal draining state |
+| worker drain | organization/worker-keyed terminal draining state |
 
 The offline Fenix importer is not an `/ops` route. It independently fingerprints source triggers
 and runs and rejects a conflicting replay. No mutation may add a random resource ID without also
@@ -146,17 +146,17 @@ adding an operation-derived identity or a repository-local durable result record
 
 An expired attempt lease is not permission to repeat an ambiguous side effect. Workers only re-execute node types whose immutable plan capability declares `recoverySafe`. Built-in LLM, Agent, Tool, Shell and Python nodes fail closed with `unsafe_lease_takeover`; HTTP is recovery-safe only for GET, HEAD, PUT and DELETE, or when the author explicitly sets `retrySafe: true`. Operators must reconcile the external effect before starting a deliberate replacement run.
 
-The control-plane supervisor runs schedule/replay, deadline, delivery, and retention as four independent ticker loops, so a slow webhook cannot block deadline enforcement. Schedule polling uses a durable database-clock tenant cursor, serves at most one due schedule per tenant in each round, and repeats round-robin rounds up to the global batch limit while processing each trigger at most once per tick. Tenants commit independently and a saturated tenant is removed from later rounds, so a large `catch_up` history or exhausted ingress capacity cannot roll back or starve another tenant. Event fan-out uses pages of at most 100 trigger rows and commits each page independently. A capacity `429` relinquishes only the HTTP mutation lease, preserves its operation identity, and is never cached as a terminal idempotency response; retrying the same key replays existing firing IDs and resumes at the first missing target. PostgreSQL serializes trigger, pending firing, and pending outbox admission on the tenant quota row, so every producer observes the same hard limits. Delivery rotates its first tenant, caps the total tick batch and concurrency, applies a per-call deadline, and renews an owned outbox lease while the network call is in flight. `trigger.fired` is routed to the internal run starter; run, node, attempt, stream, approval and terminal topics are routed to matching outbound subscriptions. Successful per-subscription receipts prevent already-completed fan-out targets from being repeated when a sibling target retries. External calls use bounded exponential retry and DLQ, disable redirects, cap request/response bodies and timeouts, resolve DNS at connect time, and reject non-public addresses. Credential-bearing HTTP nodes additionally require HTTPS and reject redirects; the exact host allowlist cannot weaken this transport rule. Every loop waits on a ticker, observes context cancellation, and logs redacted failures. Workers register durable heartbeats, honor remote drain state before claiming, and release their worker quota counter during graceful exit.
+The control-plane supervisor runs schedule/replay, deadline, delivery, and retention as four independent ticker loops, so a slow webhook cannot block deadline enforcement. Schedule polling uses a durable database-clock organization cursor, serves at most one due schedule per organization in each round, and repeats round-robin rounds up to the global batch limit while processing each trigger at most once per tick. Organizations commit independently and a saturated organization is removed from later rounds, so a large `catch_up` history or exhausted ingress capacity cannot roll back or starve another organization. Event fan-out uses pages of at most 100 trigger rows and commits each page independently. A capacity `429` relinquishes only the HTTP mutation lease, preserves its operation identity, and is never cached as a terminal idempotency response; retrying the same key replays existing firing IDs and resumes at the first missing target. PostgreSQL serializes trigger, pending firing, and pending outbox admission on the organization quota row, so every producer observes the same hard limits. Delivery rotates its first organization, caps the total tick batch and concurrency, applies a per-call deadline, and renews an owned outbox lease while the network call is in flight. `trigger.fired` is routed to the internal run starter; run, node, attempt, stream, approval and terminal topics are routed to matching outbound subscriptions. Successful per-subscription receipts prevent already-completed fan-out targets from being repeated when a sibling target retries. External calls use bounded exponential retry and DLQ, disable redirects, cap request/response bodies and timeouts, resolve DNS at connect time, and reject non-public addresses. Credential-bearing HTTP nodes additionally require HTTPS and reject redirects; the exact host allowlist cannot weaken this transport rule. Every loop waits on a ticker, observes context cancellation, and logs redacted failures. Workers register durable heartbeats, honor remote drain state before claiming, and release their worker quota counter during graceful exit.
 
-The default trigger limits are 1,000 definitions, 5,000 pending firings, and 20,000 pending outbox messages per tenant; administrators can lower or raise them within the schema's absolute ceilings. Capacity rejection is retryable and never falls back to another tenant or an in-memory queue. Delivered outbox messages and dispatched/failed firings are removed in bounded tenant-fair retention batches after seven days. The same seven-day interval is the API/manual/event firing idempotency window, so cleanup never deletes a deduplication key that is still contractually reusable; pending delivery rows and pending firings are never purged by this maintenance path.
+The default trigger limits are 1,000 definitions, 5,000 pending firings, and 20,000 pending outbox messages per organization; administrators can lower or raise them within the schema's absolute ceilings. Capacity rejection is retryable and never falls back to another organization or an in-memory queue. Delivered outbox messages and dispatched/failed firings are removed in bounded organization-fair retention batches after seven days. The same seven-day interval is the API/manual/event firing idempotency window, so cleanup never deletes a deduplication key that is still contractually reusable; pending delivery rows and pending firings are never purged by this maintenance path.
 
-Event streams reject excess global or tenant connections with `429` and `Retry-After`. Empty streams exponentially back off database polling, every socket write has a deadline, and request cancellation releases the quota immediately. Operators should alert on `429` rate and disconnects, and size the process limits below the database connection and ingress capacities.
+Event streams reject excess global or organization connections with `429` and `Retry-After`. Empty streams exponentially back off database polling, every socket write has a deadline, and request cancellation releases the quota immediately. Operators should alert on `429` rate and disconnects, and size the process limits below the database connection and ingress capacities.
 
 Run capacity/alert and backup/restore drills with the production `ops` command. Restore always requires a distinct scratch database URL and never accepts a connection string on the command line:
 
 ```bash
-go run ./cmd/ops -action capacity -tenant tenant-a
-go run ./cmd/ops -action alerts -tenant tenant-a
+go run ./cmd/ops -action capacity -organization organization-a
+go run ./cmd/ops -action alerts -organization organization-a
 SUPAFLOW_BACKUP_ROOT=./data/backups go run ./cmd/ops -action backup -artifact nightly.dump
 SUPAFLOW_RESTORE_DATABASE_URL='postgres://scratch-host/scratch' \
 SUPAFLOW_RESTORE_ARCHIVE_SHA256='<trusted-64-character-lowercase-hex-digest>' \
@@ -204,7 +204,7 @@ go test ./tests/e2e
 go test ./tests/deployment
 ```
 
-The E2E suite covers immutable publish, tenant-scoped idempotent start replay, `Start -> Human Approval -> End`, organization-authenticated token delivery, lost-response approval replay and conflicting-key rejection, bounded worker advancement, success, cancellation, Fenix authorization-boundary behavior, two-tenant run/event/interrupt isolation, and SSE continuation through `Last-Event-ID` and `afterCursor`. It uses `httptest.ResponseRecorder` and a deadline-bound request context, so it is safe in sandboxes that prohibit binding network ports.
+The E2E suite covers immutable publish, organization-scoped idempotent start replay, `Start -> Human Approval -> End`, organization-authenticated token delivery, lost-response approval replay and conflicting-key rejection, bounded worker advancement, success, cancellation, Fenix authorization-boundary behavior, two-organization run/event/interrupt isolation, and SSE continuation through `Last-Event-ID` and `afterCursor`. It uses `httptest.ResponseRecorder` and a deadline-bound request context, so it is safe in sandboxes that prohibit binding network ports.
 
 Run the in-process authenticated API benchmark without any browser or listening socket:
 
@@ -238,7 +238,7 @@ find "$SUPAFLOW_RELEASE_EVIDENCE_DIR" -type f ! -name SHA256SUMS -print0 \
 ```
 
 The database must be disposable and isolated from development and production
-data. The test applies the immutable migration chain, creates a unique tenant,
+data. The test applies the immutable migration chain, creates a unique organization,
 trusted master key and organization scope, uses a 32-connection pool,
 then releases 1,000 TCP starts simultaneously. It records p50/p95/p99 request
 latency. Eight independently identified workers then issue concurrent claims while

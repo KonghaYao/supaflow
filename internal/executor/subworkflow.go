@@ -36,7 +36,7 @@ func NewRuntimeSubworkflowRunner(catalog platform.PlanCatalog, service *workflow
 
 // Run creates or observes the same child for every retry/takeover.
 func (r *RuntimeSubworkflowRunner) Run(ctx context.Context, request SubworkflowRequest) (SubworkflowOutput, error) {
-	published, err := r.catalog.Resolve(ctx, string(request.TenantID), request.PlanID, request.PlanHash)
+	published, err := r.catalog.Resolve(ctx, string(request.OrganizationID), request.PlanID, request.PlanHash)
 	if err != nil || published.Plan == nil {
 		return SubworkflowOutput{}, fmt.Errorf("child plan unavailable")
 	}
@@ -54,7 +54,7 @@ func (r *RuntimeSubworkflowRunner) Run(ctx context.Context, request SubworkflowR
 	}
 	inputDigest := sha256.Sum256(canonicalInput)
 	idempotencyKey := subworkflowIdempotencyKey(request, inputDigest)
-	result, err := r.runtime.StartSubworkflow(ctx, request.TenantID, workflowruntime.StartSubworkflowRequest{
+	result, err := r.runtime.StartSubworkflow(ctx, request.OrganizationID, workflowruntime.StartSubworkflowRequest{
 		ParentRunID: request.ParentRun, ParentNodeID: request.ParentNode, ParentAttemptID: request.ParentAttempt, ParentExecutionID: request.ParentExecution,
 		Plan:  workflowruntime.PlanRef{ID: request.PlanID, Hash: request.PlanHash, EntryNodeID: entry.ID, Executor: entry.Executor.Kind},
 		Input: canonicalInput, IdempotencyKey: idempotencyKey,
@@ -70,7 +70,7 @@ func (r *RuntimeSubworkflowRunner) Run(ctx context.Context, request SubworkflowR
 			if r.outputs == nil {
 				return SubworkflowOutput{}, fmt.Errorf("child output reader unavailable")
 			}
-			value, readErr := r.outputs.ReadRunOutput(ctx, request.TenantID, result.Run.ID, *result.Run.Output)
+			value, readErr := r.outputs.ReadRunOutput(ctx, request.OrganizationID, result.Run.ID, *result.Run.Output)
 			if readErr != nil {
 				return SubworkflowOutput{}, fmt.Errorf("read child output: %w", readErr)
 			}
@@ -90,7 +90,7 @@ func subworkflowIdempotencyKey(request SubworkflowRequest, inputDigest [32]byte)
 	if executionID == "" {
 		executionID = request.ParentAttempt
 	}
-	digest := sha256.Sum256([]byte(string(request.TenantID) + "\x00" + request.ParentRun + "\x00" + request.ParentNode + "\x00" + executionID + "\x00" + request.PlanHash + "\x00" + hex.EncodeToString(inputDigest[:])))
+	digest := sha256.Sum256([]byte(string(request.OrganizationID) + "\x00" + request.ParentRun + "\x00" + request.ParentNode + "\x00" + executionID + "\x00" + request.PlanHash + "\x00" + hex.EncodeToString(inputDigest[:])))
 	return "subflow-" + hex.EncodeToString(digest[:])
 }
 

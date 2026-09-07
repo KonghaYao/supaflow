@@ -12,7 +12,7 @@ import (
 // Operation is the immutable identity and audit subject of one API mutation.
 type Operation struct {
 	ID             string
-	TenantID       string
+	OrganizationID string
 	ActorID        string
 	Action         string
 	ResourceType   string
@@ -25,8 +25,8 @@ type Operation struct {
 
 type contextKey struct{}
 
-// New creates a stable operation identity for a tenant/action/idempotency tuple.
-func New(tenantID, actorID, action, resourceType, resourceID, key, method, path string, body []byte, requestIDHash string) *Operation {
+// New creates a stable operation identity for a organization/action/idempotency tuple.
+func New(organizationID, actorID, action, resourceType, resourceID, key, method, path string, body []byte, requestIDHash string) *Operation {
 	fingerprint := sha256.New()
 	_, _ = fingerprint.Write([]byte(method))
 	_, _ = fingerprint.Write([]byte{0})
@@ -35,8 +35,8 @@ func New(tenantID, actorID, action, resourceType, resourceID, key, method, path 
 	_, _ = fingerprint.Write(body)
 	var requestHash [sha256.Size]byte
 	copy(requestHash[:], fingerprint.Sum(nil))
-	identity := sha256.Sum256([]byte(tenantID + "\x00" + action + "\x00" + key))
-	return &Operation{ID: "apiop_" + hex.EncodeToString(identity[:]), TenantID: tenantID, ActorID: actorID,
+	identity := sha256.Sum256([]byte(organizationID + "\x00" + action + "\x00" + key))
+	return &Operation{ID: "apiop_" + hex.EncodeToString(identity[:]), OrganizationID: organizationID, ActorID: actorID,
 		Action: action, ResourceType: resourceType, ResourceID: resourceID, IdempotencyKey: key,
 		RequestHash: requestHash, RequestIDHash: requestIDHash}
 }

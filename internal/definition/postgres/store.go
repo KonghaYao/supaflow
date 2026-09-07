@@ -20,7 +20,7 @@ import (
 // Store is the PostgreSQL implementation of definition.Store.
 type Store struct{ pool *pgxpool.Pool }
 
-// NewStore constructs a tenant-scoped definition store.
+// NewStore constructs a organization-scoped definition store.
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 var _ definition.Store = (*Store)(nil)
@@ -28,29 +28,29 @@ var _ definition.Store = (*Store)(nil)
 // CreateDraft atomically creates a draft and its idempotency result.
 func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequest) (definition.CreateDraftResult, error) {
 	draft, created, err := s.mutateDraft(ctx, "create", request, func(tx pgx.Tx) (definition.Draft, error) {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "definition-draft-capacity:"+request.Draft.TenantID); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "definition-draft-capacity:"+request.Draft.OrganizationID); err != nil {
 			return definition.Draft{}, fmt.Errorf("lock workflow draft capacity: %w", err)
 		}
 		var draftCount int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow_drafts WHERE tenant_id = $1`, request.Draft.TenantID).Scan(&draftCount); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow_drafts WHERE organization_id = $1`, request.Draft.OrganizationID).Scan(&draftCount); err != nil {
 			return definition.Draft{}, fmt.Errorf("count workflow drafts: %w", err)
 		}
-		if draftCount >= definition.MaxDraftsPerTenant {
-			return definition.Draft{}, definition.ErrTenantDraftLimit
+		if draftCount >= definition.MaxDraftsPerOrganization {
+			return definition.Draft{}, definition.ErrOrganizationDraftLimit
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO workflows (id, tenant_id, slug, name, created_by)
-			VALUES ($1, $2, $1, $1, $3) ON CONFLICT (tenant_id, id) DO NOTHING`,
-			request.Draft.WorkflowID, request.Draft.TenantID, request.Draft.UpdatedBy); err != nil {
+			INSERT INTO workflows (id, organization_id, slug, name, created_by)
+			VALUES ($1, $2, $1, $1, $3) ON CONFLICT (organization_id, id) DO NOTHING`,
+			request.Draft.WorkflowID, request.Draft.OrganizationID, request.Draft.UpdatedBy); err != nil {
 			return definition.Draft{}, fmt.Errorf("ensure workflow: %w", err)
 		}
 		var result definition.Draft
 		err := tx.QueryRow(ctx, `
 			INSERT INTO workflow_drafts
-			    (id, tenant_id, workflow_id, revision, document, updated_by, created_at, updated_at)
+			    (id, organization_id, workflow_id, revision, document, updated_by, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			RETURNING id, tenant_id, workflow_id, document, revision, updated_by, created_at, updated_at`,
-			request.Draft.ID, request.Draft.TenantID, request.Draft.WorkflowID, request.Draft.Revision,
+			RETURNING id, organization_id, workflow_id, document, revision, updated_by, created_at, updated_at`,
+			request.Draft.ID, request.Draft.OrganizationID, request.Draft.WorkflowID, request.Draft.Revision,
 			request.Draft.Document, request.Draft.UpdatedBy, request.Draft.CreatedAt, request.Draft.UpdatedAt,
 		).Scan(draftScan(&result)...)
 		if err != nil {
@@ -64,17 +64,17 @@ func (s *Store) CreateDraft(ctx context.Context, request definition.MutationRequ
 	return definition.CreateDraftResult{Draft: draft, Created: created}, err
 }
 
-// GetDraft reads one tenant-owned draft.
-func (s *Store) GetDraft(ctx context.Context, tenant, workflowID string) (definition.Draft, error) {
-	return readDraft(ctx, s.pool, tenant, workflowID)
+// GetDraft reads one organization-owned draft.
+func (s *Store) GetDraft(ctx context.Context, organization, workflowID string) (definition.Draft, error) {
+	return readDraft(ctx, s.pool, organization, workflowID)
 }
 
-// ListDrafts lists a bounded page of tenant draft summaries in workflow order.
-func (s *Store) ListDrafts(ctx context.Context, tenant, cursor string, limit int) (definition.DraftPage, error) {
+// ListDrafts lists a bounded page of organization draft summaries in workflow order.
+func (s *Store) ListDrafts(ctx context.Context, organization, cursor string, limit int) (definition.DraftPage, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, workflow_id, revision, updated_by, created_at, updated_at
-		FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id > $2
-		ORDER BY workflow_id LIMIT $3`, tenant, cursor, limit+1)
+		SELECT id, organization_id, workflow_id, revision, updated_by, created_at, updated_at
+		FROM workflow_drafts WHERE organization_id = $1 AND workflow_id > $2
+		ORDER BY workflow_id LIMIT $3`, organization, cursor, limit+1)
 	if err != nil {
 		return definition.DraftPage{}, fmt.Errorf("list workflow drafts: %w", err)
 	}
@@ -82,7 +82,7 @@ func (s *Store) ListDrafts(ctx context.Context, tenant, cursor string, limit int
 	result := []definition.DraftSummary{}
 	for rows.Next() {
 		var item definition.DraftSummary
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.WorkflowID, &item.Revision, &item.UpdatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.WorkflowID, &item.Revision, &item.UpdatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return definition.DraftPage{}, fmt.Errorf("scan workflow draft summary: %w", err)
 		}
 		result = append(result, item)
@@ -104,13 +104,13 @@ func (s *Store) UpdateDraft(ctx context.Context, request definition.MutationRequ
 		var result definition.Draft
 		err := tx.QueryRow(ctx, `
 			UPDATE workflow_drafts SET document = $1, updated_by = $2, updated_at = $3, revision = revision + 1
-			WHERE tenant_id = $4 AND workflow_id = $5 AND revision = $6
-			RETURNING id, tenant_id, workflow_id, document, revision, updated_by, created_at, updated_at`,
+			WHERE organization_id = $4 AND workflow_id = $5 AND revision = $6
+			RETURNING id, organization_id, workflow_id, document, revision, updated_by, created_at, updated_at`,
 			request.Draft.Document, request.Draft.UpdatedBy, request.Draft.UpdatedAt,
-			request.Draft.TenantID, request.Draft.WorkflowID, request.ExpectedRevision,
+			request.Draft.OrganizationID, request.Draft.WorkflowID, request.ExpectedRevision,
 		).Scan(draftScan(&result)...)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return definition.Draft{}, classifyMissingDraft(ctx, tx, request.Draft.TenantID, request.Draft.WorkflowID)
+			return definition.Draft{}, classifyMissingDraft(ctx, tx, request.Draft.OrganizationID, request.Draft.WorkflowID)
 		}
 		if err != nil {
 			return definition.Draft{}, fmt.Errorf("update workflow draft: %w", err)
@@ -124,13 +124,13 @@ func (s *Store) UpdateDraft(ctx context.Context, request definition.MutationRequ
 func (s *Store) DeleteDraft(ctx context.Context, request definition.MutationRequest) error {
 	_, _, err := s.mutateDraft(ctx, "delete", request, func(tx pgx.Tx) (definition.Draft, error) {
 		command, err := tx.Exec(ctx, `
-			DELETE FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id = $2 AND revision = $3`,
-			request.Draft.TenantID, request.Draft.WorkflowID, request.ExpectedRevision)
+			DELETE FROM workflow_drafts WHERE organization_id = $1 AND workflow_id = $2 AND revision = $3`,
+			request.Draft.OrganizationID, request.Draft.WorkflowID, request.ExpectedRevision)
 		if err != nil {
 			return definition.Draft{}, fmt.Errorf("delete workflow draft: %w", err)
 		}
 		if command.RowsAffected() == 0 {
-			return definition.Draft{}, classifyMissingDraft(ctx, tx, request.Draft.TenantID, request.Draft.WorkflowID)
+			return definition.Draft{}, classifyMissingDraft(ctx, tx, request.Draft.OrganizationID, request.Draft.WorkflowID)
 		}
 		return definition.Draft{}, nil
 	})
@@ -140,13 +140,13 @@ func (s *Store) DeleteDraft(ctx context.Context, request definition.MutationRequ
 type mutationFunc func(pgx.Tx) (definition.Draft, error)
 
 type mutationSnapshot struct {
-	ID         string    `json:"id,omitempty"`
-	TenantID   string    `json:"tenantId,omitempty"`
-	WorkflowID string    `json:"workflowId,omitempty"`
-	Revision   uint64    `json:"revision,omitempty"`
-	UpdatedBy  string    `json:"updatedBy,omitempty"`
-	CreatedAt  time.Time `json:"createdAt,omitempty"`
-	UpdatedAt  time.Time `json:"updatedAt,omitempty"`
+	ID             string    `json:"id,omitempty"`
+	OrganizationID string    `json:"organizationId,omitempty"`
+	WorkflowID     string    `json:"workflowId,omitempty"`
+	Revision       uint64    `json:"revision,omitempty"`
+	UpdatedBy      string    `json:"updatedBy,omitempty"`
+	CreatedAt      time.Time `json:"createdAt,omitempty"`
+	UpdatedAt      time.Time `json:"updatedAt,omitempty"`
 }
 
 func (s *Store) mutateDraft(ctx context.Context, action string, request definition.MutationRequest, apply mutationFunc) (definition.Draft, bool, error) {
@@ -164,7 +164,7 @@ func (s *Store) mutateDraft(ctx context.Context, action string, request definiti
 		}
 		return definition.Draft{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`, request.Draft.TenantID, request.IdempotencyKey); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`, request.Draft.OrganizationID, request.IdempotencyKey); err != nil {
 		return definition.Draft{}, false, fmt.Errorf("lock definition mutation: %w", err)
 	}
 	if replay, found, readErr := readMutation(ctx, tx, request); readErr != nil {
@@ -193,8 +193,8 @@ func (s *Store) mutateDraft(ctx context.Context, action string, request definiti
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO definition_mutations
-		    (id, tenant_id, idempotency_key, action, workflow_id, request_hash, response_snapshot)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, mutationID, request.Draft.TenantID,
+		    (id, organization_id, idempotency_key, action, workflow_id, request_hash, response_snapshot)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, mutationID, request.Draft.OrganizationID,
 		request.IdempotencyKey, action, request.Draft.WorkflowID, request.RequestHash[:], response); err != nil {
 		return definition.Draft{}, false, fmt.Errorf("record definition mutation: %w", err)
 	}
@@ -212,7 +212,7 @@ func readMutation(ctx context.Context, tx pgx.Tx, request definition.MutationReq
 	var storedHash, response []byte
 	err := tx.QueryRow(ctx, `
 		SELECT request_hash, response_snapshot FROM definition_mutations
-		WHERE tenant_id = $1 AND idempotency_key = $2`, request.Draft.TenantID, request.IdempotencyKey,
+		WHERE organization_id = $1 AND idempotency_key = $2`, request.Draft.OrganizationID, request.IdempotencyKey,
 	).Scan(&storedHash, &response)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return definition.Draft{}, false, nil
@@ -233,22 +233,22 @@ func readMutation(ctx context.Context, tx pgx.Tx, request definition.MutationReq
 }
 
 func snapshotDraft(value definition.Draft) mutationSnapshot {
-	return mutationSnapshot{ID: value.ID, TenantID: value.TenantID, WorkflowID: value.WorkflowID, Revision: value.Revision,
+	return mutationSnapshot{ID: value.ID, OrganizationID: value.OrganizationID, WorkflowID: value.WorkflowID, Revision: value.Revision,
 		UpdatedBy: value.UpdatedBy, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 
 func restoreDraft(value mutationSnapshot) definition.Draft {
-	return definition.Draft{ID: value.ID, TenantID: value.TenantID, WorkflowID: value.WorkflowID, Revision: value.Revision,
+	return definition.Draft{ID: value.ID, OrganizationID: value.OrganizationID, WorkflowID: value.WorkflowID, Revision: value.Revision,
 		UpdatedBy: value.UpdatedBy, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 
 func readDraft(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, tenant, workflowID string) (definition.Draft, error) {
+}, organization, workflowID string) (definition.Draft, error) {
 	var result definition.Draft
 	err := db.QueryRow(ctx, `
-		SELECT id, tenant_id, workflow_id, document, revision, updated_by, created_at, updated_at
-		FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id = $2`, tenant, workflowID,
+		SELECT id, organization_id, workflow_id, document, revision, updated_by, created_at, updated_at
+		FROM workflow_drafts WHERE organization_id = $1 AND workflow_id = $2`, organization, workflowID,
 	).Scan(draftScan(&result)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return definition.Draft{}, definition.ErrNotFound
@@ -260,12 +260,12 @@ func readDraft(ctx context.Context, db interface {
 }
 
 func draftScan(target *definition.Draft) []any {
-	return []any{&target.ID, &target.TenantID, &target.WorkflowID, &target.Document, &target.Revision, &target.UpdatedBy, &target.CreatedAt, &target.UpdatedAt}
+	return []any{&target.ID, &target.OrganizationID, &target.WorkflowID, &target.Document, &target.Revision, &target.UpdatedBy, &target.CreatedAt, &target.UpdatedAt}
 }
 
-func classifyMissingDraft(ctx context.Context, tx pgx.Tx, tenant, workflowID string) error {
+func classifyMissingDraft(ctx context.Context, tx pgx.Tx, organization, workflowID string) error {
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_drafts WHERE tenant_id = $1 AND workflow_id = $2)`, tenant, workflowID).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_drafts WHERE organization_id = $1 AND workflow_id = $2)`, organization, workflowID).Scan(&exists); err != nil {
 		return fmt.Errorf("inspect workflow draft conflict: %w", err)
 	}
 	if exists {
@@ -281,7 +281,7 @@ func isUniqueViolation(err error) bool {
 
 // RecordVersion verifies that the publication catalog persisted the matching immutable version.
 func (s *Store) RecordVersion(ctx context.Context, expected definition.Version) error {
-	actual, err := s.GetVersion(ctx, expected.TenantID, expected.WorkflowID, expected.Version)
+	actual, err := s.GetVersion(ctx, expected.OrganizationID, expected.WorkflowID, expected.Version)
 	if err != nil {
 		return err
 	}
@@ -292,10 +292,10 @@ func (s *Store) RecordVersion(ctx context.Context, expected definition.Version) 
 }
 
 // ListVersions returns one bounded page of newest version summaries first.
-func (s *Store) ListVersions(ctx context.Context, tenant, workflowID string, cursor uint64, limit int) (definition.VersionPage, error) {
+func (s *Store) ListVersions(ctx context.Context, organization, workflowID string, cursor uint64, limit int) (definition.VersionPage, error) {
 	rows, err := s.pool.Query(ctx, versionSummarySelect+`
-		WHERE v.tenant_id = $1 AND v.workflow_id = $2 AND ($3::bigint = 0 OR v.version < $3)
-		ORDER BY v.version DESC LIMIT $4`, tenant, workflowID, cursor, limit+1)
+		WHERE v.organization_id = $1 AND v.workflow_id = $2 AND ($3::bigint = 0 OR v.version < $3)
+		ORDER BY v.version DESC LIMIT $4`, organization, workflowID, cursor, limit+1)
 	if err != nil {
 		return definition.VersionPage{}, fmt.Errorf("list workflow versions: %w", err)
 	}
@@ -303,7 +303,7 @@ func (s *Store) ListVersions(ctx context.Context, tenant, workflowID string, cur
 	result := []definition.VersionSummary{}
 	for rows.Next() {
 		var item definition.VersionSummary
-		if err := rows.Scan(&item.TenantID, &item.WorkflowID, &item.VersionID, &item.PlanID, &item.Version, &item.PlanHash, &item.PublishedAt); err != nil {
+		if err := rows.Scan(&item.OrganizationID, &item.WorkflowID, &item.VersionID, &item.PlanID, &item.Version, &item.PlanHash, &item.PublishedAt); err != nil {
 			return definition.VersionPage{}, fmt.Errorf("scan workflow version summary: %w", err)
 		}
 		result = append(result, item)
@@ -319,32 +319,32 @@ func (s *Store) ListVersions(ctx context.Context, tenant, workflowID string, cur
 	return page, nil
 }
 
-// GetVersion returns one tenant workflow version.
-func (s *Store) GetVersion(ctx context.Context, tenant, workflowID string, version uint64) (definition.Version, error) {
-	return scanVersion(s.pool.QueryRow(ctx, versionSelect+` WHERE v.tenant_id = $1 AND v.workflow_id = $2 AND v.version = $3`, tenant, workflowID, version))
+// GetVersion returns one organization workflow version.
+func (s *Store) GetVersion(ctx context.Context, organization, workflowID string, version uint64) (definition.Version, error) {
+	return scanVersion(s.pool.QueryRow(ctx, versionSelect+` WHERE v.organization_id = $1 AND v.workflow_id = $2 AND v.version = $3`, organization, workflowID, version))
 }
 
-// GetLatestVersion returns the newest tenant workflow version.
-func (s *Store) GetLatestVersion(ctx context.Context, tenant, workflowID string) (definition.Version, error) {
-	return scanVersion(s.pool.QueryRow(ctx, versionSelect+` WHERE v.tenant_id = $1 AND v.workflow_id = $2 ORDER BY v.version DESC LIMIT 1`, tenant, workflowID))
+// GetLatestVersion returns the newest organization workflow version.
+func (s *Store) GetLatestVersion(ctx context.Context, organization, workflowID string) (definition.Version, error) {
+	return scanVersion(s.pool.QueryRow(ctx, versionSelect+` WHERE v.organization_id = $1 AND v.workflow_id = $2 ORDER BY v.version DESC LIMIT 1`, organization, workflowID))
 }
 
 const versionSelect = `
-	SELECT v.tenant_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.definition, v.published_at
+	SELECT v.organization_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.definition, v.published_at
 	FROM workflow_versions v JOIN execution_plans p
-	  ON p.tenant_id = v.tenant_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
+	  ON p.organization_id = v.organization_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
 
 const versionSummarySelect = `
-	SELECT v.tenant_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.published_at
+	SELECT v.organization_id, v.workflow_id, v.id, p.id, v.version, encode(p.plan_hash, 'hex'), v.published_at
 	FROM workflow_versions v JOIN execution_plans p
-	  ON p.tenant_id = v.tenant_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
+	  ON p.organization_id = v.organization_id AND p.workflow_id = v.workflow_id AND p.workflow_version_id = v.id`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanVersion(row rowScanner) (definition.Version, error) {
 	var result definition.Version
 	var raw json.RawMessage
-	if err := row.Scan(&result.TenantID, &result.WorkflowID, &result.VersionID, &result.PlanID, &result.Version, &result.PlanHash, &raw, &result.PublishedAt); err != nil {
+	if err := row.Scan(&result.OrganizationID, &result.WorkflowID, &result.VersionID, &result.PlanID, &result.Version, &result.PlanHash, &raw, &result.PublishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return definition.Version{}, definition.ErrNotFound
 		}

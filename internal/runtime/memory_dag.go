@@ -27,7 +27,7 @@ func (m *MemoryStore) enqueueSuccessorLocked(run Run, next NewAttempt, now time.
 		m.createAttemptLocked(run, next.NodeID, next.Executor, input, at, 1, "")
 		return nil
 	}
-	joinKey := nodeScoped(run.TenantID, run.ID, next.NodeID)
+	joinKey := nodeScoped(run.OrganizationID, run.ID, next.NodeID)
 	contributions := m.joinContributions[joinKey]
 	if contributions == nil {
 		contributions = make(map[string]NewAttempt)
@@ -112,14 +112,14 @@ func aggregateSingleInput(next NewAttempt) (json.RawMessage, error) {
 	return raw, nil
 }
 
-func (m *MemoryStore) hasUnfinishedWorkLocked(tenantID TenantID, runID string) bool {
+func (m *MemoryStore) hasUnfinishedWorkLocked(organizationID OrganizationID, runID string) bool {
 	for _, attempt := range m.attempts {
-		if attempt.TenantID == tenantID && attempt.RunID == runID &&
+		if attempt.OrganizationID == organizationID && attempt.RunID == runID &&
 			(attempt.Status == AttemptPending || attempt.Status == AttemptRunning || attempt.Status == AttemptSuspended) {
 			return true
 		}
 	}
-	prefix := string(tenantID) + "\x00" + runID + "\x00"
+	prefix := string(organizationID) + "\x00" + runID + "\x00"
 	for key := range m.joinContributions {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -128,24 +128,24 @@ func (m *MemoryStore) hasUnfinishedWorkLocked(tenantID TenantID, runID string) b
 	return false
 }
 
-func (m *MemoryStore) remainingRunStatusLocked(tenantID TenantID, runID string) RunStatus {
-	if m.hasRunnableWorkLocked(tenantID, runID, "") {
+func (m *MemoryStore) remainingRunStatusLocked(organizationID OrganizationID, runID string) RunStatus {
+	if m.hasRunnableWorkLocked(organizationID, runID, "") {
 		return RunRunning
 	}
 	for _, attempt := range m.attempts {
-		if attempt.TenantID == tenantID && attempt.RunID == runID && attempt.Status == AttemptSuspended {
+		if attempt.OrganizationID == organizationID && attempt.RunID == runID && attempt.Status == AttemptSuspended {
 			return RunSuspended
 		}
 	}
-	if m.hasUnfinishedWorkLocked(tenantID, runID) {
+	if m.hasUnfinishedWorkLocked(organizationID, runID) {
 		return RunRunning
 	}
 	return RunSuccess
 }
 
-func (m *MemoryStore) hasRunnableWorkLocked(tenantID TenantID, runID, excludingAttemptID string) bool {
+func (m *MemoryStore) hasRunnableWorkLocked(organizationID OrganizationID, runID, excludingAttemptID string) bool {
 	for _, attempt := range m.attempts {
-		if attempt.TenantID == tenantID && attempt.RunID == runID && attempt.ID != excludingAttemptID &&
+		if attempt.OrganizationID == organizationID && attempt.RunID == runID && attempt.ID != excludingAttemptID &&
 			(attempt.Status == AttemptPending || attempt.Status == AttemptRunning) {
 			return true
 		}

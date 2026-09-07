@@ -15,7 +15,7 @@ import (
 )
 
 // EnvironmentResolver returns only explicitly granted environment values.
-// Implementations must scope every lookup by tenant and attempt.
+// Implementations must scope every lookup by organization and attempt.
 type EnvironmentResolver interface {
 	ResolveEnvironment(context.Context, IsolationRequest, []string) (map[string]string, error)
 }
@@ -82,7 +82,7 @@ func (r *ProcessIsolationRunner) Run(ctx context.Context, request IsolationReque
 		environment = resolved
 	}
 	protocolRequest := isolation.Request{
-		TenantID: string(request.TenantID), RunID: request.RunID, AttemptID: request.AttemptID,
+		OrganizationID: string(request.OrganizationID), RunID: request.RunID, AttemptID: request.AttemptID,
 		FencingToken: request.FencingToken, Language: request.Language, Source: request.Source,
 		Args: request.Args, Environment: environment, Network: request.Network, Input: request.Input,
 		Timeout: r.cfg.Timeout, OutputLimit: r.cfg.OutputLimit, Limits: r.cfg.Limits,

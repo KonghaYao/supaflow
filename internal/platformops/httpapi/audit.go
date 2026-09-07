@@ -65,7 +65,7 @@ func mutationAuditRecord(r *http.Request, status int) *platformops.AuditRecord {
 		"requestIdHash": platformops.AuditIdentifier(r.Header.Get("X-Request-ID")),
 	})
 	return &platformops.AuditRecord{
-		TenantID: principal.TenantID, ActorID: principal.ActorID, Action: action,
+		OrganizationID: principal.OrganizationID, ActorID: principal.ActorID, Action: action,
 		ResourceType: resourceType, ResourceID: resourceID, Outcome: outcome, Metadata: metadata,
 	}
 }
@@ -107,17 +107,17 @@ func mutationAuditTarget(r *http.Request) (string, string, string) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/ops/")
 	segments := strings.Split(path, "/")
-	resourceID := "tenant"
+	resourceID := "organization"
 	if len(segments) > 1 && segments[1] != "" {
 		resourceID = segments[1]
 	}
 	switch {
 	case path == "quotas":
-		return "quota.configure", "tenant_quota", resourceID
+		return "quota.configure", "organization_quota", resourceID
 	case path == "retention":
 		return "retention.configure", "retention_policy", resourceID
 	case path == "exports":
-		return "retention.export", "tenant", resourceID
+		return "retention.export", "organization", resourceID
 	case strings.HasPrefix(path, "workers/"):
 		return "worker.drain", "worker", resourceID
 	case strings.HasPrefix(path, "dlq/"):

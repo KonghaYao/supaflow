@@ -7,7 +7,7 @@ import (
 )
 
 // 验证运行、事件和租约查询都携带租户谓词。
-func TestTenantPredicatesArePartOfCriticalQueries(t *testing.T) {
+func TestOrganizationPredicatesArePartOfCriticalQueries(t *testing.T) {
 	t.Parallel()
 	queries := map[string]string{
 		"events": listEventsSQL,
@@ -15,13 +15,13 @@ func TestTenantPredicatesArePartOfCriticalQueries(t *testing.T) {
 		"outbox": claimOutboxSQL,
 	}
 	for _, name := range []string{"runtime_store.go", "runtime_claim.go", "runtime_complete.go"} {
-		if !strings.Contains(readSource(t, name), "tenant_id = $1") {
-			t.Errorf("%s lacks tenant predicate", name)
+		if !strings.Contains(readSource(t, name), "organization_id = $1") {
+			t.Errorf("%s lacks organization predicate", name)
 		}
 	}
 	for name, query := range queries {
-		if !strings.Contains(query, "tenant_id = $1") {
-			t.Errorf("%s query lacks tenant predicate", name)
+		if !strings.Contains(query, "organization_id = $1") {
+			t.Errorf("%s query lacks organization predicate", name)
 		}
 	}
 }
@@ -71,7 +71,7 @@ func TestCompletionSourceKeepsAtomicArtifactsTogether(t *testing.T) {
 func TestRunOutputProjectionHidesObjectReference(t *testing.T) {
 	t.Parallel()
 	query := runtimeRunProjectionByIDSQL
-	for _, contract := range []string{"LEFT JOIN node_outputs", "o.tenant_id = r.tenant_id", "o.id = r.output_id", "o.inline_value", "(o.object_ref IS NOT NULL)"} {
+	for _, contract := range []string{"LEFT JOIN node_outputs", "o.organization_id = r.organization_id", "o.id = r.output_id", "o.inline_value", "(o.object_ref IS NOT NULL)"} {
 		if !strings.Contains(query, contract) {
 			t.Errorf("run output projection lacks %q", contract)
 		}
@@ -94,7 +94,7 @@ func TestRerunSourceKeepsAtomicLineageAndArtifacts(t *testing.T) {
 		}
 	}
 	if !strings.Contains(runtimeRunProjectionByIDSQL, "LEFT JOIN run_rerun_lineage") {
-		t.Fatal("run projection must tenant-scope and expose rerun lineage")
+		t.Fatal("run projection must organization-scope and expose rerun lineage")
 	}
 }
 
@@ -138,7 +138,7 @@ func TestDAGJoinUsesLockedBarrierAndQuiescence(t *testing.T) {
 	t.Parallel()
 	source := readSource(t, "runtime_dag.go") + readSource(t, "runtime_complete.go")
 	for _, contract := range []string{
-		"ON CONFLICT (tenant_id, run_id, node_id) DO NOTHING",
+		"ON CONFLICT (organization_id, run_id, node_id) DO NOTHING",
 		"FOR UPDATE", "scheduled=false", "dag_edge_inputs",
 		"remainingDAGRunStatus", "workflowruntime.RunSuspended", "workflowruntime.RunSuccess",
 	} {

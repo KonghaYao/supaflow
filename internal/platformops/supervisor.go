@@ -14,7 +14,7 @@ import (
 
 // RuntimeExpirer is the maintenance boundary for durable run deadlines.
 type RuntimeExpirer interface {
-	ExpireRuns(context.Context, workflowruntime.TenantID, time.Time, int) (int, error)
+	ExpireRuns(context.Context, workflowruntime.OrganizationID, time.Time, int) (int, error)
 }
 
 // SupervisorConfig bounds every maintenance iteration and prevents busy loops.
@@ -33,17 +33,17 @@ type SupervisorConfig struct {
 
 // Supervisor runs database-coordinated schedule, outbox, replay-TTL, and retention work.
 type Supervisor struct {
-	pool          *pgxpool.Pool
-	triggers      *TriggerService
-	triggerStore  *PostgresTriggerStore
-	dispatcher    *OutboxDispatcher
-	retention     *Retention
-	workers       *WorkerRegistry
-	config        SupervisorConfig
-	logger        *slog.Logger
-	runtime       RuntimeExpirer
-	cursorMu      sync.Mutex
-	tenantCursors map[string]string
+	pool                *pgxpool.Pool
+	triggers            *TriggerService
+	triggerStore        *PostgresTriggerStore
+	dispatcher          *OutboxDispatcher
+	retention           *Retention
+	workers             *WorkerRegistry
+	config              SupervisorConfig
+	logger              *slog.Logger
+	runtime             RuntimeExpirer
+	cursorMu            sync.Mutex
+	organizationCursors map[string]string
 }
 
 // SetRuntimeExpirer enables deadline enforcement during every schedule tick.
@@ -75,7 +75,7 @@ func NewSupervisor(pool *pgxpool.Pool, triggers *TriggerService, triggerStore *P
 	if config.DeliveryConcurrency > 64 || config.DeliveryBatch > 1000 || config.DeliveryTimeout > 30*time.Second {
 		return nil, ErrInvalidArgument
 	}
-	return &Supervisor{pool: pool, triggers: triggers, triggerStore: triggerStore, dispatcher: dispatcher, retention: retention, workers: NewWorkerRegistry(pool), config: config, logger: logger, tenantCursors: make(map[string]string)}, nil
+	return &Supervisor{pool: pool, triggers: triggers, triggerStore: triggerStore, dispatcher: dispatcher, retention: retention, workers: NewWorkerRegistry(pool), config: config, logger: logger, organizationCursors: make(map[string]string)}, nil
 }
 
 // Run executes bounded maintenance ticks until cancellation and never busy-loops on failures.
@@ -104,17 +104,17 @@ func (s *Supervisor) Run(ctx context.Context) {
 }
 
 // ObjectRecoveryOnce reclaims a bounded page of expired upload intents. It is
-// independent from retention policies so a tenant without a custom policy is
+// independent from retention policies so a organization without a custom policy is
 // still protected from files left by a killed uploader.
 func (s *Supervisor) ObjectRecoveryOnce(ctx context.Context, _ time.Time) error {
-	tenants, err := s.tenantPage(ctx, "object-recovery", s.config.RetentionBatch)
+	organizations, err := s.organizationPage(ctx, "object-recovery", s.config.RetentionBatch)
 	if err != nil {
 		return err
 	}
 	var failures []error
-	for _, tenantID := range tenants {
-		if _, recoveryErr := s.retention.RecoverObjects(ctx, tenantID, s.config.RetentionBatch); recoveryErr != nil {
-			failures = append(failures, fmt.Errorf("tenant object recovery: %w", recoveryErr))
+	for _, organizationID := range organizations {
+		if _, recoveryErr := s.retention.RecoverObjects(ctx, organizationID, s.config.RetentionBatch); recoveryErr != nil {
+			failures = append(failures, fmt.Errorf("organization object recovery: %w", recoveryErr))
 		}
 	}
 	return errors.Join(failures...)
@@ -139,10 +139,10 @@ func (s *Supervisor) runLoop(ctx context.Context, name string, interval time.Dur
 func (s *Supervisor) ScheduleOnce(ctx context.Context, now time.Time) error {
 	_, tickErr := s.triggers.Tick(ctx, ScheduleOptions{Now: now, Limit: s.config.ScheduleBatch, MaxCatchUp: 100, MisfireGrace: time.Minute})
 	_, purgeErr := s.triggerStore.PurgeExpiredWebhookReplays(ctx, now, s.config.ScheduleBatch)
-	tenants, tenantErr := s.tenantPage(ctx, "schedule", s.config.ScheduleBatch)
-	failures := []error{tickErr, purgeErr, tenantErr}
-	for _, tenantID := range tenants {
-		_, reapErr := s.workers.ReapStale(ctx, tenantID, 30*time.Second, s.config.ScheduleBatch)
+	organizations, organizationErr := s.organizationPage(ctx, "schedule", s.config.ScheduleBatch)
+	failures := []error{tickErr, purgeErr, organizationErr}
+	for _, organizationID := range organizations {
+		_, reapErr := s.workers.ReapStale(ctx, organizationID, 30*time.Second, s.config.ScheduleBatch)
 		failures = append(failures, reapErr)
 	}
 	return errors.Join(failures...)
@@ -153,28 +153,28 @@ func (s *Supervisor) DeadlineOnce(ctx context.Context, now time.Time) error {
 	if s.runtime == nil {
 		return nil
 	}
-	tenants, err := s.tenantPage(ctx, "deadline", s.config.ScheduleBatch)
+	organizations, err := s.organizationPage(ctx, "deadline", s.config.ScheduleBatch)
 	if err != nil {
 		return err
 	}
 	var failures []error
-	for _, tenantID := range tenants {
-		_, expiryErr := s.runtime.ExpireRuns(ctx, workflowruntime.TenantID(tenantID), now, s.config.ScheduleBatch)
+	for _, organizationID := range organizations {
+		_, expiryErr := s.runtime.ExpireRuns(ctx, workflowruntime.OrganizationID(organizationID), now, s.config.ScheduleBatch)
 		failures = append(failures, expiryErr)
 	}
 	return errors.Join(failures...)
 }
 
-// DeliverOnce dispatches a finite per-tenant batch of owned outbox topics.
+// DeliverOnce dispatches a finite per-organization batch of owned outbox topics.
 func (s *Supervisor) DeliverOnce(ctx context.Context, now time.Time) error {
-	tenants, err := s.tenantPage(ctx, "delivery", s.config.DeliveryBatch)
+	organizations, err := s.organizationPage(ctx, "delivery", s.config.DeliveryBatch)
 	if err != nil {
 		return err
 	}
 	var failures []error
 	remaining := s.config.DeliveryBatch
 	for remaining > 0 {
-		count := min(remaining, len(tenants))
+		count := min(remaining, len(organizations))
 		if count == 0 {
 			break
 		}
@@ -185,8 +185,8 @@ func (s *Supervisor) DeliverOnce(ctx context.Context, now time.Time) error {
 		outcomes := make(chan outcome, count)
 		semaphore := make(chan struct{}, s.config.DeliveryConcurrency)
 		var wait sync.WaitGroup
-		for _, tenantID := range tenants[:count] {
-			tenantID := tenantID
+		for _, organizationID := range organizations[:count] {
+			organizationID := organizationID
 			wait.Add(1)
 			go func() {
 				defer wait.Done()
@@ -199,7 +199,7 @@ func (s *Supervisor) DeliverOnce(ctx context.Context, now time.Time) error {
 				defer func() { <-semaphore }()
 				deliveryCtx, cancel := context.WithTimeout(ctx, s.config.DeliveryTimeout)
 				defer cancel()
-				result, dispatchErr := s.dispatcher.DispatchOne(deliveryCtx, tenantID, now)
+				result, dispatchErr := s.dispatcher.DispatchOne(deliveryCtx, organizationID, now)
 				outcomes <- outcome{result: result, err: dispatchErr}
 			}()
 		}
@@ -208,7 +208,7 @@ func (s *Supervisor) DeliverOnce(ctx context.Context, now time.Time) error {
 		worked := false
 		for item := range outcomes {
 			if item.err != nil {
-				failures = append(failures, fmt.Errorf("tenant delivery: %w", item.err))
+				failures = append(failures, fmt.Errorf("organization delivery: %w", item.err))
 			}
 			worked = worked || item.result.MessageID != ""
 		}
@@ -220,60 +220,60 @@ func (s *Supervisor) DeliverOnce(ctx context.Context, now time.Time) error {
 	return errors.Join(failures...)
 }
 
-// RetentionOnce applies every tenant policy with a finite batch.
+// RetentionOnce applies every organization policy with a finite batch.
 func (s *Supervisor) RetentionOnce(ctx context.Context, now time.Time) error {
-	tenants, err := s.tenantPage(ctx, "retention", s.config.RetentionBatch)
+	organizations, err := s.organizationPage(ctx, "retention", s.config.RetentionBatch)
 	if err != nil {
 		return err
 	}
 	var failures []error
-	for _, tenantID := range tenants {
-		if _, sweepErr := s.retention.SweepTenant(ctx, tenantID, now, s.config.RetentionBatch); sweepErr != nil && !errors.Is(sweepErr, ErrNotFound) {
-			failures = append(failures, fmt.Errorf("tenant retention: %w", sweepErr))
+	for _, organizationID := range organizations {
+		if _, sweepErr := s.retention.SweepOrganization(ctx, organizationID, now, s.config.RetentionBatch); sweepErr != nil && !errors.Is(sweepErr, ErrNotFound) {
+			failures = append(failures, fmt.Errorf("organization retention: %w", sweepErr))
 		}
-		if _, purgeErr := s.triggerStore.PurgeCompletedTriggerHistory(ctx, tenantID, s.config.RetentionBatch); purgeErr != nil {
-			failures = append(failures, fmt.Errorf("tenant trigger history retention: %w", purgeErr))
+		if _, purgeErr := s.triggerStore.PurgeCompletedTriggerHistory(ctx, organizationID, s.config.RetentionBatch); purgeErr != nil {
+			failures = append(failures, fmt.Errorf("organization trigger history retention: %w", purgeErr))
 		}
 	}
 	return errors.Join(failures...)
 }
 
-func (s *Supervisor) tenantPage(ctx context.Context, loop string, limit int) ([]string, error) {
+func (s *Supervisor) organizationPage(ctx context.Context, loop string, limit int) ([]string, error) {
 	s.cursorMu.Lock()
-	cursor := s.tenantCursors[loop]
+	cursor := s.organizationCursors[loop]
 	s.cursorMu.Unlock()
-	result, err := s.queryTenantPage(ctx, cursor, limit)
+	result, err := s.queryOrganizationPage(ctx, cursor, limit)
 	if err != nil {
 		return nil, err
 	}
 	if len(result) == 0 && cursor != "" {
-		result, err = s.queryTenantPage(ctx, "", limit)
+		result, err = s.queryOrganizationPage(ctx, "", limit)
 		if err != nil {
 			return nil, err
 		}
 	}
 	s.cursorMu.Lock()
 	if len(result) == 0 {
-		s.tenantCursors[loop] = ""
+		s.organizationCursors[loop] = ""
 	} else {
-		s.tenantCursors[loop] = result[len(result)-1]
+		s.organizationCursors[loop] = result[len(result)-1]
 	}
 	s.cursorMu.Unlock()
 	return result, nil
 }
 
-func (s *Supervisor) queryTenantPage(ctx context.Context, after string, limit int) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id FROM tenants
-		WHERE status='active' AND id > $1 ORDER BY id LIMIT $2`, after, limit)
+func (s *Supervisor) queryOrganizationPage(ctx context.Context, after string, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT organization_id FROM organization_quotas
+		WHERE organization_id > $1 ORDER BY organization_id LIMIT $2`, after, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list maintenance tenants: %w", err)
+		return nil, fmt.Errorf("list maintenance organizations: %w", err)
 	}
 	defer rows.Close()
 	result := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err = rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan maintenance tenant: %w", err)
+			return nil, fmt.Errorf("scan maintenance organization: %w", err)
 		}
 		result = append(result, id)
 	}

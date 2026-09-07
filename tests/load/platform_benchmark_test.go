@@ -26,7 +26,7 @@ func BenchmarkDraftAutosave(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	draft, err := service.CreateDraft(context.Background(), "benchmark-tenant", definition.CreateDraftCommand{
+	draft, err := service.CreateDraft(context.Background(), "benchmark-organization", definition.CreateDraftCommand{
 		WorkflowID: "benchmark-flow", ActorID: "loadtest", IdempotencyKey: "draft-create-0001", Document: document,
 	})
 	if err != nil {
@@ -35,7 +35,7 @@ func BenchmarkDraftAutosave(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
-		draft, err = service.UpdateDraft(context.Background(), "benchmark-tenant", definition.UpdateDraftCommand{
+		draft, err = service.UpdateDraft(context.Background(), "benchmark-organization", definition.UpdateDraftCommand{
 			WorkflowID: "benchmark-flow", ActorID: "loadtest", ExpectedRevision: draft.Revision,
 			IdempotencyKey: fmt.Sprintf("autosave-%016d", iteration), Document: document,
 		})
@@ -54,7 +54,7 @@ func BenchmarkImmutablePublish(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
-		if _, _, err := catalog.Publish(context.Background(), "benchmark-tenant", definition.ID, definition, fmt.Sprintf("publish-%016d", iteration)); err != nil {
+		if _, _, err := catalog.Publish(context.Background(), "benchmark-organization", definition.ID, definition, fmt.Sprintf("publish-%016d", iteration)); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -78,14 +78,14 @@ func BenchmarkEventCommit(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
-		created, startErr := service.StartRun(context.Background(), "benchmark-tenant", workflowruntime.StartRunRequest{
+		created, startErr := service.StartRun(context.Background(), "benchmark-organization", workflowruntime.StartRunRequest{
 			Plan:  workflowruntime.PlanRef{ID: "benchmark-plan", Hash: "benchmark-hash", EntryNodeID: "end", Executor: "builtin.end"},
 			Input: json.RawMessage(`{"value":1}`), IdempotencyKey: fmt.Sprintf("event-%016d", iteration),
 		})
 		if startErr != nil {
 			b.Fatal(startErr)
 		}
-		result, advanceErr := orchestrator.Advance(context.Background(), "benchmark-tenant")
+		result, advanceErr := orchestrator.Advance(context.Background(), "benchmark-organization")
 		if advanceErr != nil || !result.Worked || result.Run == nil || result.Run.ID != created.Run.ID {
 			b.Fatalf("advance result = %#v, err = %v", result, advanceErr)
 		}

@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/pazhou/supaflow/internal/api"
-	"github.com/pazhou/supaflow/internal/identity"
+	"github.com/pazhou/supaflow/internal/organization"
 	"github.com/pazhou/supaflow/internal/platformops"
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// 验证公网 hook 使用固定 headers、原始 body 验签且无需接受客户端 tenant。
-func TestWebhookRoutePreservesRawBodyAndResolvesTenantServerSide(t *testing.T) {
+// 验证公网 hook 使用固定 headers、原始 body 验签且无需接受客户端 organization。
+func TestWebhookRoutePreservesRawBodyAndResolvesOrganizationServerSide(t *testing.T) {
 	secret := []byte("01234567890123456789012345678901")
 	store := &httpTriggerStore{}
 	service, err := platformops.NewTriggerService(store, httpSecrets{secret: secret}, 5*time.Minute)
@@ -35,13 +35,13 @@ func TestWebhookRoutePreservesRawBodyAndResolvesTenantServerSide(t *testing.T) {
 	request.Header.Set("X-Supaflow-Signature", platformops.SignWebhook(secret, "request-1", now, body))
 	response := httptest.NewRecorder()
 	handler.WebhookRoutes().ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted || store.receivedTenant != "tenant_from_store" || !bytes.Equal(store.receivedBody, body) {
-		t.Fatalf("status=%d tenant=%q body=%q response=%s", response.Code, store.receivedTenant, store.receivedBody, response.Body.String())
+	if response.Code != http.StatusAccepted || store.receivedOrganization != "organization_from_store" || !bytes.Equal(store.receivedBody, body) {
+		t.Fatalf("status=%d organization=%q body=%q response=%s", response.Code, store.receivedOrganization, store.receivedBody, response.Body.String())
 	}
 }
 
-// 验证 publicHash 解析出的服务端 tenant 会归属到唯一 webhook span，而不依赖请求传入 tenant。
-func TestWebhookRouteAttributesResolvedTenantToTelemetry(t *testing.T) {
+// 验证 publicHash 解析出的服务端 organization 会归属到唯一 webhook span，而不依赖请求传入 organization。
+func TestWebhookRouteAttributesResolvedOrganizationToTelemetry(t *testing.T) {
 	secret := []byte("01234567890123456789012345678901")
 	store := &httpTriggerStore{}
 	service, err := platformops.NewTriggerService(store, httpSecrets{secret: secret}, 5*time.Minute)
@@ -50,7 +50,7 @@ func TestWebhookRouteAttributesResolvedTenantToTelemetry(t *testing.T) {
 	}
 	handler := &Handler{services: Services{Triggers: service}}
 	telemetry := &recordingWebhookTelemetry{}
-	route := platformops.NewDeferredTenantTelemetryHTTPMiddleware(telemetry, handler.WebhookRoutes())
+	route := platformops.NewDeferredOrganizationTelemetryHTTPMiddleware(telemetry, handler.WebhookRoutes())
 	now := time.Now().UTC().Truncate(time.Second)
 	body := []byte(`{"value":true}`)
 	request := httptest.NewRequest(http.MethodPost, "/hooks/public-hook-value", bytes.NewReader(body))
@@ -59,15 +59,15 @@ func TestWebhookRouteAttributesResolvedTenantToTelemetry(t *testing.T) {
 	request.Header.Set("X-Supaflow-Signature", platformops.SignWebhook(secret, "request-telemetry", now, body))
 	response := httptest.NewRecorder()
 	route.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted || telemetry.starts != 1 || telemetry.tenant != "tenant_from_store" || telemetry.status != http.StatusAccepted {
+	if response.Code != http.StatusAccepted || telemetry.starts != 1 || telemetry.organization != "organization_from_store" || telemetry.status != http.StatusAccepted {
 		t.Fatalf("status=%d telemetry=%+v", response.Code, telemetry)
 	}
 }
 
 type recordingWebhookTelemetry struct {
-	starts int
-	tenant string
-	status int
+	starts       int
+	organization string
+	status       int
 }
 
 func (t *recordingWebhookTelemetry) Extract(ctx context.Context, _ propagation.TextMapCarrier) context.Context {
@@ -76,10 +76,10 @@ func (t *recordingWebhookTelemetry) Extract(ctx context.Context, _ propagation.T
 
 func (t *recordingWebhookTelemetry) StartDeferredHTTP(ctx context.Context, _ string) (context.Context, func(string, int, error)) {
 	t.starts++
-	return ctx, func(tenant string, status int, _ error) { t.tenant, t.status = tenant, status }
+	return ctx, func(organization string, status int, _ error) { t.organization, t.status = organization, status }
 }
 
-// 验证 credential 管理 API 从认证上下文取 tenant 且响应绝不回显 secret。
+// 验证 credential 管理 API 从认证上下文取 organization 且响应绝不回显 secret。
 const httpTestMasterKey = "platformops-test-master-key-at-least-32-bytes"
 
 func authenticatedTestRequest(request *http.Request, organizationID string) {
@@ -104,12 +104,12 @@ func TestCredentialRouteNeverReturnsSecret(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(`{"name":"signer","purpose":"webhook_signing","secret":"never-return-this"}`))
 	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-	request.Header.Set("X-Fenix-Organization-Id", "tenant_auth")
+	request.Header.Set("X-Fenix-Organization-Id", "organization_auth")
 	request.Header.Set("Idempotency-Key", "credential-create-1")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || store.tenantID != "tenant_auth" || strings.Contains(response.Body.String(), "never-return-this") || strings.Contains(response.Body.String(), "secret") {
-		t.Fatalf("status=%d tenant=%q response=%s", response.Code, store.tenantID, response.Body.String())
+	if response.Code != http.StatusCreated || store.organizationID != "organization_auth" || strings.Contains(response.Body.String(), "never-return-this") || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("status=%d organization=%q response=%s", response.Code, store.organizationID, response.Body.String())
 	}
 }
 
@@ -123,7 +123,7 @@ func TestCredentialMutationReplaysAndRejectsFingerprintConflict(t *testing.T) {
 	serve := func(body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(body))
 		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-		request.Header.Set("X-Fenix-Organization-Id", "tenant")
+		request.Header.Set("X-Fenix-Organization-Id", "organization")
 		request.Header.Set("Idempotency-Key", "credential-stable-key")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -172,8 +172,8 @@ func TestMutationResponseSnapshotIsBoundedAndReplayable(t *testing.T) {
 	serve := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(`{}`))
 		request.Header.Set("Idempotency-Key", "bounded-response-key")
-		request = request.WithContext(identity.ContextWithPrincipal(request.Context(), api.Principal{
-			TenantID: "tenant", ActorID: "operator", Role: api.RoleOperator,
+		request = request.WithContext(organization.ContextWithPrincipal(request.Context(), api.Principal{
+			OrganizationID: "organization", ActorID: "operator",
 		}))
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -208,8 +208,8 @@ func TestRunAdmissionMutationRoutesAreNotExposed(t *testing.T) {
 	}
 }
 
-// 验证 Trigger 列表的 tenant 只能来自认证上下文，且写操作强制幂等键。
-func TestTriggerLifecycleUsesAuthenticatedTenantAndRequiresIdempotency(t *testing.T) {
+// 验证 Trigger 列表的 organization 只能来自认证上下文，且写操作强制幂等键。
+func TestTriggerLifecycleUsesAuthenticatedOrganizationAndRequiresIdempotency(t *testing.T) {
 	store := &httpTriggerStore{}
 	service, err := platformops.NewTriggerService(store, nil, time.Minute)
 	if err != nil {
@@ -220,16 +220,16 @@ func TestTriggerLifecycleUsesAuthenticatedTenantAndRequiresIdempotency(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	list := httptest.NewRequest(http.MethodGet, "/ops/triggers?tenantId=attacker", nil)
-	authenticatedTestRequest(list, "tenant_auth")
+	list := httptest.NewRequest(http.MethodGet, "/ops/triggers?organizationId=attacker", nil)
+	authenticatedTestRequest(list, "organization_auth")
 	listResponse := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(listResponse, list)
 	create := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(`{"workflowId":"flow","kind":"api","name":"api","config":{}}`))
-	authenticatedTestRequest(create, "tenant_auth")
+	authenticatedTestRequest(create, "organization_auth")
 	createResponse := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(createResponse, create)
-	if listResponse.Code != http.StatusOK || store.receivedTenant != "tenant_auth" || createResponse.Code != http.StatusBadRequest {
-		t.Fatalf("list=%d tenant=%q create=%d body=%s", listResponse.Code, store.receivedTenant, createResponse.Code, createResponse.Body.String())
+	if listResponse.Code != http.StatusOK || store.receivedOrganization != "organization_auth" || createResponse.Code != http.StatusBadRequest {
+		t.Fatalf("list=%d organization=%q create=%d body=%s", listResponse.Code, store.receivedOrganization, createResponse.Code, createResponse.Body.String())
 	}
 }
 
@@ -249,12 +249,12 @@ func TestOpsMutationRejectsBodyWithValidJSONPrefixBeyondLimit(t *testing.T) {
 	body := prefix + strings.Repeat(" ", (1<<20)-len(prefix)) + `{"ignored":true}`
 	request := httptest.NewRequest(http.MethodPost, "/ops/triggers", strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-	request.Header.Set("X-Fenix-Organization-Id", "tenant")
+	request.Header.Set("X-Fenix-Organization-Id", "organization")
 	request.Header.Set("Idempotency-Key", "oversized-trigger-body")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest || store.receivedTenant != "" {
-		t.Fatalf("status=%d tenant=%q body=%s", response.Code, store.receivedTenant, response.Body.String())
+	if response.Code != http.StatusBadRequest || store.receivedOrganization != "" {
+		t.Fatalf("status=%d organization=%q body=%s", response.Code, store.receivedOrganization, response.Body.String())
 	}
 }
 
@@ -274,7 +274,7 @@ func TestEventCapacityResponseReleasesMutationForImmediateRetry(t *testing.T) {
 	serve := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/ops/events/document.ready", strings.NewReader(`{"eventId":"event-1","payload":{"id":1}}`))
 		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-		request.Header.Set("X-Fenix-Organization-Id", "tenant")
+		request.Header.Set("X-Fenix-Organization-Id", "organization")
 		request.Header.Set("Idempotency-Key", "event-capacity-retry")
 		response := httptest.NewRecorder()
 		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
@@ -286,8 +286,8 @@ func TestEventCapacityResponseReleasesMutationForImmediateRetry(t *testing.T) {
 	}
 }
 
-// 验证 outbound webhook 管理面仅使用认证 tenant 且不接收明文 secret。
-func TestCreateOutboundWebhookSubscriptionUsesAuthenticatedTenant(t *testing.T) {
+// 验证 outbound webhook 管理面仅使用认证 organization 且不接收明文 secret。
+func TestCreateOutboundWebhookSubscriptionUsesAuthenticatedOrganization(t *testing.T) {
 	webhooks := &httpWebhookManager{}
 	handler := &Handler{services: Services{Webhooks: webhooks, Mutations: newHTTPMutationLedger()}}
 	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
@@ -296,11 +296,11 @@ func TestCreateOutboundWebhookSubscriptionUsesAuthenticatedTenant(t *testing.T) 
 	}
 	request := httptest.NewRequest(http.MethodPost, "/ops/webhook-subscriptions", strings.NewReader(`{"name":"events","endpointUrl":"https://events.example.test/hook","eventTypes":["run.succeeded"],"signingCredentialId":"cred-1","timeoutMs":1000}`))
 	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
-	request.Header.Set("X-Fenix-Organization-Id", "tenant")
+	request.Header.Set("X-Fenix-Organization-Id", "organization")
 	request.Header.Set("Idempotency-Key", "subscription-create-1")
 	response := httptest.NewRecorder()
 	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || webhooks.created.TenantID != "tenant" || webhooks.created.ActorID != "fenix" {
+	if response.Code != http.StatusCreated || webhooks.created.OrganizationID != "organization" || webhooks.created.ActorID != "fenix" {
 		t.Fatalf("status=%d request=%+v body=%s", response.Code, webhooks.created, response.Body.String())
 	}
 }
@@ -317,8 +317,8 @@ func newHTTPMutationLedger() *httpMutationLedger {
 	return &httpMutationLedger{records: make(map[string]platformops.MutationRecord), hashes: make(map[string]string)}
 }
 
-func (l *httpMutationLedger) Claim(_ context.Context, tenant, operation, key string, hash []byte) (platformops.MutationRecord, error) {
-	scope := tenant + "/" + operation + "/" + key
+func (l *httpMutationLedger) Claim(_ context.Context, organization, operation, key string, hash []byte) (platformops.MutationRecord, error) {
+	scope := organization + "/" + operation + "/" + key
 	encoded := string(hash)
 	if previous, exists := l.hashes[scope]; exists {
 		if previous != encoded {
@@ -330,14 +330,14 @@ func (l *httpMutationLedger) Claim(_ context.Context, tenant, operation, key str
 	return platformops.MutationRecord{Owner: "test-owner", OperationID: "test-operation"}, nil
 }
 
-func (l *httpMutationLedger) Complete(_ context.Context, tenant, operation, key string, completion platformops.MutationCompletion) error {
-	l.records[tenant+"/"+operation+"/"+key] = platformops.MutationRecord{Replay: true, StatusCode: completion.StatusCode, ContentType: completion.ContentType, Body: append([]byte(nil), completion.Body...)}
+func (l *httpMutationLedger) Complete(_ context.Context, organization, operation, key string, completion platformops.MutationCompletion) error {
+	l.records[organization+"/"+operation+"/"+key] = platformops.MutationRecord{Replay: true, StatusCode: completion.StatusCode, ContentType: completion.ContentType, Body: append([]byte(nil), completion.Body...)}
 	return nil
 }
 
 func (l *httpMutationLedger) Renew(context.Context, string, string, string, string) error { return nil }
-func (l *httpMutationLedger) Retry(_ context.Context, tenant, operation, key, _ string) error {
-	scope := tenant + "/" + operation + "/" + key
+func (l *httpMutationLedger) Retry(_ context.Context, organization, operation, key, _ string) error {
+	scope := organization + "/" + operation + "/" + key
 	delete(l.records, scope)
 	delete(l.hashes, scope)
 	l.retries++
@@ -349,11 +349,11 @@ func (s httpSecrets) ResolveTriggerSecret(context.Context, string, string) ([]by
 }
 
 type httpTriggerStore struct {
-	receivedTenant string
-	receivedBody   []byte
-	resolveErr     error
-	eventFailures  int
-	eventCalls     int
+	receivedOrganization string
+	receivedBody         []byte
+	resolveErr           error
+	eventFailures        int
+	eventCalls           int
 }
 
 func (s *httpTriggerStore) CreateTrigger(context.Context, platformops.CreateTriggerRequest) (platformops.Trigger, error) {
@@ -366,7 +366,7 @@ func (s *httpTriggerStore) ResolvePublicWebhook(context.Context, string) (platfo
 	if s.resolveErr != nil {
 		return platformops.Trigger{}, s.resolveErr
 	}
-	return platformops.Trigger{TenantID: "tenant_from_store", ID: "trigger_from_store", Kind: platformops.TriggerWebhook}, nil
+	return platformops.Trigger{OrganizationID: "organization_from_store", ID: "trigger_from_store", Kind: platformops.TriggerWebhook}, nil
 }
 func (s *httpTriggerStore) SetTriggerEnabled(context.Context, string, string, bool, time.Time) (platformops.Trigger, error) {
 	return platformops.Trigger{}, nil
@@ -375,7 +375,7 @@ func (s *httpTriggerStore) Fire(context.Context, platformops.FireRequest) (platf
 	return platformops.Firing{}, false, nil
 }
 func (s *httpTriggerStore) FireWebhook(_ context.Context, request platformops.FireRequest, _ string, _ [sha256.Size]byte, _ time.Time) (platformops.Firing, bool, error) {
-	s.receivedTenant = request.TenantID
+	s.receivedOrganization = request.OrganizationID
 	s.receivedBody = append([]byte(nil), request.Payload...)
 	return platformops.Firing{ID: "firing-1"}, true, nil
 }
@@ -390,25 +390,25 @@ func (s *httpTriggerStore) FireEvent(context.Context, string, string, string, js
 	return []platformops.Firing{{ID: "event-firing"}}, nil
 }
 func (s *httpTriggerStore) ListTriggers(_ context.Context, request platformops.ListTriggersRequest) ([]platformops.Trigger, error) {
-	s.receivedTenant = request.TenantID
-	return []platformops.Trigger{{ID: "trigger-1", TenantID: request.TenantID}}, nil
+	s.receivedOrganization = request.OrganizationID
+	return []platformops.Trigger{{ID: "trigger-1", OrganizationID: request.OrganizationID}}, nil
 }
 func (s *httpTriggerStore) UpdateTrigger(_ context.Context, request platformops.UpdateTriggerRequest) (platformops.Trigger, error) {
-	s.receivedTenant = request.TenantID
-	return platformops.Trigger{ID: request.TriggerID, TenantID: request.TenantID}, nil
+	s.receivedOrganization = request.OrganizationID
+	return platformops.Trigger{ID: request.TriggerID, OrganizationID: request.OrganizationID}, nil
 }
 func (s *httpTriggerStore) SetTriggerEnabledIdempotently(_ context.Context, request platformops.ChangeTriggerStateRequest) (platformops.Trigger, error) {
-	s.receivedTenant = request.TenantID
-	return platformops.Trigger{ID: request.TriggerID, TenantID: request.TenantID, Enabled: request.Enabled}, nil
+	s.receivedOrganization = request.OrganizationID
+	return platformops.Trigger{ID: request.TriggerID, OrganizationID: request.OrganizationID, Enabled: request.Enabled}, nil
 }
 func (s *httpTriggerStore) DeleteTrigger(_ context.Context, request platformops.DeleteTriggerRequest) error {
-	s.receivedTenant = request.TenantID
+	s.receivedOrganization = request.OrganizationID
 	return nil
 }
 
 type httpCredentialStore struct {
-	tenantID string
-	creates  int
+	organizationID string
+	creates        int
 }
 
 type httpWebhookManager struct {
@@ -430,7 +430,7 @@ func (m *httpWebhookManager) Delete(context.Context, string, string, string, tim
 }
 
 func (s *httpCredentialStore) CreateCredential(_ context.Context, encrypted platformops.EncryptedCredential, _ string) (platformops.Credential, error) {
-	s.tenantID = encrypted.Credential.TenantID
+	s.organizationID = encrypted.Credential.OrganizationID
 	s.creates++
 	return encrypted.Credential, nil
 }

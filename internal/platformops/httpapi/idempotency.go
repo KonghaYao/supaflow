@@ -32,19 +32,6 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 			writeProblem(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		// Authorization must precede ledger lookup on every request. A completed
-		// replay is still a current request and must not preserve permissions an
-		// actor had before a role downgrade.
-		if !mutationRoleAllowed(operation, principal.Role) {
-			if record := mutationAuditRecord(r, http.StatusForbidden); record != nil && h.services.Audit != nil {
-				if _, err := h.services.Audit.Record(r.Context(), *record); err != nil {
-					writeProblem(w, http.StatusServiceUnavailable, "audit_unavailable")
-					return
-				}
-			}
-			writeProblem(w, http.StatusForbidden, "forbidden")
-			return
-		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, maximumMutationRequestBytes+1))
 		if err != nil || int64(len(body)) > maximumMutationRequestBytes {
 			writeProblem(w, http.StatusBadRequest, "invalid_request")
@@ -52,7 +39,7 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		fingerprint := sha256.Sum256(append([]byte(r.Method+"\n"+r.URL.RequestURI()+"\n"), body...))
-		record, err := h.services.Mutations.Claim(r.Context(), principal.TenantID, operation, key, fingerprint[:])
+		record, err := h.services.Mutations.Claim(r.Context(), principal.OrganizationID, operation, key, fingerprint[:])
 		if err != nil {
 			respond(w, nil, err, http.StatusOK)
 			return
@@ -71,13 +58,13 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 		defer cancelHandler()
 		_, resourceType, resourceID := mutationAuditTarget(r)
 		r = r.WithContext(platformops.ContextWithMutation(handlerContext, platformops.MutationOperation{
-			ID: record.OperationID, TenantID: principal.TenantID, ActorID: principal.ActorID,
+			ID: record.OperationID, OrganizationID: principal.OrganizationID, ActorID: principal.ActorID,
 			Action: operation, ResourceType: resourceType, ResourceID: resourceID,
 		}))
 		var renewalDone chan error
 		if record.RenewAfter > 0 {
 			renewalDone = make(chan error, 1)
-			go h.renewMutationLease(r.Context(), cancelHandler, principal.TenantID, operation, key, record, renewalDone)
+			go h.renewMutationLease(r.Context(), cancelHandler, principal.OrganizationID, operation, key, record, renewalDone)
 		}
 		captured := &auditResponseWriter{header: make(http.Header)}
 		next.ServeHTTP(captured, r)
@@ -103,13 +90,13 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 				respond(w, nil, renewalErr, http.StatusOK)
 				return
 			}
-			if err = h.services.Mutations.Renew(requestContext, principal.TenantID, operation, key, record.Owner); err != nil {
+			if err = h.services.Mutations.Renew(requestContext, principal.OrganizationID, operation, key, record.Owner); err != nil {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
 		}
 		if operation == "trigger.event.receive" && status == http.StatusTooManyRequests {
-			if err = h.services.Mutations.Retry(requestContext, principal.TenantID, operation, key, record.Owner); err != nil {
+			if err = h.services.Mutations.Retry(requestContext, principal.OrganizationID, operation, key, record.Owner); err != nil {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
@@ -120,7 +107,7 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 			_, _ = w.Write(captured.body.Bytes())
 			return
 		}
-		if err = h.services.Mutations.Complete(requestContext, principal.TenantID, operation, key, completion); err != nil {
+		if err = h.services.Mutations.Complete(requestContext, principal.OrganizationID, operation, key, completion); err != nil {
 			respond(w, nil, err, http.StatusOK)
 			return
 		}
@@ -132,7 +119,7 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 	})
 }
 
-func (h *Handler) renewMutationLease(ctx context.Context, cancel context.CancelFunc, tenantID, operation, key string, record platformops.MutationRecord, done chan<- error) {
+func (h *Handler) renewMutationLease(ctx context.Context, cancel context.CancelFunc, organizationID, operation, key string, record platformops.MutationRecord, done chan<- error) {
 	interval := record.RenewAfter
 	if interval < time.Millisecond {
 		interval = time.Millisecond
@@ -145,7 +132,7 @@ func (h *Handler) renewMutationLease(ctx context.Context, cancel context.CancelF
 			done <- nil
 			return
 		case <-ticker.C:
-			if err := h.services.Mutations.Renew(ctx, tenantID, operation, key, record.Owner); err != nil {
+			if err := h.services.Mutations.Renew(ctx, organizationID, operation, key, record.Owner); err != nil {
 				if ctx.Err() != nil {
 					done <- nil
 					return
@@ -155,19 +142,5 @@ func (h *Handler) renewMutationLease(ctx context.Context, cancel context.CancelF
 				return
 			}
 		}
-	}
-}
-
-func mutationRoleAllowed(operation string, role api.Role) bool {
-	switch operation {
-	case "quota.configure", "retention.configure", "retention.export",
-		"credential.create", "credential.mutate",
-		"webhook_subscription.create", "webhook_subscription.mutate":
-		return role == api.RoleAdmin
-	case "worker.drain", "delivery.requeue", "trigger.create", "trigger.mutate",
-		"trigger.fire", "trigger.event.receive":
-		return role == api.RoleOperator || role == api.RoleAdmin
-	default:
-		return false
 	}
 }

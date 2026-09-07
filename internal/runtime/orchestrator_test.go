@@ -35,7 +35,7 @@ func (s *renewalStore) RenewLease(ctx context.Context, req RenewLeaseRequest) (L
 // 验证审批 token 只保存摘要、仅能消费一次，并在租户边界内恢复运行。
 func TestApprovalSuspendAndSingleUseResume(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("approval"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("approval"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestApprovalSuspendAndSingleUseResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanced, err := orchestrator.Advance(context.Background(), "tenant_a")
+	advanced, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || advanced.Interrupt == nil {
 		t.Fatalf("suspend: result=%+v err=%v", advanced, err)
 	}
@@ -77,25 +77,25 @@ func TestApprovalSuspendAndSingleUseResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := service.GetRun(context.Background(), "tenant_a", created.Run.ID)
+	run, err := service.GetRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || run.Status != RunSuspended {
 		t.Fatalf("suspended run: run=%+v err=%v", run, err)
 	}
-	pending, err := service.ListInterrupts(context.Background(), "tenant_a", run.ID)
+	pending, err := service.ListInterrupts(context.Background(), "organization_a", run.ID)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("pending interrupts: %v err=%v", pending, err)
 	}
 	if pending[0].TokenDigest != ([32]byte{}) {
 		t.Fatal("ListInterrupts leaked token digest")
 	}
-	if _, err := service.ListInterrupts(context.Background(), "tenant_b", run.ID); !IsCode(err, CodeNotFound) {
-		t.Fatalf("cross-tenant interrupt list returned %v", err)
+	if _, err := service.ListInterrupts(context.Background(), "organization_b", run.ID); !IsCode(err, CodeNotFound) {
+		t.Fatalf("cross-organization interrupt list returned %v", err)
 	}
-	if _, err := service.ResolveApproval(context.Background(), "tenant_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: "wrong", IdempotencyKey: "approval-wrong-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalInvalid) {
+	if _, err := service.ResolveApproval(context.Background(), "organization_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: "wrong", IdempotencyKey: "approval-wrong-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalInvalid) {
 		t.Fatalf("wrong token returned %v", err)
 	}
 	command := ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: approvalToken, IdempotencyKey: "approval-resolve-0001", Decision: ApprovalDecision{Approved: true}}
-	resolved, err := service.ResolveApproval(context.Background(), "tenant_a", command)
+	resolved, err := service.ResolveApproval(context.Background(), "organization_a", command)
 	if err != nil || resolved.Run.Status != RunPending {
 		t.Fatalf("resolve: result=%+v err=%v", resolved, err)
 	}
@@ -103,25 +103,25 @@ func TestApprovalSuspendAndSingleUseResume(t *testing.T) {
 	if err := json.Unmarshal(resolved.Interrupt.Decision, &storedDecision); err != nil || storedDecision.DecidedBy != "user_approver" {
 		t.Fatalf("approval actor was not audited: decision=%+v err=%v", storedDecision, err)
 	}
-	replayed, err := service.ResolveApproval(context.Background(), "tenant_a", command)
+	replayed, err := service.ResolveApproval(context.Background(), "organization_a", command)
 	if err != nil || replayed.Run.ID != resolved.Run.ID || replayed.Run.Version != resolved.Run.Version {
 		t.Fatalf("lost-response replay: result=%+v err=%v", replayed, err)
 	}
 	conflict := command
 	conflict.Decision.Comment = "different request"
-	if _, err := service.ResolveApproval(context.Background(), "tenant_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
+	if _, err := service.ResolveApproval(context.Background(), "organization_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("idempotency conflict returned %v", err)
 	}
 	consumed := command
 	consumed.IdempotencyKey = "approval-resolve-0002"
-	if _, err := service.ResolveApproval(context.Background(), "tenant_a", consumed); !IsCode(err, CodeApprovalConsumed) {
+	if _, err := service.ResolveApproval(context.Background(), "organization_a", consumed); !IsCode(err, CodeApprovalConsumed) {
 		t.Fatalf("second consumption with a new key returned %v", err)
 	}
-	pending, err = service.ListInterrupts(context.Background(), "tenant_a", run.ID)
+	pending, err = service.ListInterrupts(context.Background(), "organization_a", run.ID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("resolved interrupt remained pending: %v err=%v", pending, err)
 	}
-	resumed, err := orchestrator.Advance(context.Background(), "tenant_a")
+	resumed, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || resumed.Run == nil || resumed.Run.Status != RunSuccess {
 		t.Fatalf("resumed execution: result=%+v err=%v", resumed, err)
 	}
@@ -133,7 +133,7 @@ func TestApprovalSuspendAndSingleUseResume(t *testing.T) {
 // 验证过期审批 token 不会恢复已暂停的运行。
 func TestApprovalExpiry(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	_, err := service.StartRun(context.Background(), "tenant_a", startRequest("expired-approval"))
+	_, err := service.StartRun(context.Background(), "organization_a", startRequest("expired-approval"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestApprovalExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanced, err := orchestrator.Advance(context.Background(), "tenant_a")
+	advanced, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestApprovalExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Set(clock.Now().Add(time.Minute))
-	if _, err := service.ResolveApproval(context.Background(), "tenant_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-expired-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalExpired) {
+	if _, err := service.ResolveApproval(context.Background(), "organization_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-expired-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalExpired) {
 		t.Fatalf("expired token returned %v", err)
 	}
 }
@@ -165,7 +165,7 @@ func TestApprovalExpiry(t *testing.T) {
 // 验证取消已暂停运行会关闭待审批项，旧 token 不能再次恢复运行。
 func TestCancelSuspendedRunClosesApproval(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("cancel-approval"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("cancel-approval"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestCancelSuspendedRunClosesApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanced, err := orchestrator.Advance(context.Background(), "tenant_a")
+	advanced, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,15 +188,15 @@ func TestCancelSuspendedRunClosesApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelled, err := service.CancelRun(context.Background(), "tenant_a", created.Run.ID)
+	cancelled, err := service.CancelRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || cancelled.Run.Status != RunCancelled {
 		t.Fatalf("cancel suspended run: result=%+v err=%v", cancelled, err)
 	}
-	pending, err := service.ListInterrupts(context.Background(), "tenant_a", created.Run.ID)
+	pending, err := service.ListInterrupts(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("cancelled run has pending approvals: %v err=%v", pending, err)
 	}
-	if _, err := service.ResolveApproval(context.Background(), "tenant_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-cancelled-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalConsumed) {
+	if _, err := service.ResolveApproval(context.Background(), "organization_a", ResolveApprovalCommand{ActorID: "user_approver", InterruptID: advanced.Interrupt.ID, ResumeToken: token, IdempotencyKey: "approval-cancelled-0001", Decision: ApprovalDecision{Approved: true}}); !IsCode(err, CodeApprovalConsumed) {
 		t.Fatalf("cancelled approval token returned %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestCancelSuspendedRunClosesApproval(t *testing.T) {
 // 验证事件 cursor 单调递增，afterCursor 分页不会重复或跳过事件。
 func TestEventCursorResume(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("events"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("events"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,14 +219,14 @@ func TestEventCursorResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := orchestrator.Advance(context.Background(), "tenant_a"); err != nil {
+	if _, err := orchestrator.Advance(context.Background(), "organization_a"); err != nil {
 		t.Fatal(err)
 	}
-	first, err := service.ListEvents(context.Background(), "tenant_a", created.Run.ID, 0, 2)
+	first, err := service.ListEvents(context.Background(), "organization_a", created.Run.ID, 0, 2)
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first event page: %v err=%v", first, err)
 	}
-	second, err := service.ListEvents(context.Background(), "tenant_a", created.Run.ID, first[len(first)-1].Cursor, 100)
+	second, err := service.ListEvents(context.Background(), "organization_a", created.Run.ID, first[len(first)-1].Cursor, 100)
 	if err != nil || len(second) == 0 {
 		t.Fatalf("second event page: %v err=%v", second, err)
 	}
@@ -236,11 +236,11 @@ func TestEventCursorResume(t *testing.T) {
 		if event.Cursor != want {
 			t.Fatalf("cursor[%d] = %d, want %d", i, event.Cursor, want)
 		}
-		if event.TenantID != "tenant_a" || event.RunID != created.Run.ID {
+		if event.OrganizationID != "organization_a" || event.RunID != created.Run.ID {
 			t.Fatalf("event scope is wrong: %+v", event)
 		}
 	}
-	remaining, err := service.ListEvents(context.Background(), "tenant_a", created.Run.ID, all[len(all)-1].Cursor, 100)
+	remaining, err := service.ListEvents(context.Background(), "organization_a", created.Run.ID, all[len(all)-1].Cursor, 100)
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("events after tail: %v err=%v", remaining, err)
 	}
@@ -249,7 +249,7 @@ func TestEventCursorResume(t *testing.T) {
 // 验证可重试错误采用有限次数和延迟退避，达到上限后终结为 FAILED。
 func TestBoundedRetry(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("retry"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("retry"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,19 +273,19 @@ func TestBoundedRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= 3; attempt++ {
-		advanced, err := orchestrator.Advance(context.Background(), "tenant_a")
+		advanced, err := orchestrator.Advance(context.Background(), "organization_a")
 		if err != nil || !advanced.Worked {
 			t.Fatalf("advance %d: result=%+v err=%v", attempt, advanced, err)
 		}
 		if attempt < 3 {
-			idle, err := orchestrator.Advance(context.Background(), "tenant_a")
+			idle, err := orchestrator.Advance(context.Background(), "organization_a")
 			if err != nil || idle.Worked {
 				t.Fatalf("retry ran before backoff: result=%+v err=%v", idle, err)
 			}
 			clock.Set(clock.Now().Add(time.Duration(1<<(attempt-1)) * time.Second))
 		}
 	}
-	run, err := service.GetRun(context.Background(), "tenant_a", created.Run.ID)
+	run, err := service.GetRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || run.Status != RunFailed {
 		t.Fatalf("final run: %+v err=%v", run, err)
 	}
@@ -298,7 +298,7 @@ func TestBoundedRetry(t *testing.T) {
 func TestOrchestratorRenewsLeaseDuringExecution(t *testing.T) {
 	base := NewMemoryStore()
 	service := NewService(base, nil, &sequenceIDs{})
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("heartbeat"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("heartbeat"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestOrchestratorRenewsLeaseDuringExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := orchestrator.Advance(context.Background(), "tenant_a")
+	result, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || result.Run == nil || result.Run.ID != created.Run.ID || result.Run.Status != RunSuccess {
 		t.Fatalf("advance=%+v err=%v", result, err)
 	}
@@ -328,7 +328,7 @@ func TestOrchestratorRenewsLeaseDuringExecution(t *testing.T) {
 func TestOrchestratorCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	base := NewMemoryStore()
 	service := NewService(base, nil, &sequenceIDs{})
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("heartbeat-failure"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("heartbeat-failure"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,11 +347,11 @@ func TestOrchestratorCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := orchestrator.Advance(context.Background(), "tenant_a")
+	result, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err == nil || !IsCode(err, CodeLeaseLost) || !result.Worked || !cancelled.Load() {
 		t.Fatalf("advance=%+v cancelled=%v err=%v", result, cancelled.Load(), err)
 	}
-	run, getErr := service.GetRun(context.Background(), "tenant_a", created.Run.ID)
+	run, getErr := service.GetRun(context.Background(), "organization_a", created.Run.ID)
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
@@ -378,7 +378,7 @@ func TestOrchestratorBoundsNonCompliantCancelAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	orchestrator.cancelExecutorBounded(context.Background(), ExecutionRequest{TenantID: "tenant_a", AttemptID: "attempt_a"})
+	orchestrator.cancelExecutorBounded(context.Background(), ExecutionRequest{OrganizationID: "organization_a", AttemptID: "attempt_a"})
 	if time.Since(started) > 250*time.Millisecond {
 		t.Fatalf("cancel adapter blocked worker for %s", time.Since(started))
 	}
@@ -388,7 +388,7 @@ func TestOrchestratorBoundsNonCompliantCancelAdapter(t *testing.T) {
 func TestOrchestratorPropagatesActiveCancellationWithoutRetry(t *testing.T) {
 	store := NewMemoryStore()
 	service := NewService(store, nil, &sequenceIDs{})
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("active-cancel"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("active-cancel"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestOrchestratorPropagatesActiveCancellationWithoutRetry(t *testing.T) {
 	advanced := make(chan AdvanceResult, 1)
 	advanceErrors := make(chan error, 1)
 	go func() {
-		result, advanceErr := orchestrator.Advance(context.Background(), "tenant_a")
+		result, advanceErr := orchestrator.Advance(context.Background(), "organization_a")
 		advanced <- result
 		advanceErrors <- advanceErr
 	}()
@@ -433,7 +433,7 @@ func TestOrchestratorPropagatesActiveCancellationWithoutRetry(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("executor did not start")
 	}
-	cancelled, err := service.CancelRun(context.Background(), "tenant_a", created.Run.ID)
+	cancelled, err := service.CancelRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || cancelled.Run.Status != RunCancelling {
 		t.Fatalf("cancel intent: result=%+v err=%v", cancelled, err)
 	}
@@ -453,7 +453,7 @@ func TestOrchestratorPropagatesActiveCancellationWithoutRetry(t *testing.T) {
 	if cancelCalls.Load() != 1 || executeCalls.Load() != 1 {
 		t.Fatalf("Cancel calls=%d Execute calls=%d, want one each", cancelCalls.Load(), executeCalls.Load())
 	}
-	idle, err := orchestrator.Advance(context.Background(), "tenant_a")
+	idle, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || idle.Worked {
 		t.Fatalf("cancelled run retried: result=%+v err=%v", idle, err)
 	}

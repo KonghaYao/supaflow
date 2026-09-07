@@ -24,7 +24,7 @@ type OutputDownload struct {
 	SHA256      string
 }
 
-// DownloadRunOutput opens a tenant-authorized output stream. maxBytes is a
+// DownloadRunOutput opens a organization-authorized output stream. maxBytes is a
 // caller-owned memory/processing budget and is checked before any bytes return.
 func (c *Client) DownloadRunOutput(ctx context.Context, runID string, maxBytes int64) (OutputDownload, error) {
 	if strings.TrimSpace(runID) == "" || maxBytes <= 0 || maxBytes > 1<<30 {

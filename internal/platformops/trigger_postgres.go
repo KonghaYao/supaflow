@@ -28,7 +28,7 @@ func (s *PostgresTriggerStore) CreateTrigger(ctx context.Context, request Create
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if request.IdempotencyKey != "" {
-		replayed, found, claimErr := claimTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, "create", request.RequestHash, "")
+		replayed, found, claimErr := claimTriggerMutation(ctx, tx, request.OrganizationID, request.IdempotencyKey, "create", request.RequestHash, "")
 		if claimErr != nil {
 			return Trigger{}, claimErr
 		}
@@ -65,14 +65,14 @@ func (s *PostgresTriggerStore) CreateTrigger(ctx context.Context, request Create
 	status := "enabled"
 	row := tx.QueryRow(ctx, `
 		INSERT INTO triggers (
-		    tenant_id, id, public_hash, workflow_id, kind, name, status, config,
+		    organization_id, id, public_hash, workflow_id, kind, name, status, config,
 		    schedule_interval_seconds, misfire_policy, next_fire_at,
 		    signing_credential_id, event_type, created_by
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),NULLIF($13,''),$14)
-		RETURNING tenant_id,id,public_hash,workflow_id,kind,name,status,config,
+		RETURNING organization_id,id,public_hash,workflow_id,kind,name,status,config,
 		          schedule_interval_seconds,COALESCE(misfire_policy,''),next_fire_at,
 		          COALESCE(signing_credential_id,''),COALESCE(event_type,''),created_by,created_at,updated_at`,
-		request.TenantID, id, publicHash, request.WorkflowID, request.Kind, request.Name, status, config,
+		request.OrganizationID, id, publicHash, request.WorkflowID, request.Kind, request.Name, status, config,
 		interval, nullableString(string(request.MisfirePolicy)), request.FirstFireAt,
 		request.SigningCredentialID, request.EventType, request.ActorID)
 	trigger, err := scanTrigger(row)
@@ -80,7 +80,7 @@ func (s *PostgresTriggerStore) CreateTrigger(ctx context.Context, request Create
 		return Trigger{}, triggerError("create trigger", err)
 	}
 	if request.IdempotencyKey != "" {
-		if err = completeTriggerMutation(ctx, tx, request.TenantID, request.IdempotencyKey, trigger); err != nil {
+		if err = completeTriggerMutation(ctx, tx, request.OrganizationID, request.IdempotencyKey, trigger); err != nil {
 			return Trigger{}, err
 		}
 	}
@@ -97,13 +97,13 @@ func (s *PostgresTriggerStore) CreateTrigger(ctx context.Context, request Create
 	return trigger, nil
 }
 
-// GetTrigger returns a tenant-scoped trigger without secret material.
-func (s *PostgresTriggerStore) GetTrigger(ctx context.Context, tenantID, triggerID string) (Trigger, error) {
+// GetTrigger returns a organization-scoped trigger without secret material.
+func (s *PostgresTriggerStore) GetTrigger(ctx context.Context, organizationID, triggerID string) (Trigger, error) {
 	trigger, err := scanTrigger(s.pool.QueryRow(ctx, `
-		SELECT tenant_id,id,public_hash,workflow_id,kind,name,status,config,
+		SELECT organization_id,id,public_hash,workflow_id,kind,name,status,config,
 		       schedule_interval_seconds,COALESCE(misfire_policy,''),next_fire_at,
 		       COALESCE(signing_credential_id,''),COALESCE(event_type,''),created_by,created_at,updated_at
-		FROM triggers WHERE tenant_id=$1 AND id=$2`, tenantID, triggerID))
+		FROM triggers WHERE organization_id=$1 AND id=$2`, organizationID, triggerID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Trigger{}, ErrNotFound
 	}
@@ -113,10 +113,10 @@ func (s *PostgresTriggerStore) GetTrigger(ctx context.Context, tenantID, trigger
 	return trigger, nil
 }
 
-// ResolvePublicWebhook maps a public route hash to server-owned tenant context.
+// ResolvePublicWebhook maps a public route hash to server-owned organization context.
 func (s *PostgresTriggerStore) ResolvePublicWebhook(ctx context.Context, publicHash string) (Trigger, error) {
 	trigger, err := scanTrigger(s.pool.QueryRow(ctx, `
-		SELECT tenant_id,id,public_hash,workflow_id,kind,name,status,config,
+		SELECT organization_id,id,public_hash,workflow_id,kind,name,status,config,
 		       schedule_interval_seconds,COALESCE(misfire_policy,''),next_fire_at,
 		       COALESCE(signing_credential_id,''),COALESCE(event_type,''),created_by,created_at,updated_at
 		FROM triggers WHERE public_hash=$1 AND kind='webhook' AND status='enabled'`, publicHash))
@@ -130,18 +130,18 @@ func (s *PostgresTriggerStore) ResolvePublicWebhook(ctx context.Context, publicH
 }
 
 // SetTriggerEnabled atomically changes the enabled state.
-func (s *PostgresTriggerStore) SetTriggerEnabled(ctx context.Context, tenantID, triggerID string, enabled bool, now time.Time) (Trigger, error) {
+func (s *PostgresTriggerStore) SetTriggerEnabled(ctx context.Context, organizationID, triggerID string, enabled bool, now time.Time) (Trigger, error) {
 	status := "disabled"
 	if enabled {
 		status = "enabled"
 	}
 	trigger, err := scanTrigger(s.pool.QueryRow(ctx, `
 		UPDATE triggers SET status=$3,updated_at=$4
-		WHERE tenant_id=$1 AND id=$2
-		RETURNING tenant_id,id,public_hash,workflow_id,kind,name,status,config,
+		WHERE organization_id=$1 AND id=$2
+		RETURNING organization_id,id,public_hash,workflow_id,kind,name,status,config,
 		          schedule_interval_seconds,COALESCE(misfire_policy,''),next_fire_at,
 		          COALESCE(signing_credential_id,''),COALESCE(event_type,''),created_by,created_at,updated_at`,
-		tenantID, triggerID, status, now))
+		organizationID, triggerID, status, now))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Trigger{}, ErrNotFound
 	}
@@ -158,7 +158,7 @@ func (s *PostgresTriggerStore) Fire(ctx context.Context, request FireRequest) (F
 		return Firing{}, false, triggerError("begin firing", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err = requireEnabledTrigger(ctx, tx, request.TenantID, request.TriggerID, request.ExpectedKind); err != nil {
+	if err = requireEnabledTrigger(ctx, tx, request.OrganizationID, request.TriggerID, request.ExpectedKind); err != nil {
 		return Firing{}, false, err
 	}
 	firing, created, err := insertFiringTx(ctx, tx, request)
@@ -185,13 +185,13 @@ func (s *PostgresTriggerStore) FireWebhook(ctx context.Context, request FireRequ
 		return Firing{}, false, triggerError("begin webhook firing", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err = requireEnabledTrigger(ctx, tx, request.TenantID, request.TriggerID, TriggerWebhook); err != nil {
+	if err = requireEnabledTrigger(ctx, tx, request.OrganizationID, request.TriggerID, TriggerWebhook); err != nil {
 		return Firing{}, false, err
 	}
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO webhook_replays (tenant_id,trigger_id,request_id,request_digest,expires_at)
-		VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id,trigger_id,request_id) DO NOTHING`,
-		request.TenantID, request.TriggerID, requestID, digest[:], expiresAt)
+		INSERT INTO webhook_replays (organization_id,trigger_id,request_id,request_digest,expires_at)
+		VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id,trigger_id,request_id) DO NOTHING`,
+		request.OrganizationID, request.TriggerID, requestID, digest[:], expiresAt)
 	if err != nil {
 		return Firing{}, false, triggerError("record webhook replay guard", err)
 	}
@@ -206,7 +206,7 @@ func (s *PostgresTriggerStore) FireWebhook(ctx context.Context, request FireRequ
 		"created": created, "requestIdHash": AuditIdentifier(requestID),
 	})
 	if _, err = insertAuditTx(ctx, tx, AuditRecord{
-		TenantID: request.TenantID, ActorID: "public-webhook", Action: "trigger.webhook.receive",
+		OrganizationID: request.OrganizationID, ActorID: "public-webhook", Action: "trigger.webhook.receive",
 		ResourceType: "trigger", ResourceID: request.TriggerID, Outcome: AuditAllowed, Metadata: metadata,
 	}); err != nil {
 		return Firing{}, false, err
@@ -224,11 +224,11 @@ func (s *PostgresTriggerStore) PurgeExpiredWebhookReplays(ctx context.Context, b
 	}
 	tag, err := s.pool.Exec(ctx, `
 		WITH expired AS (
-		    SELECT tenant_id,trigger_id,request_id FROM webhook_replays
-			WHERE expires_at < $1 ORDER BY expires_at,tenant_id,trigger_id,request_id LIMIT $2
+		    SELECT organization_id,trigger_id,request_id FROM webhook_replays
+			WHERE expires_at < $1 ORDER BY expires_at,organization_id,trigger_id,request_id LIMIT $2
 		)
 		DELETE FROM webhook_replays r USING expired e
-		WHERE r.tenant_id=e.tenant_id AND r.trigger_id=e.trigger_id AND r.request_id=e.request_id`, before, limit)
+		WHERE r.organization_id=e.organization_id AND r.trigger_id=e.trigger_id AND r.request_id=e.request_id`, before, limit)
 	if err != nil {
 		return 0, triggerError("purge webhook replay guards", err)
 	}
@@ -250,11 +250,11 @@ func insertFiringTx(ctx context.Context, tx pgx.Tx, request FireRequest) (Firing
 		FROM triggers t
 		JOIN LATERAL (
 		    SELECT candidate.id FROM workflow_versions candidate
-		    WHERE candidate.tenant_id=t.tenant_id AND candidate.workflow_id=t.workflow_id
+		    WHERE candidate.organization_id=t.organization_id AND candidate.workflow_id=t.workflow_id
 		    ORDER BY candidate.version DESC LIMIT 1
 		) v ON true
-		JOIN execution_plans p ON p.tenant_id=t.tenant_id AND p.workflow_version_id=v.id
-		WHERE t.tenant_id=$1 AND t.id=$2`, request.TenantID, request.TriggerID).Scan(
+		JOIN execution_plans p ON p.organization_id=t.organization_id AND p.workflow_version_id=v.id
+		WHERE t.organization_id=$1 AND t.id=$2`, request.OrganizationID, request.TriggerID).Scan(
 		&firing.WorkflowID, &firing.WorkflowVersionID, &firing.ExecutionPlanID, &firing.PlanHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Firing{}, false, ErrConflict
@@ -264,27 +264,27 @@ func insertFiringTx(ctx context.Context, tx pgx.Tx, request FireRequest) (Firing
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO trigger_firings
-		    (tenant_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,deduplication_key,source_time,payload)
+		    (organization_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,deduplication_key,source_time,payload)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		ON CONFLICT (tenant_id,trigger_id,deduplication_key) DO NOTHING
-		RETURNING tenant_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,
+		ON CONFLICT (organization_id,trigger_id,deduplication_key) DO NOTHING
+		RETURNING organization_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,
 		          deduplication_key,source_time,payload,created_at`,
-		request.TenantID, id, request.TriggerID, firing.WorkflowID, firing.WorkflowVersionID,
+		request.OrganizationID, id, request.TriggerID, firing.WorkflowID, firing.WorkflowVersionID,
 		firing.ExecutionPlanID, firing.PlanHash, request.DeduplicationKey, request.SourceTime, payload).Scan(
-		&firing.TenantID, &firing.ID, &firing.TriggerID, &firing.WorkflowID, &firing.WorkflowVersionID,
+		&firing.OrganizationID, &firing.ID, &firing.TriggerID, &firing.WorkflowID, &firing.WorkflowVersionID,
 		&firing.ExecutionPlanID, &firing.PlanHash, &firing.DeduplicationKey,
 		&firing.SourceTime, &firing.Payload, &firing.CreatedAt)
 	created := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `
-			SELECT tenant_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,
+			SELECT organization_id,id,trigger_id,workflow_id,workflow_version_id,execution_plan_id,plan_hash,
 			       deduplication_key,source_time,payload,created_at
 			FROM trigger_firings
-			WHERE tenant_id=$1 AND trigger_id=$2 AND deduplication_key=$3
+			WHERE organization_id=$1 AND trigger_id=$2 AND deduplication_key=$3
 			  AND payload=$4::jsonb AND ($6 OR source_time IS NOT DISTINCT FROM $5)`,
-			request.TenantID, request.TriggerID, request.DeduplicationKey, payload, request.SourceTime,
+			request.OrganizationID, request.TriggerID, request.DeduplicationKey, payload, request.SourceTime,
 			request.StableReplaySourceTime).Scan(
-			&firing.TenantID, &firing.ID, &firing.TriggerID, &firing.WorkflowID, &firing.WorkflowVersionID,
+			&firing.OrganizationID, &firing.ID, &firing.TriggerID, &firing.WorkflowID, &firing.WorkflowVersionID,
 			&firing.ExecutionPlanID, &firing.PlanHash, &firing.DeduplicationKey,
 			&firing.SourceTime, &firing.Payload, &firing.CreatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -301,16 +301,16 @@ func insertFiringTx(ctx context.Context, tx pgx.Tx, request FireRequest) (Firing
 			"executionPlanId": firing.ExecutionPlanID, "planHash": firing.PlanHash,
 			"deduplicationKey": firing.DeduplicationKey, "payload": json.RawMessage(firing.Payload),
 		})
-		if err = insertPlatformOutboxTx(ctx, tx, firing.TenantID, "trigger", firing.TriggerID, "trigger.fired", envelope); err != nil {
+		if err = insertPlatformOutboxTx(ctx, tx, firing.OrganizationID, "trigger", firing.TriggerID, "trigger.fired", envelope); err != nil {
 			return Firing{}, false, err
 		}
 	}
 	return firing, created, nil
 }
 
-func requireEnabledTrigger(ctx context.Context, tx pgx.Tx, tenantID, triggerID string, kind TriggerKind) error {
+func requireEnabledTrigger(ctx context.Context, tx pgx.Tx, organizationID, triggerID string, kind TriggerKind) error {
 	var foundKind, status string
-	err := tx.QueryRow(ctx, `SELECT kind,status FROM triggers WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, triggerID).Scan(&foundKind, &status)
+	err := tx.QueryRow(ctx, `SELECT kind,status FROM triggers WHERE organization_id=$1 AND id=$2 FOR UPDATE`, organizationID, triggerID).Scan(&foundKind, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -357,7 +357,7 @@ func scanTrigger(row pgx.Row) (Trigger, error) {
 	var trigger Trigger
 	var kind, status, policy string
 	var seconds *int64
-	err := row.Scan(&trigger.TenantID, &trigger.ID, &trigger.PublicHash, &trigger.WorkflowID, &kind, &trigger.Name,
+	err := row.Scan(&trigger.OrganizationID, &trigger.ID, &trigger.PublicHash, &trigger.WorkflowID, &kind, &trigger.Name,
 		&status, &trigger.Config, &seconds, &policy, &trigger.NextFireAt,
 		&trigger.SigningCredentialID, &trigger.EventType, &trigger.CreatedBy, &trigger.CreatedAt, &trigger.UpdatedAt)
 	trigger.Kind, trigger.Enabled, trigger.MisfirePolicy = TriggerKind(kind), status == "enabled", MisfirePolicy(policy)
@@ -367,12 +367,12 @@ func scanTrigger(row pgx.Row) (Trigger, error) {
 	return trigger, err
 }
 
-func insertPlatformOutboxTx(ctx context.Context, tx pgx.Tx, tenantID, aggregateType, aggregateID, topic string, payload json.RawMessage) error {
+func insertPlatformOutboxTx(ctx context.Context, tx pgx.Tx, organizationID, aggregateType, aggregateID, topic string, payload json.RawMessage) error {
 	id, err := newID("out")
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_messages (id,tenant_id,aggregate_type,aggregate_id,topic,payload) VALUES ($1,$2,$3,$4,$5,$6)`, id, tenantID, aggregateType, aggregateID, topic, payload)
+	_, err = tx.Exec(ctx, `INSERT INTO outbox_messages (id,organization_id,aggregate_type,aggregate_id,topic,payload) VALUES ($1,$2,$3,$4,$5,$6)`, id, organizationID, aggregateType, aggregateID, topic, payload)
 	if err != nil {
 		return fmt.Errorf("enqueue platform event: %w", err)
 	}

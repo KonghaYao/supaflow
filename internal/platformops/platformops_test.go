@@ -26,7 +26,7 @@ func TestTriggerServiceVerifiesWebhookWindowAndReplay(t *testing.T) {
 	}
 	body := []byte(`{"value":1}`)
 	request := WebhookRequest{
-		TenantID: "tenant_a", TriggerID: "trigger_a", RequestID: "request_a",
+		OrganizationID: "organization_a", TriggerID: "trigger_a", RequestID: "request_a",
 		Timestamp: now, Now: now, Body: body, Signature: SignWebhook(secret, "request_a", now, body),
 	}
 	firing, created, err := service.ReceiveWebhook(context.Background(), request)
@@ -56,7 +56,7 @@ func TestWebhookSignatureBindsRequestID(t *testing.T) {
 	}
 	body := []byte(`{"event":"created"}`)
 	_, _, err = service.ReceiveWebhook(context.Background(), WebhookRequest{
-		TenantID: "tenant_a", TriggerID: "trigger_a", RequestID: "request_b",
+		OrganizationID: "organization_a", TriggerID: "trigger_a", RequestID: "request_b",
 		Timestamp: now, Now: now, Body: body, Signature: SignWebhook(secret, "request_a", now, body),
 	})
 	if !errors.Is(err, ErrSignature) {
@@ -79,7 +79,7 @@ func TestWebhookReplayGuardCoversFutureTimestampWindow(t *testing.T) {
 	}
 	body := []byte(`{"future":true}`)
 	_, _, err = service.ReceiveWebhook(context.Background(), WebhookRequest{
-		TenantID: "tenant_a", TriggerID: "trigger_a", RequestID: "future-request",
+		OrganizationID: "organization_a", TriggerID: "trigger_a", RequestID: "future-request",
 		Timestamp: timestamp, Now: now, Body: body,
 		Signature: SignWebhook(secret, "future-request", timestamp, body),
 	})
@@ -98,7 +98,7 @@ func TestTriggerServiceRejectsInvalidFireEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = service.Fire(context.Background(), FireRequest{
-		TenantID: "tenant_a", TriggerID: "trigger_a", ExpectedKind: TriggerAPI,
+		OrganizationID: "organization_a", TriggerID: "trigger_a", ExpectedKind: TriggerAPI,
 		Payload: json.RawMessage(`[]`),
 	})
 	if !errors.Is(err, ErrInvalidArgument) {
@@ -117,7 +117,7 @@ func TestScheduleCatchUpKeepsBacklogAfterBatchLimit(t *testing.T) {
 }
 
 // 验证 credential 明文被 envelope 加密、调用缓冲区被清零且只能由相同租户上下文解密。
-func TestCredentialServiceEnvelopeRoundTripAndTenantBinding(t *testing.T) {
+func TestCredentialServiceEnvelopeRoundTripAndOrganizationBinding(t *testing.T) {
 	provider, err := NewLocalAESProvider("local-key-1", bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestCredentialServiceEnvelopeRoundTripAndTenantBinding(t *testing.T) {
 	}
 	secret := []byte("top-secret-value")
 	credential, err := service.Create(context.Background(), CreateCredentialRequest{
-		TenantID: "tenant_a", ActorID: "admin_a", Name: "signer", Purpose: "webhook_signing", Secret: secret,
+		OrganizationID: "organization_a", ActorID: "admin_a", Name: "signer", Purpose: "webhook_signing", Secret: secret,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,20 +139,20 @@ func TestCredentialServiceEnvelopeRoundTripAndTenantBinding(t *testing.T) {
 	}
 	store.encrypted.Credential = credential
 	resolved, err := service.ResolveForAttempt(context.Background(), ResolveCredentialRequest{
-		TenantID: "tenant_a", RunID: "run_a", AttemptID: "attempt_a", CredentialID: credential.ID,
+		OrganizationID: "organization_a", RunID: "run_a", AttemptID: "attempt_a", CredentialID: credential.ID,
 		Purpose: "webhook_signing", FencingToken: 1, Now: time.Now().UTC(),
 	})
 	if err != nil || string(resolved) != "top-secret-value" {
 		t.Fatalf("resolved=%q err=%v", resolved, err)
 	}
 	tampered := store.encrypted
-	tampered.Credential.TenantID = "tenant_b"
+	tampered.Credential.OrganizationID = "organization_b"
 	store.encrypted = tampered
 	if _, err = service.ResolveForAttempt(context.Background(), ResolveCredentialRequest{
-		TenantID: "tenant_b", RunID: "run_a", AttemptID: "attempt_a", CredentialID: credential.ID,
+		OrganizationID: "organization_b", RunID: "run_a", AttemptID: "attempt_a", CredentialID: credential.ID,
 		Purpose: "webhook_signing", FencingToken: 1, Now: time.Now().UTC(),
 	}); !errors.Is(err, ErrCredentialForbidden) {
-		t.Fatalf("cross-tenant ciphertext error=%v", err)
+		t.Fatalf("cross-organization ciphertext error=%v", err)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestCredentialServiceEnvelopeRoundTripAndTenantBinding(t *testing.T) {
 func TestOutboxDispatcherRetriesThenDeadLetters(t *testing.T) {
 	now := time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
 	store := &deliveryTestStore{message: DeliveryMessage{
-		ID: "out_a", TenantID: "tenant_a", Attempts: 1, MaxAttempts: 2,
+		ID: "out_a", OrganizationID: "organization_a", Attempts: 1, MaxAttempts: 2,
 	}}
 	dispatcher, err := NewOutboxDispatcher(store, failingDelivery{}, "dispatcher_a", time.Minute, time.Second, time.Minute)
 	if err != nil {
@@ -168,13 +168,13 @@ func TestOutboxDispatcherRetriesThenDeadLetters(t *testing.T) {
 	}
 	completedAt := now
 	dispatcher.now = func() time.Time { return completedAt }
-	result, err := dispatcher.DispatchOne(context.Background(), "tenant_a", now)
+	result, err := dispatcher.DispatchOne(context.Background(), "organization_a", now)
 	if err != nil || result.DeadLetter || result.RetryAt == nil || !result.RetryAt.Equal(now.Add(time.Second)) {
 		t.Fatalf("retry result=%+v err=%v", result, err)
 	}
 	store.message.Attempts = 2
 	completedAt = now.Add(time.Second)
-	result, err = dispatcher.DispatchOne(context.Background(), "tenant_a", now.Add(time.Second))
+	result, err = dispatcher.DispatchOne(context.Background(), "organization_a", now.Add(time.Second))
 	if err != nil || !result.DeadLetter || result.RetryAt != nil {
 		t.Fatalf("DLQ result=%+v err=%v", result, err)
 	}
@@ -194,13 +194,13 @@ func (d slowDelivery) Deliver(ctx context.Context, _ DeliveryMessage) error {
 // 验证慢 webhook 处理期间持续续租，避免另一副本抢占同一 outbox 消息。
 func TestOutboxDispatcherRenewsLeaseDuringSlowDelivery(t *testing.T) {
 	now := time.Now().UTC()
-	store := &deliveryTestStore{message: DeliveryMessage{ID: "out_slow", TenantID: "tenant_a", Attempts: 1, MaxAttempts: 2}}
+	store := &deliveryTestStore{message: DeliveryMessage{ID: "out_slow", OrganizationID: "organization_a", Attempts: 1, MaxAttempts: 2}}
 	dispatcher, err := NewOutboxDispatcher(store, slowDelivery{delay: 90 * time.Millisecond}, "dispatcher_a", 30*time.Millisecond, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dispatcher.now = func() time.Time { return time.Now().UTC() }
-	result, err := dispatcher.DispatchOne(context.Background(), "tenant_a", now)
+	result, err := dispatcher.DispatchOne(context.Background(), "organization_a", now)
 	if err != nil || !result.Delivered {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -218,18 +218,18 @@ func TestFileObjectStoreBoundsAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.Put(context.Background(), "../tenant", "object", strings.NewReader("x"), 10); !errors.Is(err, ErrInvalidArgument) {
+	if _, err = store.Put(context.Background(), "../organization", "object", strings.NewReader("x"), 10); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("traversal error=%v", err)
 	}
-	if _, err = store.Put(context.Background(), "tenant_a", "object", strings.NewReader("too-large"), 3); !errors.Is(err, ErrInvalidArgument) {
+	if _, err = store.Put(context.Background(), "organization_a", "object", strings.NewReader("too-large"), 3); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("size error=%v", err)
 	}
-	stored, err := store.Put(context.Background(), "tenant_a", "object", strings.NewReader("safe"), 10)
+	stored, err := store.Put(context.Background(), "organization_a", "object", strings.NewReader("safe"), 10)
 	if err != nil || stored.Size != 4 {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
-	if _, err = store.Open(context.Background(), "tenant_b", "object"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross-tenant open error=%v", err)
+	if _, err = store.Open(context.Background(), "organization_b", "object"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-organization open error=%v", err)
 	}
 }
 
@@ -273,7 +273,7 @@ func TestAuditedExecutorFailsClosedAndClassifiesDenial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := workflowruntime.ExecutionRequest{TenantID: "tenant_a", RunID: "run_a", NodeID: "node_a", AttemptID: "attempt_a", Executor: "http", FencingToken: 2}
+	request := workflowruntime.ExecutionRequest{OrganizationID: "organization_a", RunID: "run_a", NodeID: "node_a", AttemptID: "attempt_a", Executor: "http", FencingToken: 2}
 	if _, err = executor.Execute(context.Background(), request); err == nil || next.calls != 0 {
 		t.Fatalf("audit failure must prevent execution: calls=%d err=%v", next.calls, err)
 	}
@@ -298,7 +298,7 @@ func TestAuditedExecutorBoundsDetachedFailureAudit(t *testing.T) {
 	cancel()
 	started := time.Now()
 	_, executeErr := executor.Execute(ctx, workflowruntime.ExecutionRequest{
-		TenantID: "tenant_a", RunID: "run_a", NodeID: "node_a", AttemptID: "attempt_a", Executor: "http",
+		OrganizationID: "organization_a", RunID: "run_a", NodeID: "node_a", AttemptID: "attempt_a", Executor: "http",
 	})
 	if executeErr == nil || time.Since(started) > 250*time.Millisecond {
 		t.Fatalf("detached audit was not bounded: elapsed=%s err=%v", time.Since(started), executeErr)
@@ -326,13 +326,13 @@ func (s *triggerTestStore) GetTrigger(context.Context, string, string) (Trigger,
 	return Trigger{}, nil
 }
 func (s *triggerTestStore) ResolvePublicWebhook(context.Context, string) (Trigger, error) {
-	return Trigger{TenantID: "tenant_a", ID: "trigger_a", Kind: TriggerWebhook}, nil
+	return Trigger{OrganizationID: "organization_a", ID: "trigger_a", Kind: TriggerWebhook}, nil
 }
 func (s *triggerTestStore) SetTriggerEnabled(context.Context, string, string, bool, time.Time) (Trigger, error) {
 	return Trigger{}, nil
 }
 func (s *triggerTestStore) Fire(_ context.Context, request FireRequest) (Firing, bool, error) {
-	return Firing{TenantID: request.TenantID, TriggerID: request.TriggerID}, true, nil
+	return Firing{OrganizationID: request.OrganizationID, TriggerID: request.TriggerID}, true, nil
 }
 func (s *triggerTestStore) FireWebhook(_ context.Context, request FireRequest, _ string, _ [sha256.Size]byte, expiresAt time.Time) (Firing, bool, error) {
 	s.webhookCalls++
@@ -340,7 +340,7 @@ func (s *triggerTestStore) FireWebhook(_ context.Context, request FireRequest, _
 	if s.replay {
 		return Firing{}, false, ErrReplay
 	}
-	return Firing{TenantID: request.TenantID, TriggerID: request.TriggerID}, true, nil
+	return Firing{OrganizationID: request.OrganizationID, TriggerID: request.TriggerID}, true, nil
 }
 func (s *triggerTestStore) FireDueSchedules(context.Context, ScheduleOptions) ([]Firing, error) {
 	return nil, nil

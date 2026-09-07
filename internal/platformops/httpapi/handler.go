@@ -31,7 +31,7 @@ type Services struct {
 	Mutations   platformops.MutationLedger
 }
 
-// OutboundWebhookManager is the tenant-scoped subscription lifecycle seam.
+// OutboundWebhookManager is the organization-scoped subscription lifecycle seam.
 type OutboundWebhookManager interface {
 	Create(context.Context, platformops.CreateOutboundWebhookRequest) (platformops.OutboundWebhookSubscription, error)
 	List(context.Context, string, int) ([]platformops.OutboundWebhookSubscription, error)
@@ -76,7 +76,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /ops/credentials/{id}/rotate", h.rotateCredential)
 	mux.HandleFunc("POST /ops/credentials/{id}/revoke", h.revokeCredential)
 	mux.HandleFunc("POST /ops/retention", h.setRetention)
-	mux.HandleFunc("POST /ops/exports", h.exportTenant)
+	mux.HandleFunc("POST /ops/exports", h.exportOrganization)
 	mux.HandleFunc("GET /ops/webhook-subscriptions", h.listWebhookSubscriptions)
 	mux.HandleFunc("POST /ops/webhook-subscriptions", h.createWebhookSubscription)
 	mux.HandleFunc("POST /ops/webhook-subscriptions/{id}/enable", h.enableWebhookSubscription)
@@ -119,9 +119,9 @@ func (h *Handler) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err, http.StatusAccepted)
 		return
 	}
-	platformops.AttributeTelemetryTenant(r.Context(), trigger.TenantID)
+	platformops.AttributeTelemetryOrganization(r.Context(), trigger.OrganizationID)
 	firing, created, err := h.services.Triggers.ReceiveWebhook(r.Context(), platformops.WebhookRequest{
-		TenantID: trigger.TenantID, TriggerID: trigger.ID, RequestID: strings.TrimSpace(r.Header.Get("X-Supaflow-Request-ID")),
+		OrganizationID: trigger.OrganizationID, TriggerID: trigger.ID, RequestID: strings.TrimSpace(r.Header.Get("X-Supaflow-Request-ID")),
 		Timestamp: time.Unix(timestampSeconds, 0).UTC(), Signature: r.Header.Get("X-Supaflow-Signature"),
 		Body: body, Now: time.Now().UTC(),
 	})
@@ -142,21 +142,21 @@ func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleViewer, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	snapshot, err := h.services.Capacity.Snapshot(r.Context(), p.TenantID, time.Now().UTC())
+	snapshot, err := h.services.Capacity.Snapshot(r.Context(), p.OrganizationID, time.Now().UTC())
 	respond(w, snapshot, err, http.StatusOK)
 }
 
 func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	limit := queryLimit(r, 100)
 	records, err := h.services.Audit.Query(r.Context(), platformops.AuditQuery{
-		TenantID: p.TenantID, CanViewAudit: true, ResourceType: r.URL.Query().Get("resourceType"),
+		OrganizationID: p.OrganizationID, CanViewAudit: true, ResourceType: r.URL.Query().Get("resourceType"),
 		ResourceID: r.URL.Query().Get("resourceId"), Limit: limit,
 	})
 	respond(w, records, err, http.StatusOK)
@@ -164,34 +164,34 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	letters, err := h.services.Delivery.ListDeadLetters(r.Context(), p.TenantID, queryLimit(r, 100))
+	letters, err := h.services.Delivery.ListDeadLetters(r.Context(), p.OrganizationID, queryLimit(r, 100))
 	respond(w, letters, err, http.StatusOK)
 }
 
 func (h *Handler) requeueDeadLetter(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	err := h.services.Delivery.RequeueDeadLetter(r.Context(), p.TenantID, r.PathValue("id"), time.Now().UTC())
+	err := h.services.Delivery.RequeueDeadLetter(r.Context(), p.OrganizationID, r.PathValue("id"), time.Now().UTC())
 	respond(w, map[string]bool{"requeued": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) drainWorker(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	err := h.services.Workers.BeginDrain(r.Context(), p.TenantID, r.PathValue("id"))
+	err := h.services.Workers.BeginDrain(r.Context(), p.OrganizationID, r.PathValue("id"))
 	respond(w, map[string]bool{"draining": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -206,7 +206,7 @@ func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.services.Admission.ConfigureQuota(r.Context(), platformops.Quota{
-		TenantID: p.TenantID, MaxActiveRuns: body.MaxActiveRuns,
+		OrganizationID: p.OrganizationID, MaxActiveRuns: body.MaxActiveRuns,
 		MaxActiveWorkers: body.MaxActiveWorkers, MaxQueueDepth: body.MaxQueueDepth,
 		MaxTriggers: body.MaxTriggers, MaxPendingTriggerFirings: body.MaxPendingTriggerFirings,
 		MaxPendingOutboxMessages: body.MaxPendingOutboxMessages,
@@ -216,7 +216,7 @@ func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createCredential(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct{ Name, Purpose, Secret string }
@@ -226,14 +226,14 @@ func (h *Handler) createCredential(w http.ResponseWriter, r *http.Request) {
 	secret := []byte(body.Secret)
 	body.Secret = ""
 	credential, err := h.services.Credentials.Create(r.Context(), platformops.CreateCredentialRequest{
-		TenantID: p.TenantID, ActorID: p.ActorID, Name: body.Name, Purpose: body.Purpose, Secret: secret,
+		OrganizationID: p.OrganizationID, ActorID: p.ActorID, Name: body.Name, Purpose: body.Purpose, Secret: secret,
 	})
 	respond(w, credential, err, http.StatusCreated)
 }
 
 func (h *Handler) rotateCredential(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -245,22 +245,22 @@ func (h *Handler) rotateCredential(w http.ResponseWriter, r *http.Request) {
 	}
 	secret := []byte(body.Secret)
 	body.Secret = ""
-	credential, err := h.services.Credentials.Rotate(r.Context(), p.TenantID, r.PathValue("id"), p.ActorID, body.Version, secret)
+	credential, err := h.services.Credentials.Rotate(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, body.Version, secret)
 	respond(w, credential, err, http.StatusOK)
 }
 
 func (h *Handler) revokeCredential(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	credential, err := h.services.Credentials.Revoke(r.Context(), p.TenantID, r.PathValue("id"), p.ActorID, time.Now().UTC())
+	credential, err := h.services.Credentials.Revoke(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, time.Now().UTC())
 	respond(w, credential, err, http.StatusOK)
 }
 
 func (h *Handler) setRetention(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -271,38 +271,28 @@ func (h *Handler) setRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.services.Retention.SetPolicy(r.Context(), platformops.RetentionPolicy{
-		TenantID: p.TenantID, EventDays: body.EventDays, OutputDays: body.OutputDays,
+		OrganizationID: p.OrganizationID, EventDays: body.EventDays, OutputDays: body.OutputDays,
 		ArchiveBeforeDelete: body.ArchiveBeforeDelete,
 	})
 	respond(w, map[string]bool{"configured": err == nil}, err, http.StatusOK)
 }
 
-func (h *Handler) exportTenant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) exportOrganization(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	result, err := h.services.Retention.ExportTenant(r.Context(), p.TenantID, p.ActorID, time.Now().UTC().Add(24*time.Hour))
+	result, err := h.services.Retention.ExportOrganization(r.Context(), p.OrganizationID, p.ActorID, time.Now().UTC().Add(24*time.Hour))
 	respond(w, result, err, http.StatusAccepted)
 }
 
 func principal(w http.ResponseWriter, r *http.Request) (api.Principal, bool) {
 	p, ok := api.PrincipalFromContext(r.Context())
-	if !ok || p.TenantID == "" || p.ActorID == "" {
+	if !ok || p.OrganizationID == "" || p.ActorID == "" {
 		writeProblem(w, http.StatusUnauthorized, "unauthorized")
 		return api.Principal{}, false
 	}
 	return p, true
-}
-
-func requireRole(w http.ResponseWriter, principal api.Principal, roles ...api.Role) bool {
-	for _, role := range roles {
-		if principal.Role == role {
-			return true
-		}
-	}
-	writeProblem(w, http.StatusForbidden, "forbidden")
-	return false
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {

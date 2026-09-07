@@ -27,19 +27,19 @@ func (CryptoIDGenerator) NewID(prefix string) (string, error) {
 
 // ExecutionRequest is the executor-facing attempt contract.
 type ExecutionRequest struct {
-	TenantID     TenantID
-	RunID        string
-	Plan         PlanRef
-	NodeID       string
-	AttemptID    string
-	ExecutionID  string
-	Attempt      int
-	Executor     string
-	Input        json.RawMessage
-	ResumeData   json.RawMessage
-	Snapshot     json.RawMessage
-	FencingToken uint64
-	Takeover     bool
+	OrganizationID OrganizationID
+	RunID          string
+	Plan           PlanRef
+	NodeID         string
+	AttemptID      string
+	ExecutionID    string
+	Attempt        int
+	Executor       string
+	Input          json.RawMessage
+	ResumeData     json.RawMessage
+	Snapshot       json.RawMessage
+	FencingToken   uint64
+	Takeover       bool
 }
 
 // Suspension asks the orchestrator to persist an approval interrupt.
@@ -204,39 +204,39 @@ type AdvanceResult struct {
 	Interrupt *Interrupt
 }
 
-// Advance claims and processes at most one attempt for tenantID.
-func (o *Orchestrator) Advance(ctx context.Context, tenantID TenantID) (AdvanceResult, error) {
+// Advance claims and processes at most one attempt for organizationID.
+func (o *Orchestrator) Advance(ctx context.Context, organizationID OrganizationID) (AdvanceResult, error) {
 	if o.telemetry != nil {
-		traced, complete := o.telemetry.Start(ctx, "runtime.attempt", string(tenantID))
-		result, err := o.advance(traced, tenantID)
+		traced, complete := o.telemetry.Start(ctx, "runtime.attempt", string(organizationID))
+		result, err := o.advance(traced, organizationID)
 		complete(err)
 		return result, err
 	}
-	return o.advance(ctx, tenantID)
+	return o.advance(ctx, organizationID)
 }
 
-func (o *Orchestrator) advance(ctx context.Context, tenantID TenantID) (AdvanceResult, error) {
-	if err := validateTenant(tenantID); err != nil {
+func (o *Orchestrator) advance(ctx context.Context, organizationID OrganizationID) (AdvanceResult, error) {
+	if err := validateOrganization(organizationID); err != nil {
 		return AdvanceResult{}, err
 	}
 	now := o.clock.Now()
-	if _, err := o.store.ExpireRuns(ctx, tenantID, now, 100); err != nil {
+	if _, err := o.store.ExpireRuns(ctx, organizationID, now, 100); err != nil {
 		return AdvanceResult{}, err
 	}
 	claimCtx := ctx
 	completeClaim := func(error) {}
 	if o.telemetry != nil {
-		claimCtx, completeClaim = o.telemetry.Start(ctx, "runtime.claim", string(tenantID))
+		claimCtx, completeClaim = o.telemetry.Start(ctx, "runtime.claim", string(organizationID))
 	}
 	work, err := o.store.ClaimAttempt(claimCtx, ClaimAttemptRequest{
-		TenantID: tenantID, WorkerID: o.workerID, Now: now, LeaseDuration: o.leaseDuration,
+		OrganizationID: organizationID, WorkerID: o.workerID, Now: now, LeaseDuration: o.leaseDuration,
 	})
 	completeClaim(err)
 	if err != nil || work == nil {
 		return AdvanceResult{}, err
 	}
 	req := ExecutionRequest{
-		TenantID: tenantID, RunID: work.Run.ID, Plan: work.Run.Plan, NodeID: work.Attempt.NodeID,
+		OrganizationID: organizationID, RunID: work.Run.ID, Plan: work.Run.Plan, NodeID: work.Attempt.NodeID,
 		AttemptID: work.Attempt.ID, ExecutionID: work.Attempt.ExecutionID, Attempt: work.Attempt.Number,
 		Executor: work.Attempt.Executor, Input: cloneJSON(work.Attempt.Input),
 		ResumeData:   cloneJSON(work.Attempt.ResumeData),
@@ -251,7 +251,7 @@ func (o *Orchestrator) advance(ctx context.Context, tenantID TenantID) (AdvanceR
 		// transition must not be held hostage by an adapter that already lost the
 		// process or returns an error while cleaning it up.
 		run, completeErr := o.store.CompleteAttempt(ctx, CompleteAttemptRequest{
-			TenantID: tenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+			OrganizationID: organizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 			WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 			Now: o.clock.Now(), RunStatus: RunCancelled,
 		})
@@ -261,14 +261,14 @@ func (o *Orchestrator) advance(ctx context.Context, tenantID TenantID) (AdvanceR
 	result, executeErr, leaseErr := o.executeWithLease(ctx, work, req)
 	if errors.Is(leaseErr, errRunCancellationRequested) {
 		run, completeErr := o.store.CompleteAttempt(ctx, CompleteAttemptRequest{
-			TenantID: tenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+			OrganizationID: organizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 			WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 			Now: o.clock.Now(), RunStatus: RunCancelled,
 		})
 		return AdvanceResult{Worked: true, Run: &run}, completeErr
 	}
 	if errors.Is(leaseErr, errRunDeadlineElapsed) {
-		run, readErr := o.store.GetRun(ctx, tenantID, work.Run.ID)
+		run, readErr := o.store.GetRun(ctx, organizationID, work.Run.ID)
 		return AdvanceResult{Worked: true, Run: &run}, readErr
 	}
 	if leaseErr != nil {
@@ -286,7 +286,7 @@ func (o *Orchestrator) advance(ctx context.Context, tenantID TenantID) (AdvanceR
 	// single End must never finish a run while another fan-out path is active.
 	status := RunRunning
 	run, err := o.store.CompleteAttempt(ctx, CompleteAttemptRequest{
-		TenantID: tenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: organizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 		Now: o.clock.Now(), RunStatus: status, Output: result.Output,
 		Snapshot: result.Snapshot, Next: result.Next,
@@ -314,7 +314,7 @@ func (o *Orchestrator) executeWithLease(ctx context.Context, work *WorkItem, req
 		result, executeErr = streaming.ExecuteStream(executionCtx, req, func(chunk json.RawMessage) error {
 			streamSequence++
 			_, appendErr := o.store.AppendStreamChunk(executionCtx, AppendStreamChunkRequest{
-				TenantID: req.TenantID, RunID: req.RunID, AttemptID: req.AttemptID,
+				OrganizationID: req.OrganizationID, RunID: req.RunID, AttemptID: req.AttemptID,
 				WorkerID: o.workerID, FencingToken: req.FencingToken, Sequence: streamSequence,
 				Now: o.clock.Now(), Chunk: chunk,
 			})
@@ -327,7 +327,7 @@ func (o *Orchestrator) executeWithLease(ctx context.Context, work *WorkItem, req
 	renewalErr := <-renewalResult
 	if work.Run.DeadlineAt != nil && !time.Now().UTC().Before(*work.Run.DeadlineAt) {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), detachedWorkerCleanupTimeout)
-		_, _ = o.store.ExpireRun(cleanupCtx, work.Run.TenantID, work.Run.ID, time.Now().UTC())
+		_, _ = o.store.ExpireRun(cleanupCtx, work.Run.OrganizationID, work.Run.ID, time.Now().UTC())
 		o.cancelExecutorBounded(cleanupCtx, req)
 		cancelCleanup()
 		renewalErr = errRunDeadlineElapsed
@@ -351,13 +351,13 @@ func (o *Orchestrator) renewLeaseUntilDone(ctx context.Context, cancelExecution 
 			if work.Run.DeadlineAt != nil && !o.clock.Now().Before(*work.Run.DeadlineAt) {
 				cancelExecution()
 				cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), detachedWorkerCleanupTimeout)
-				_, _ = o.store.ExpireRun(cleanupCtx, work.Run.TenantID, work.Run.ID, o.clock.Now())
+				_, _ = o.store.ExpireRun(cleanupCtx, work.Run.OrganizationID, work.Run.ID, o.clock.Now())
 				o.cancelExecutorBounded(cleanupCtx, req)
 				cancelCleanup()
 				return errRunDeadlineElapsed
 			}
 			_, err := o.store.RenewLease(ctx, RenewLeaseRequest{
-				TenantID: work.Run.TenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+				OrganizationID: work.Run.OrganizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 				WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 				Now: o.clock.Now(), LeaseDuration: o.leaseDuration,
 			})
@@ -365,7 +365,7 @@ func (o *Orchestrator) renewLeaseUntilDone(ctx context.Context, cancelExecution 
 				cancelExecution()
 				return err
 			}
-			run, err := o.store.GetRun(ctx, work.Run.TenantID, work.Run.ID)
+			run, err := o.store.GetRun(ctx, work.Run.OrganizationID, work.Run.ID)
 			if err != nil {
 				cancelExecution()
 				return err
@@ -420,7 +420,7 @@ func (o *Orchestrator) fail(ctx context.Context, work *WorkItem, executeErr erro
 		terminal = ""
 	}
 	run, err := o.store.FailAttempt(ctx, FailAttemptRequest{
-		TenantID: work.Run.TenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: work.Run.OrganizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 		Now: now, ErrorCode: executionCode, RetryAt: retryAt, TerminalStatus: terminal,
 	})
@@ -440,7 +440,7 @@ func (o *Orchestrator) suspend(ctx context.Context, work *WorkItem, result Execu
 		return AdvanceResult{Worked: true}, &Error{Code: CodeConflict, Message: "could not allocate interrupt id", Cause: err}
 	}
 	interrupt := Interrupt{
-		TenantID: work.Run.TenantID, ID: interruptID, RunID: work.Run.ID,
+		OrganizationID: work.Run.OrganizationID, ID: interruptID, RunID: work.Run.ID,
 		NodeID: work.Attempt.NodeID, AttemptID: work.Attempt.ID,
 		Kind: result.Suspend.Kind, Status: InterruptPending,
 		ExpiresAt: now.Add(result.Suspend.ExpiresIn), AutoResume: result.Suspend.AutoResume, CreatedAt: now,
@@ -455,7 +455,7 @@ func (o *Orchestrator) suspend(ctx context.Context, work *WorkItem, result Execu
 		snapshot = &Snapshot{Data: cloneJSON(result.Suspend.Snapshot)}
 	}
 	stored, err := o.store.SuspendAttempt(ctx, SuspendAttemptRequest{
-		TenantID: work.Run.TenantID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: work.Run.OrganizationID, RunID: work.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: o.workerID, FencingToken: work.Lease.FencingToken,
 		Now: now, Interrupt: interrupt, Snapshot: snapshot,
 	})

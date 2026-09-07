@@ -16,13 +16,13 @@ import (
 )
 
 const (
-	tenantAKey = "tenant-a-test-api-key-at-least-24-bytes"
-	tenantBKey = "tenant-b-test-api-key-at-least-24-bytes"
+	organizationAKey = "organization-a-test-api-key-at-least-24-bytes"
+	organizationBKey = "organization-b-test-api-key-at-least-24-bytes"
 )
 
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
-	auth, err := NewMasterKeyAuthenticator(tenantAKey)
+	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +55,14 @@ func minimalDefinition(id string) workflow.WorkflowDefinition {
 }
 
 func testOrganization(key string) string {
-	if key == tenantBKey {
-		return "tenant-b"
+	if key == organizationBKey {
+		return "organization-b"
 	}
-	return "tenant-a"
+	return "organization-a"
 }
 
 func authenticatedTestRequest(request *http.Request, key string) {
-	request.Header.Set("Authorization", "Bearer "+tenantAKey)
+	request.Header.Set("Authorization", "Bearer "+organizationAKey)
 	request.Header.Set(organizationHeader, testOrganization(key))
 }
 
@@ -94,7 +94,7 @@ func TestHealthEndpointIsPublic(t *testing.T) {
 
 // 验证所有租户 API 响应禁止共享缓存，避免 X-API-Key 场景下跨租户复用内容。
 func TestAuthenticatedResponsesArePrivateAndNotStored(t *testing.T) {
-	response := requestJSON(t, testHandler(t), http.MethodGet, "/v1/runs/missing", tenantAKey, "", nil)
+	response := requestJSON(t, testHandler(t), http.MethodGet, "/v1/runs/missing", organizationAKey, "", nil)
 	if response.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("Cache-Control = %q", response.Header().Get("Cache-Control"))
 	}
@@ -102,7 +102,7 @@ func TestAuthenticatedResponsesArePrivateAndNotStored(t *testing.T) {
 
 // 验证依赖不可用时 readiness 失败且不泄露底层错误。
 func TestReadinessReportsDependencyFailure(t *testing.T) {
-	auth, err := NewMasterKeyAuthenticator(tenantAKey)
+	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestReadinessReportsDependencyFailure(t *testing.T) {
 func TestPublishAndStartRunIdempotently(t *testing.T) {
 	handler := testHandler(t)
 	definition := minimalDefinition("flow")
-	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", tenantAKey, "publish-key-0001", definition)
+	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", organizationAKey, "publish-key-0001", definition)
 	if publish.Code != http.StatusCreated {
 		t.Fatalf("publish status=%d body=%s", publish.Code, publish.Body.String())
 	}
@@ -137,7 +137,7 @@ func TestPublishAndStartRunIdempotently(t *testing.T) {
 	if err := json.Unmarshal(publish.Body.Bytes(), &published); err != nil {
 		t.Fatal(err)
 	}
-	replayedPublish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", tenantAKey, "publish-key-0001", definition)
+	replayedPublish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", organizationAKey, "publish-key-0001", definition)
 	if replayedPublish.Code != http.StatusOK {
 		t.Fatalf("publish replay status=%d body=%s", replayedPublish.Code, replayedPublish.Body.String())
 	}
@@ -149,8 +149,8 @@ func TestPublishAndStartRunIdempotently(t *testing.T) {
 		t.Fatalf("publish replay differs: first=%+v replay=%+v", published, replayedPlan)
 	}
 	body := map[string]any{"planId": published.ID, "planHash": published.Hash, "input": map[string]any{"message": "hello"}}
-	first := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "run-key-00000001", body)
-	second := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "run-key-00000001", body)
+	first := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "run-key-00000001", body)
+	second := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "run-key-00000001", body)
 	if first.Code != http.StatusAccepted || second.Code != http.StatusOK {
 		t.Fatalf("first=%d %s second=%d %s", first.Code, first.Body.String(), second.Code, second.Body.String())
 	}
@@ -188,15 +188,15 @@ func TestRunDTOProjectsOutputWithoutObjectReference(t *testing.T) {
 }
 
 // 验证另一租户即使猜中 plan ID 与 hash 也不能启动该计划。
-func TestStartRunRejectsCrossTenantPlan(t *testing.T) {
+func TestStartRunRejectsCrossOrganizationPlan(t *testing.T) {
 	handler := testHandler(t)
-	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", tenantAKey, "publish-key-0002", minimalDefinition("flow"))
+	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", organizationAKey, "publish-key-0002", minimalDefinition("flow"))
 	var published platform.PublishedPlan
 	if err := json.Unmarshal(publish.Body.Bytes(), &published); err != nil {
 		t.Fatal(err)
 	}
 	body := map[string]any{"planId": published.ID, "planHash": published.Hash, "input": map[string]any{}}
-	started := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantBKey, "run-key-00000002", body)
+	started := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationBKey, "run-key-00000002", body)
 	if started.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", started.Code, started.Body.String())
 	}

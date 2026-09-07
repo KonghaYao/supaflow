@@ -73,10 +73,7 @@ func TestPostgresDefinitionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenant, workflowID := "definition_tenant_"+suffix, "flow_"+suffix
-	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1, $1)`, tenant); err != nil {
-		t.Fatal(err)
-	}
+	organization, workflowID := "definition_organization_"+suffix, "flow_"+suffix
 	registry := workflow.BuiltinRegistry()
 	policy := workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}}
 	catalog := basepostgres.NewPlanCatalog(pool, registry, policy)
@@ -86,29 +83,29 @@ func TestPostgresDefinitionLifecycle(t *testing.T) {
 	}
 	canonical := minimalDefinition(workflowID)
 	document, _ := json.Marshal(canonical)
-	created, err := service.CreateDraftWithResult(ctx, tenant, definition.CreateDraftCommand{
+	created, err := service.CreateDraftWithResult(ctx, organization, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: "editor", IdempotencyKey: "definition-create-0001",
 	})
 	if err != nil || !created.Created || created.Draft.Revision != 1 {
 		t.Fatalf("created=%+v err=%v", created, err)
 	}
-	replayed, err := service.CreateDraftWithResult(ctx, tenant, definition.CreateDraftCommand{
+	replayed, err := service.CreateDraftWithResult(ctx, organization, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: "editor", IdempotencyKey: "definition-create-0001",
 	})
 	if err != nil || replayed.Created || replayed.Draft.ID != created.Draft.ID {
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
-	_, err = service.UpdateDraft(ctx, tenant, definition.UpdateDraftCommand{
+	_, err = service.UpdateDraft(ctx, organization, definition.UpdateDraftCommand{
 		WorkflowID: workflowID, Document: document, ExpectedRevision: 2, ActorID: "editor", IdempotencyKey: "definition-update-0001",
 	})
 	if !errors.Is(err, definition.ErrRevisionConflict) {
 		t.Fatalf("stale update err=%v", err)
 	}
-	published, _, err := service.PublishDraft(ctx, tenant, workflowID, "definition-publish-0001")
+	published, _, err := service.PublishDraft(ctx, organization, workflowID, "definition-publish-0001")
 	if err != nil {
 		t.Fatal(err)
 	}
-	latest, err := service.LatestVersion(ctx, tenant, workflowID)
+	latest, err := service.LatestVersion(ctx, organization, workflowID)
 	if err != nil || latest.VersionID == "" || latest.PlanID != published.ID || latest.PlanHash != published.Hash {
 		t.Fatalf("latest=%+v published=%+v err=%v", latest, published, err)
 	}
@@ -134,11 +131,7 @@ func TestPublishDraftReplaysFirstPublicationAfterDraftChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("publish_replay_%d", time.Now().UnixNano())
-	tenantID, workflowID := "tenant_"+suffix, "flow_"+suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM tenants WHERE id=$1`, tenantID) })
+	organizationID, workflowID := "organization_"+suffix, "flow_"+suffix
 	registry := workflow.BuiltinRegistry()
 	policy := workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}}
 	catalog := basepostgres.NewPlanCatalog(pool, registry, policy)
@@ -148,33 +141,33 @@ func TestPublishDraftReplaysFirstPublicationAfterDraftChanges(t *testing.T) {
 	}
 	firstDefinition := minimalDefinition(workflowID)
 	firstDocument, _ := json.Marshal(firstDefinition)
-	if _, err = service.CreateDraft(ctx, tenantID, definition.CreateDraftCommand{WorkflowID: workflowID,
+	if _, err = service.CreateDraft(ctx, organizationID, definition.CreateDraftCommand{WorkflowID: workflowID,
 		Document: firstDocument, ActorID: "editor", IdempotencyKey: "publish-replay-create"}); err != nil {
 		t.Fatal(err)
 	}
 	key := "publish-replay-stable-key"
-	firstOperation := apimutation.New(tenantID, "publisher", "workflow.publish", "workflow", workflowID,
+	firstOperation := apimutation.New(organizationID, "publisher", "workflow.publish", "workflow", workflowID,
 		key, "POST", "/v1/workflows/"+workflowID+"/publish-draft", nil, "")
-	first, created, err := service.PublishDraft(apimutation.WithContext(ctx, firstOperation), tenantID, workflowID, key)
+	first, created, err := service.PublishDraft(apimutation.WithContext(ctx, firstOperation), organizationID, workflowID, key)
 	if err != nil || !created || !firstOperation.Committed() {
 		t.Fatalf("first=%+v created=%t committed=%t err=%v", first, created, firstOperation.Committed(), err)
 	}
 	secondDefinition := minimalDefinition(workflowID)
 	secondDefinition.Metadata = map[string]json.RawMessage{"revision": json.RawMessage(`2`)}
 	secondDocument, _ := json.Marshal(secondDefinition)
-	if _, err = service.UpdateDraft(ctx, tenantID, definition.UpdateDraftCommand{WorkflowID: workflowID,
+	if _, err = service.UpdateDraft(ctx, organizationID, definition.UpdateDraftCommand{WorkflowID: workflowID,
 		Document: secondDocument, ExpectedRevision: 1, ActorID: "editor", IdempotencyKey: "publish-replay-update"}); err != nil {
 		t.Fatal(err)
 	}
-	retryOperation := apimutation.New(tenantID, "publisher", "workflow.publish", "workflow", workflowID,
+	retryOperation := apimutation.New(organizationID, "publisher", "workflow.publish", "workflow", workflowID,
 		key, "POST", "/v1/workflows/"+workflowID+"/publish-draft", nil, "")
-	replay, replayCreated, err := service.PublishDraft(apimutation.WithContext(ctx, retryOperation), tenantID, workflowID, key)
+	replay, replayCreated, err := service.PublishDraft(apimutation.WithContext(ctx, retryOperation), organizationID, workflowID, key)
 	if err != nil || replayCreated || replay.ID != first.ID || replay.Hash != first.Hash || replay.Version != first.Version || !retryOperation.Committed() {
 		t.Fatalf("first=%+v replay=%+v created=%t committed=%t err=%v", first, replay, replayCreated, retryOperation.Committed(), err)
 	}
 	var snapshot []byte
 	if err = pool.QueryRow(ctx, `SELECT response_snapshot FROM api_mutation_ledger
-		WHERE tenant_id=$1 AND action='workflow.publish' AND idempotency_key=$2`, tenantID, key).Scan(&snapshot); err != nil {
+		WHERE organization_id=$1 AND action='workflow.publish' AND idempotency_key=$2`, organizationID, key).Scan(&snapshot); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(snapshot, []byte(first.ID)) {

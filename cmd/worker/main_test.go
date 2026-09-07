@@ -20,8 +20,8 @@ import (
 
 // 验证 worker 的租户与 egress allowlist 配置去空、去重且保持顺序。
 func TestParseList(t *testing.T) {
-	items := parseList(" tenant-a,tenant-b,tenant-a, ,tenant-c ")
-	if len(items) != 3 || items[0] != "tenant-a" || items[2] != "tenant-c" {
+	items := parseList(" organization-a,organization-b,organization-a, ,organization-c ")
+	if len(items) != 3 || items[0] != "organization-a" || items[2] != "organization-c" {
 		t.Fatalf("items=%v", items)
 	}
 }
@@ -115,19 +115,19 @@ func TestConfigureWorkerOutputsRejectsUnsafeMaximum(t *testing.T) {
 }
 
 type managedOutputBackendStub struct {
-	value    []byte
-	metadata platformops.ManagedObject
-	tenantID string
-	runID    string
-	calls    int
+	value          []byte
+	metadata       platformops.ManagedObject
+	organizationID string
+	runID          string
+	calls          int
 }
 
 func (*managedOutputBackendStub) Store(context.Context, string, string, string, *time.Time, io.Reader) (platformops.ManagedObject, error) {
 	return platformops.ManagedObject{}, errors.New("not implemented")
 }
 
-func (s *managedOutputBackendStub) OpenRunOutput(_ context.Context, tenantID, runID string) (io.ReadCloser, platformops.ManagedObject, error) {
-	s.tenantID, s.runID, s.calls = tenantID, runID, s.calls+1
+func (s *managedOutputBackendStub) OpenRunOutput(_ context.Context, organizationID, runID string) (io.ReadCloser, platformops.ManagedObject, error) {
+	s.organizationID, s.runID, s.calls = organizationID, runID, s.calls+1
 	return io.NopCloser(bytes.NewReader(s.value)), s.metadata, nil
 }
 
@@ -139,23 +139,23 @@ func TestManagedOutputsReadRunOutputEnforcesProjectionBoundary(t *testing.T) {
 	digest := sha256.Sum256(value)
 	expected := workflowruntime.RunOutput{External: true, Sensitive: true, ContentType: "application/json", Size: int64(len(value)), SHA256: hex.EncodeToString(digest[:])}
 	backend := &managedOutputBackendStub{value: value, metadata: platformops.ManagedObject{
-		TenantID: "tenant_a", RunID: "run_child", Kind: "output", Status: "active",
+		OrganizationID: "organization_a", RunID: "run_child", Kind: "output", Status: "active",
 		ContentType: expected.ContentType, Size: expected.Size, SHA256: expected.SHA256,
 	}}
 	manager := &managedOutputs{manager: backend, maximum: 1024}
-	output, err := manager.ReadRunOutput(context.Background(), "tenant_a", "run_child", expected)
-	if err != nil || string(output) != string(value) || backend.tenantID != "tenant_a" || backend.runID != "run_child" {
-		t.Fatalf("output=%s scope=%s/%s error=%v", output, backend.tenantID, backend.runID, err)
+	output, err := manager.ReadRunOutput(context.Background(), "organization_a", "run_child", expected)
+	if err != nil || string(output) != string(value) || backend.organizationID != "organization_a" || backend.runID != "run_child" {
+		t.Fatalf("output=%s scope=%s/%s error=%v", output, backend.organizationID, backend.runID, err)
 	}
 
 	backend.metadata.Size++
-	if _, err = manager.ReadRunOutput(context.Background(), "tenant_a", "run_child", expected); err == nil {
+	if _, err = manager.ReadRunOutput(context.Background(), "organization_a", "run_child", expected); err == nil {
 		t.Fatal("mismatched immutable output metadata was accepted")
 	}
 	oversized := expected
 	oversized.Size = 2048
 	before := backend.calls
-	if _, err = manager.ReadRunOutput(context.Background(), "tenant_a", "run_child", oversized); err == nil || backend.calls != before {
+	if _, err = manager.ReadRunOutput(context.Background(), "organization_a", "run_child", oversized); err == nil || backend.calls != before {
 		t.Fatal("oversized output reached object storage")
 	}
 }
@@ -188,14 +188,14 @@ func TestValidateWorkerNodeRegistryReadsDurableProjection(t *testing.T) {
 	}
 }
 
-func (*recordingOutputs) StoreOutput(context.Context, workflowruntime.TenantID, string, string, []byte) (executor.ExternalOutput, error) {
+func (*recordingOutputs) StoreOutput(context.Context, workflowruntime.OrganizationID, string, string, []byte) (executor.ExternalOutput, error) {
 	return executor.ExternalOutput{}, nil
 }
 
-func (*recordingOutputs) DiscardOutput(context.Context, workflowruntime.TenantID, string) error {
+func (*recordingOutputs) DiscardOutput(context.Context, workflowruntime.OrganizationID, string) error {
 	return nil
 }
 
-func (*recordingOutputs) ReadRunOutput(context.Context, workflowruntime.TenantID, string, workflowruntime.RunOutput) (json.RawMessage, error) {
+func (*recordingOutputs) ReadRunOutput(context.Context, workflowruntime.OrganizationID, string, workflowruntime.RunOutput) (json.RawMessage, error) {
 	return json.RawMessage(`null`), nil
 }

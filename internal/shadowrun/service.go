@@ -69,8 +69,8 @@ func NewService(catalog platform.PlanCatalog, runtimeService *runtime.Service) (
 }
 
 // Start verifies the complete stub binding set before creating any run state.
-func (s *Service) Start(ctx context.Context, tenantID string, request StartRequest) (runtime.CreateRunResult, error) {
-	published, err := s.catalog.Resolve(ctx, tenantID, request.PlanID, request.PlanHash)
+func (s *Service) Start(ctx context.Context, organizationID string, request StartRequest) (runtime.CreateRunResult, error) {
+	published, err := s.catalog.Resolve(ctx, organizationID, request.PlanID, request.PlanHash)
 	if err != nil {
 		return runtime.CreateRunResult{}, err
 	}
@@ -92,7 +92,7 @@ func (s *Service) Start(ctx context.Context, tenantID string, request StartReque
 	if !found {
 		return runtime.CreateRunResult{}, &Error{Code: CodeInvalidShadowPlan}
 	}
-	return s.runtime.StartRun(ctx, runtime.TenantID(tenantID), runtime.StartRunRequest{
+	return s.runtime.StartRun(ctx, runtime.OrganizationID(organizationID), runtime.StartRunRequest{
 		Plan: runtime.PlanRef{
 			ID: published.ID, Hash: published.Hash, WorkflowID: published.WorkflowID,
 			EntryNodeID: entry.ID, Executor: workflow.ShadowAttemptExecutor(entry),

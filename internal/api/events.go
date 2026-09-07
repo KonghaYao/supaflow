@@ -14,48 +14,48 @@ import (
 
 // EventStreamConfig bounds concurrent streams, database polling, and socket writes.
 type EventStreamConfig struct {
-	GlobalLimit  int
-	TenantLimit  int
-	PollMin      time.Duration
-	PollMax      time.Duration
-	WriteTimeout time.Duration
+	GlobalLimit       int
+	OrganizationLimit int
+	PollMin           time.Duration
+	PollMax           time.Duration
+	WriteTimeout      time.Duration
 }
 
 func defaultEventStreamConfig() EventStreamConfig {
-	return EventStreamConfig{GlobalLimit: 512, TenantLimit: 64, PollMin: 250 * time.Millisecond, PollMax: 2 * time.Second, WriteTimeout: 5 * time.Second}
+	return EventStreamConfig{GlobalLimit: 512, OrganizationLimit: 64, PollMin: 250 * time.Millisecond, PollMax: 2 * time.Second, WriteTimeout: 5 * time.Second}
 }
 
 type eventStreamLimiter struct {
-	mu      sync.Mutex
-	config  EventStreamConfig
-	global  int
-	tenants map[string]int
+	mu            sync.Mutex
+	config        EventStreamConfig
+	global        int
+	organizations map[string]int
 }
 
 func newEventStreamLimiter(config EventStreamConfig) (*eventStreamLimiter, error) {
-	if config.GlobalLimit < 1 || config.GlobalLimit > 10000 || config.TenantLimit < 1 || config.TenantLimit > config.GlobalLimit ||
+	if config.GlobalLimit < 1 || config.GlobalLimit > 10000 || config.OrganizationLimit < 1 || config.OrganizationLimit > config.GlobalLimit ||
 		config.PollMin < 10*time.Millisecond || config.PollMax < config.PollMin || config.PollMax > 30*time.Second ||
 		config.WriteTimeout < 100*time.Millisecond || config.WriteTimeout > 30*time.Second {
 		return nil, errors.New("event stream limits are invalid")
 	}
-	return &eventStreamLimiter{config: config, tenants: make(map[string]int)}, nil
+	return &eventStreamLimiter{config: config, organizations: make(map[string]int)}, nil
 }
 
-func (l *eventStreamLimiter) acquire(tenantID string) (func(), bool) {
+func (l *eventStreamLimiter) acquire(organizationID string) (func(), bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.global >= l.config.GlobalLimit || l.tenants[tenantID] >= l.config.TenantLimit {
+	if l.global >= l.config.GlobalLimit || l.organizations[organizationID] >= l.config.OrganizationLimit {
 		return nil, false
 	}
 	l.global++
-	l.tenants[tenantID]++
+	l.organizations[organizationID]++
 	return func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		l.global--
-		l.tenants[tenantID]--
-		if l.tenants[tenantID] == 0 {
-			delete(l.tenants, tenantID)
+		l.organizations[organizationID]--
+		if l.organizations[organizationID] == 0 {
+			delete(l.organizations, organizationID)
 		}
 	}, true
 }
@@ -77,14 +77,14 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_cursor", "event cursor must be a non-negative integer")
 		return
 	}
-	release, allowed := h.eventStreams.acquire(principal.TenantID)
+	release, allowed := h.eventStreams.acquire(principal.OrganizationID)
 	if !allowed {
 		w.Header().Set("Retry-After", "1")
 		writeProblem(w, r, http.StatusTooManyRequests, "stream_capacity_exceeded", "event stream capacity is exhausted")
 		return
 	}
 	defer release()
-	if _, err = h.runtime.GetRun(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID")); err != nil {
+	if _, err = h.runtime.GetRun(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID")); err != nil {
 		h.writeError(w, r, err)
 		return
 	}
@@ -115,7 +115,7 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-poll.C:
-			events, listErr := h.runtime.ListEvents(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"), cursor, 256)
+			events, listErr := h.runtime.ListEvents(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"), cursor, 256)
 			if listErr != nil {
 				return
 			}

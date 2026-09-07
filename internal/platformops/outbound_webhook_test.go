@@ -20,10 +20,10 @@ func TestOutboundWebhookRejectsSpecialUseAddresses(t *testing.T) {
 }
 
 // 验证运行事件按租户和 topic 投递、签名且重试时跳过已完成订阅。
-func TestOutboundWebhookDeliveryIsTenantScopedSignedAndReplaySafe(t *testing.T) {
+func TestOutboundWebhookDeliveryIsOrganizationScopedSignedAndReplaySafe(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := &webhookDeliveryStore{subscriptions: []OutboundWebhookSubscription{
-		{TenantID: "tenant-a", ID: "sub-a", EndpointURL: "https://events.example.test/hook", EventTypes: []string{"run.succeeded"}, SigningCredentialID: "cred-a", Timeout: time.Second},
+		{OrganizationID: "organization-a", ID: "sub-a", EndpointURL: "https://events.example.test/hook", EventTypes: []string{"run.succeeded"}, SigningCredentialID: "cred-a", Timeout: time.Second},
 	}}
 	client := &recordingWebhookClient{}
 	delivery, err := NewOutboundWebhookDelivery(store, staticWebhookSecrets{value: []byte("signing-secret")}, client)
@@ -31,7 +31,7 @@ func TestOutboundWebhookDeliveryIsTenantScopedSignedAndReplaySafe(t *testing.T) 
 		t.Fatal(err)
 	}
 	delivery.now = func() time.Time { return now }
-	message := DeliveryMessage{ID: "out-1", TenantID: "tenant-a", AggregateType: "run", AggregateID: "run-1", Topic: "run.succeeded", Payload: json.RawMessage(`{"ok":true}`)}
+	message := DeliveryMessage{ID: "out-1", OrganizationID: "organization-a", AggregateType: "run", AggregateID: "run-1", Topic: "run.succeeded", Payload: json.RawMessage(`{"ok":true}`)}
 	if err = delivery.Deliver(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestOutboundWebhookDeliveryIsTenantScopedSignedAndReplaySafe(t *testing.T) 
 	if !VerifyOutboundWebhookSignature([]byte("signing-secret"), now, client.requests[0].RequestID, client.requests[0].Body, client.requests[0].Signature) {
 		t.Fatal("delivery signature did not verify")
 	}
-	if !bytes.Contains(client.requests[0].Body, []byte(`"type":"run.succeeded"`)) || bytes.Contains(client.requests[0].Body, []byte("tenant-a")) {
+	if !bytes.Contains(client.requests[0].Body, []byte(`"type":"run.succeeded"`)) || bytes.Contains(client.requests[0].Body, []byte("organization-a")) {
 		t.Fatalf("unsafe or incomplete envelope: %s", client.requests[0].Body)
 	}
 	if err = delivery.Deliver(context.Background(), message); err != nil {
@@ -54,13 +54,13 @@ func TestOutboundWebhookDeliveryIsTenantScopedSignedAndReplaySafe(t *testing.T) 
 
 // 验证任一订阅失败会保留稳定 request id 并交由 outbox 有界重试。
 func TestOutboundWebhookDeliveryPreservesStableRequestIDOnFailure(t *testing.T) {
-	store := &webhookDeliveryStore{subscriptions: []OutboundWebhookSubscription{{TenantID: "tenant-a", ID: "sub-a", EndpointURL: "https://events.example.test/hook", EventTypes: []string{"node.failed"}, SigningCredentialID: "cred-a", Timeout: time.Second}}}
+	store := &webhookDeliveryStore{subscriptions: []OutboundWebhookSubscription{{OrganizationID: "organization-a", ID: "sub-a", EndpointURL: "https://events.example.test/hook", EventTypes: []string{"node.failed"}, SigningCredentialID: "cred-a", Timeout: time.Second}}}
 	client := &recordingWebhookClient{err: errors.New("authorization=never-log-this connection refused")}
 	delivery, err := NewOutboundWebhookDelivery(store, staticWebhookSecrets{value: []byte("secret")}, client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := DeliveryMessage{ID: "out-2", TenantID: "tenant-a", AggregateType: "run", AggregateID: "run-2", Topic: "node.failed", Payload: json.RawMessage(`{}`)}
+	message := DeliveryMessage{ID: "out-2", OrganizationID: "organization-a", AggregateType: "run", AggregateID: "run-2", Topic: "node.failed", Payload: json.RawMessage(`{}`)}
 	if err = delivery.Deliver(context.Background(), message); err == nil {
 		t.Fatal("expected external delivery failure")
 	}
@@ -81,23 +81,23 @@ type webhookDeliveryStore struct {
 	lastError     string
 }
 
-func (s *webhookDeliveryStore) ListEnabled(_ context.Context, tenantID, topic string) ([]OutboundWebhookSubscription, error) {
+func (s *webhookDeliveryStore) ListEnabled(_ context.Context, organizationID, topic string) ([]OutboundWebhookSubscription, error) {
 	result := make([]OutboundWebhookSubscription, 0)
 	for _, subscription := range s.subscriptions {
-		if subscription.TenantID == tenantID && containsEventType(subscription.EventTypes, topic) {
+		if subscription.OrganizationID == organizationID && containsEventType(subscription.EventTypes, topic) {
 			result = append(result, subscription)
 		}
 	}
 	return result, nil
 }
-func (s *webhookDeliveryStore) BeginDelivery(_ context.Context, tenantID, subscriptionID, messageID, requestID string, _ time.Time) (bool, error) {
+func (s *webhookDeliveryStore) BeginDelivery(_ context.Context, organizationID, subscriptionID, messageID, requestID string, _ time.Time) (bool, error) {
 	if s.delivered == nil {
 		s.delivered = map[string]bool{}
 	}
-	return s.delivered[tenantID+"/"+subscriptionID+"/"+messageID], nil
+	return s.delivered[organizationID+"/"+subscriptionID+"/"+messageID], nil
 }
-func (s *webhookDeliveryStore) CompleteDelivery(_ context.Context, tenantID, subscriptionID, messageID string, _ int, _ time.Time) error {
-	s.delivered[tenantID+"/"+subscriptionID+"/"+messageID] = true
+func (s *webhookDeliveryStore) CompleteDelivery(_ context.Context, organizationID, subscriptionID, messageID string, _ int, _ time.Time) error {
+	s.delivered[organizationID+"/"+subscriptionID+"/"+messageID] = true
 	return nil
 }
 func (s *webhookDeliveryStore) FailWebhookDelivery(_ context.Context, _, _, _ string, diagnostic string, _ time.Time) error {

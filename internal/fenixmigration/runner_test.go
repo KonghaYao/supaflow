@@ -19,7 +19,7 @@ type fakeTarget struct {
 	triggers            map[string]bool
 	runs                map[string]bool
 	writes              int
-	tenantIDs           []string
+	organizationIDs     []string
 	attestationOverride *TargetAttestation
 }
 
@@ -27,18 +27,18 @@ func newFakeTarget() *fakeTarget {
 	return &fakeTarget{workflows: map[string]platformops.ImportWorkflowRequest{}, versions: map[string]ImportedVersion{}, drafts: map[string]bool{}, triggers: map[string]bool{}, runs: map[string]bool{}}
 }
 func (f *fakeTarget) ImportWorkflow(_ context.Context, request platformops.ImportWorkflowRequest) (bool, error) {
-	key := request.TenantID + "\x00" + request.WorkflowID
+	key := request.OrganizationID + "\x00" + request.WorkflowID
 	if _, ok := f.workflows[key]; ok {
 		return false, nil
 	}
 	f.workflows[key], f.writes = request, f.writes+1
 	return true, nil
 }
-func (f *fakeTarget) EnsureTenant(_ context.Context, tenantID, _ string) error {
-	f.tenantIDs = append(f.tenantIDs, tenantID)
+func (f *fakeTarget) EnsureOrganization(_ context.Context, organizationID, _ string) error {
+	f.organizationIDs = append(f.organizationIDs, organizationID)
 	return nil
 }
-func (f *fakeTarget) ImportVersion(_ context.Context, tenant, workflowID string, version uint64, _ workflow.WorkflowDefinition, key string) (ImportedVersion, bool, error) {
+func (f *fakeTarget) ImportVersion(_ context.Context, organization, workflowID string, version uint64, _ workflow.WorkflowDefinition, key string) (ImportedVersion, bool, error) {
 	if value, ok := f.versions[key]; ok {
 		return value, false, nil
 	}
@@ -93,7 +93,7 @@ func TestMigrateIsRestartable(t *testing.T) {
 		Triggers:  []SourceTrigger{{ID: "trigger", OrganizationID: "org", WorkflowID: "flow", Kind: "webhook", PublicHash: "abcdefghijklmnop", Config: json.RawMessage(`{}`), Enabled: true, CreatedAt: now}},
 		Runs:      []SourceRun{{ID: "run", OrganizationID: "org", WorkflowID: "flow", Version: &version, Status: "SUCCESS", Input: json.RawMessage(`{"secret":"redact downstream"}`), Output: json.RawMessage(`{"ok":true}`), StartedAt: now, FinishedAt: now, CreatedAt: now}},
 	}
-	mapping := Mapping{Tenants: map[string]string{"org": "tenant"}, TriggerCredentials: map[string]string{"trigger": "credential"}}
+	mapping := Mapping{Organizations: map[string]string{"org": "organization"}, TriggerCredentials: map[string]string{"trigger": "credential"}}
 	target := newFakeTarget()
 	first, err := Migrate(context.Background(), snapshot, mapping, target, RunOptions{ActorID: "admin"})
 	if err != nil {
@@ -102,7 +102,7 @@ func TestMigrateIsRestartable(t *testing.T) {
 	if first.CreatedWorkflows != 1 || first.CreatedDefinitions != 1 || first.CreatedDrafts != 1 || first.CreatedTriggers != 1 || first.CreatedRuns != 1 {
 		t.Fatalf("first report = %#v", first)
 	}
-	if imported := target.workflows["tenant\x00flow"]; imported.Name != "Customer onboarding" || imported.Description != "Preserved source description" {
+	if imported := target.workflows["organization\x00flow"]; imported.Name != "Customer onboarding" || imported.Description != "Preserved source description" {
 		t.Fatalf("workflow metadata was not preserved: %#v", imported)
 	}
 	if first.TargetInstallationID != "11111111-1111-4111-8111-111111111111" || first.TargetContentHash == "" {
@@ -134,7 +134,7 @@ func TestMigrateRejectsWrongTargetAttestation(t *testing.T) {
 		SchemaVersion: 2, InstallationID: "22222222-2222-4222-8222-222222222222",
 		ContentHash: "a" + fmt.Sprintf("%063d", 0), WorkflowCount: 1, DefinitionCount: 1, RunCount: 0,
 	}
-	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	_, err := Migrate(context.Background(), snapshot, Mapping{Organizations: map[string]string{"org": "organization"}}, target, RunOptions{ActorID: "admin"})
 	if err == nil {
 		t.Fatal("wrong production target attestation must fail closed")
 	}
@@ -158,11 +158,11 @@ func TestMigratePreflightsAllWorkflowMetadataAndTargetIdentities(t *testing.T) {
 		{ID: "flow", OrganizationID: "org-b", Name: "", Versions: []SourceVersion{{Version: 1, Status: "published", YAML: yaml, SourceHash: "v1"}}},
 	}}
 	target := newFakeTarget()
-	_, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org-a": "tenant", "org-b": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	_, err := Migrate(context.Background(), snapshot, Mapping{Organizations: map[string]string{"org-a": "organization", "org-b": "organization"}}, target, RunOptions{ActorID: "admin"})
 	if err == nil {
 		t.Fatal("expected workflow metadata and target identity blockers")
 	}
-	if target.writes != 0 || len(target.tenantIDs) != 0 {
+	if target.writes != 0 || len(target.organizationIDs) != 0 {
 		t.Fatalf("preflight performed writes: %#v", target)
 	}
 	var preflight *PreflightError
@@ -172,21 +172,21 @@ func TestMigratePreflightsAllWorkflowMetadataAndTargetIdentities(t *testing.T) {
 }
 
 // 验证只有触发器或历史运行的组织仍须显式映射租户，并会在目标写入前创建租户边界。
-func TestMigrateRequiresAndEnsuresTenantWithoutWorkflowRows(t *testing.T) {
+func TestMigrateRequiresAndEnsuresOrganizationWithoutWorkflowRows(t *testing.T) {
 	snapshot := Snapshot{Triggers: []SourceTrigger{{ID: "trigger", OrganizationID: "org", WorkflowID: "flow", Kind: "event", Config: json.RawMessage(`{"eventType":"created"}`)}}}
 	target := newFakeTarget()
 	if _, err := Migrate(context.Background(), snapshot, Mapping{}, target, RunOptions{ActorID: "admin"}); err == nil {
-		t.Fatal("expected missing tenant mapping blocker")
+		t.Fatal("expected missing organization mapping blocker")
 	}
-	if target.writes != 0 || len(target.tenantIDs) != 0 {
+	if target.writes != 0 || len(target.organizationIDs) != 0 {
 		t.Fatalf("preflight performed writes: %#v", target)
 	}
 
-	report, err := Migrate(context.Background(), snapshot, Mapping{Tenants: map[string]string{"org": "tenant"}}, target, RunOptions{ActorID: "admin"})
+	report, err := Migrate(context.Background(), snapshot, Mapping{Organizations: map[string]string{"org": "organization"}}, target, RunOptions{ActorID: "admin"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.CreatedTriggers != 1 || len(target.tenantIDs) != 1 || target.tenantIDs[0] != "tenant" {
-		t.Fatalf("report = %#v, tenants = %#v", report, target.tenantIDs)
+	if report.CreatedTriggers != 1 || len(target.organizationIDs) != 1 || target.organizationIDs[0] != "organization" {
+		t.Fatalf("report = %#v, organizations = %#v", report, target.organizationIDs)
 	}
 }

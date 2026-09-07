@@ -14,7 +14,7 @@ import (
 )
 
 // ResumeWebhook invokes a public single-use callback. The token is carried in
-// Authorization so it is not exposed through URLs, bodies, or tenant headers.
+// Authorization so it is not exposed through URLs, bodies, or organization headers.
 func (c *Client) ResumeWebhook(ctx context.Context, interruptID, resumeToken, idempotencyKey string, timestamp time.Time, data json.RawMessage) (Run, error) {
 	encoded, err := json.Marshal(data)
 	if err != nil {

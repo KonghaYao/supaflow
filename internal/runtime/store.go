@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// CreateRunRequest is the atomic input to tenant-scoped idempotent run creation.
+// CreateRunRequest is the atomic input to organization-scoped idempotent run creation.
 type CreateRunRequest struct {
 	Run Run
 }
@@ -40,7 +40,7 @@ type CancelRunResult struct {
 // ResolveInterruptRequest atomically consumes one approval token and makes its
 // suspended attempt runnable again.
 type ResolveInterruptRequest struct {
-	TenantID       TenantID
+	OrganizationID OrganizationID
 	InterruptID    string
 	TokenDigest    [32]byte
 	IdempotencyKey string
@@ -60,7 +60,7 @@ type ResolveInterruptResult struct {
 // Claims are verified by the token issuer before this persistence boundary and
 // rechecked against the locked interrupt row by durable adapters.
 type ResumeWebhookRequest struct {
-	TenantID       TenantID
+	OrganizationID OrganizationID
 	InterruptID    string
 	RunID          string
 	NodeID         string
@@ -82,22 +82,22 @@ type ResumeWebhookResult struct {
 // active attempt lease. Sequence makes provider replay idempotent after lease
 // takeover; it starts at one for each attempt.
 type AppendStreamChunkRequest struct {
-	TenantID     TenantID
-	RunID        string
-	AttemptID    string
-	WorkerID     string
-	FencingToken uint64
-	Sequence     int
-	Now          time.Time
-	Chunk        json.RawMessage
+	OrganizationID OrganizationID
+	RunID          string
+	AttemptID      string
+	WorkerID       string
+	FencingToken   uint64
+	Sequence       int
+	Now            time.Time
+	Chunk          json.RawMessage
 }
 
 // ClaimAttemptRequest claims pending work or takes over an expired lease.
 type ClaimAttemptRequest struct {
-	TenantID      TenantID
-	WorkerID      string
-	Now           time.Time
-	LeaseDuration time.Duration
+	OrganizationID OrganizationID
+	WorkerID       string
+	Now            time.Time
+	LeaseDuration  time.Duration
 }
 
 // WorkItem is the immutable worker view produced by an atomic claim.
@@ -113,13 +113,13 @@ type WorkItem struct {
 // RenewLeaseRequest extends a lease only when worker identity and fencing token
 // still match the current owner.
 type RenewLeaseRequest struct {
-	TenantID      TenantID
-	RunID         string
-	AttemptID     string
-	WorkerID      string
-	FencingToken  uint64
-	Now           time.Time
-	LeaseDuration time.Duration
+	OrganizationID OrganizationID
+	RunID          string
+	AttemptID      string
+	WorkerID       string
+	FencingToken   uint64
+	Now            time.Time
+	LeaseDuration  time.Duration
 }
 
 // NewAttempt describes successor work committed atomically with completion.
@@ -147,37 +147,37 @@ type NewAttempt struct {
 // CompleteAttemptRequest atomically commits the output, snapshot, events,
 // successor attempts, and resulting run state guarded by the fencing token.
 type CompleteAttemptRequest struct {
-	TenantID     TenantID
-	RunID        string
-	AttemptID    string
-	WorkerID     string
-	FencingToken uint64
-	Now          time.Time
-	RunStatus    RunStatus
-	Output       *Output
-	Snapshot     *Snapshot
-	Next         []NewAttempt
-	Events       []Event
+	OrganizationID OrganizationID
+	RunID          string
+	AttemptID      string
+	WorkerID       string
+	FencingToken   uint64
+	Now            time.Time
+	RunStatus      RunStatus
+	Output         *Output
+	Snapshot       *Snapshot
+	Next           []NewAttempt
+	Events         []Event
 }
 
 // SuspendAttemptRequest atomically suspends an attempt and persists its
 // single-use interrupt. Raw approval tokens never cross this store boundary.
 type SuspendAttemptRequest struct {
-	TenantID     TenantID
-	RunID        string
-	AttemptID    string
-	WorkerID     string
-	FencingToken uint64
-	Now          time.Time
-	Interrupt    Interrupt
-	Snapshot     *Snapshot
-	Events       []Event
+	OrganizationID OrganizationID
+	RunID          string
+	AttemptID      string
+	WorkerID       string
+	FencingToken   uint64
+	Now            time.Time
+	Interrupt      Interrupt
+	Snapshot       *Snapshot
+	Events         []Event
 }
 
 // FailAttemptRequest atomically records failure and either creates a bounded
 // retry attempt or finalizes the run.
 type FailAttemptRequest struct {
-	TenantID       TenantID
+	OrganizationID OrganizationID
 	RunID          string
 	AttemptID      string
 	WorkerID       string
@@ -189,7 +189,7 @@ type FailAttemptRequest struct {
 	Events         []Event
 }
 
-// Store is the durable runtime port. Every public/API operation is tenant
+// Store is the durable runtime port. Every public/API operation is organization
 // scoped. Each mutation method represents one database transaction; adapters
 // must not split the documented atomic writes across transactions. Event writes
 // include their matching outbox delivery in that transaction. Fencing tokens
@@ -199,20 +199,20 @@ type Store interface {
 	CreateRun(context.Context, CreateRunRequest) (CreateRunResult, error)
 	CreateSubworkflow(context.Context, CreateSubworkflowRunRequest) (CreateRunResult, error)
 	RerunRun(context.Context, RerunRunRequest) (CreateRunResult, error)
-	GetRun(context.Context, TenantID, string) (Run, error)
-	RequestCancel(context.Context, TenantID, string, time.Time) (CancelRunResult, error)
-	ListEvents(context.Context, TenantID, string, uint64, int) ([]Event, error)
-	ListInterrupts(context.Context, TenantID, string) ([]Interrupt, error)
+	GetRun(context.Context, OrganizationID, string) (Run, error)
+	RequestCancel(context.Context, OrganizationID, string, time.Time) (CancelRunResult, error)
+	ListEvents(context.Context, OrganizationID, string, uint64, int) ([]Event, error)
+	ListInterrupts(context.Context, OrganizationID, string) ([]Interrupt, error)
 	// ResolveInterrupt must atomically consume the token, record DecidedBy, copy
 	// the decision into Attempt.ResumeData, and make the suspended attempt runnable.
 	ResolveInterrupt(context.Context, ResolveInterruptRequest) (ResolveInterruptResult, error)
 	ResumeWebhook(context.Context, ResumeWebhookRequest) (ResumeWebhookResult, error)
 	// ExpireRuns atomically terminalizes a bounded batch whose durable deadline
 	// elapsed. Deleting their leases makes running executors lose fencing.
-	ExpireRuns(context.Context, TenantID, time.Time, int) (int, error)
+	ExpireRuns(context.Context, OrganizationID, time.Time, int) (int, error)
 	// ExpireRun terminalizes only runID when its durable deadline elapsed. Worker
 	// deadline paths use this targeted mutation so one run cannot expire another.
-	ExpireRun(context.Context, TenantID, string, time.Time) (bool, error)
+	ExpireRun(context.Context, OrganizationID, string, time.Time) (bool, error)
 	AppendStreamChunk(context.Context, AppendStreamChunkRequest) (Event, error)
 
 	ClaimAttempt(context.Context, ClaimAttemptRequest) (*WorkItem, error)

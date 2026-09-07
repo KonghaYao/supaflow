@@ -26,7 +26,7 @@ type approvalResponseSnapshot struct {
 
 // RequestCancel persists cancellation intent and immediately finalizes a run
 // when no attempt is executing.
-func (s *RuntimeStore) RequestCancel(ctx context.Context, tenantID workflowruntime.TenantID, runID string, now time.Time) (workflowruntime.CancelRunResult, error) {
+func (s *RuntimeStore) RequestCancel(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string, now time.Time) (workflowruntime.CancelRunResult, error) {
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not request cancellation", err)
@@ -38,7 +38,7 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, tenantID workflowrunti
 		}
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock cancellation operation", err)
 	}
-	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL+` FOR UPDATE`, string(tenantID), runID))
+	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL+` FOR UPDATE`, string(organizationID), runID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeNotFound, "run not found", err)
 	}
@@ -63,8 +63,8 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, tenantID workflowrunti
 	if err = tx.QueryRow(ctx, `
 		SELECT EXISTS (
 		    SELECT 1 FROM node_attempts
-		    WHERE tenant_id = $1 AND run_id = $2 AND status = 'running'
-		)`, string(tenantID), runID).Scan(&active); err != nil {
+		    WHERE organization_id = $1 AND run_id = $2 AND status = 'running'
+		)`, string(organizationID), runID).Scan(&active); err != nil {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not inspect active attempts", err)
 	}
 	status := workflowruntime.RunCancelled
@@ -75,41 +75,41 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, tenantID workflowrunti
 		UPDATE runs SET cancel_requested_at = $3::timestamptz, status = $4::text, updated_at = $3::timestamptz,
 		    finished_at = CASE WHEN $4::text = 'cancelled' THEN $3::timestamptz ELSE finished_at END,
 		    version = version + 1
-		WHERE tenant_id = $1 AND id = $2`, string(tenantID), runID, now, dbRunStatus(status)); err != nil {
+		WHERE organization_id = $1 AND id = $2`, string(organizationID), runID, now, dbRunStatus(status)); err != nil {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist cancellation", err)
 	}
 	if !active {
 		if _, err = tx.Exec(ctx, `
 			UPDATE node_attempts SET status = 'cancelled', finished_at = $3, updated_at = $3
-			WHERE tenant_id = $1 AND run_id = $2 AND status IN ('pending', 'retry_ready', 'suspended')`,
-			string(tenantID), runID, now); err != nil {
+			WHERE organization_id = $1 AND run_id = $2 AND status IN ('pending', 'retry_ready', 'suspended')`,
+			string(organizationID), runID, now); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel idle attempts", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE node_states SET status = 'cancelled', updated_at = $3
-			WHERE tenant_id = $1 AND run_id = $2 AND status IN ('pending', 'ready', 'suspended')`,
-			string(tenantID), runID, now); err != nil {
+			WHERE organization_id = $1 AND run_id = $2 AND status IN ('pending', 'ready', 'suspended')`,
+			string(organizationID), runID, now); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel idle nodes", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE interrupts SET status = 'cancelled', resolved_at = $3
-			WHERE tenant_id = $1 AND run_id = $2 AND status = 'pending'`,
-			string(tenantID), runID, now); err != nil {
+			WHERE organization_id = $1 AND run_id = $2 AND status = 'pending'`,
+			string(organizationID), runID, now); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel pending interrupts", err)
 		}
-		if _, err = releaseRunAdmissionTx(ctx, tx, tenantID, runID, now); err != nil {
+		if _, err = releaseRunAdmissionTx(ctx, tx, organizationID, runID, now); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not release run capacity", err)
 		}
 	}
 	for _, eventType := range cancellationEventTypes(active) {
-		if _, err = appendEventTx(ctx, tx, string(tenantID), runID, eventType, json.RawMessage(`{}`)); err != nil {
+		if _, err = appendEventTx(ctx, tx, string(organizationID), runID, eventType, json.RawMessage(`{}`)); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not append cancellation event", err)
 		}
-		if err = insertOutboxTx(ctx, tx, string(tenantID), "run", runID, eventType, json.RawMessage(`{}`)); err != nil {
+		if err = insertOutboxTx(ctx, tx, string(organizationID), "run", runID, eventType, json.RawMessage(`{}`)); err != nil {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not enqueue cancellation event", err)
 		}
 	}
-	if err = cancelSubworkflowDescendantsTx(ctx, tx, tenantID, runID, now); err != nil {
+	if err = cancelSubworkflowDescendantsTx(ctx, tx, organizationID, runID, now); err != nil {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel subworkflow descendants", err)
 	}
 	if err = CompleteAPIMutationTx(ctx, tx, runID, map[string]any{"runId": runID}); err != nil {
@@ -119,7 +119,7 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, tenantID workflowrunti
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit cancellation", err)
 	}
 	apimutation.MarkCommitted(ctx)
-	updated, err := s.GetRun(ctx, tenantID, runID)
+	updated, err := s.GetRun(ctx, organizationID, runID)
 	if err != nil {
 		return workflowruntime.CancelRunResult{}, err
 	}
@@ -157,7 +157,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	if _, err = tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`,
-		string(request.TenantID), request.IdempotencyKey,
+		string(request.OrganizationID), request.IdempotencyKey,
 	); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock approval idempotency key", err)
 	}
@@ -165,13 +165,13 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	var existingInterruptID string
 	err = tx.QueryRow(ctx, `
 		SELECT request_hash, interrupt_id FROM approval_decisions
-		WHERE tenant_id = $1 AND idempotency_key = $2`, request.TenantID, request.IdempotencyKey,
+		WHERE organization_id = $1 AND idempotency_key = $2`, request.OrganizationID, request.IdempotencyKey,
 	).Scan(&existingHash, &existingInterruptID)
 	if err == nil {
 		if len(existingHash) != len(request.RequestHash) || subtle.ConstantTimeCompare(existingHash, request.RequestHash[:]) != 1 {
 			return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", nil)
 		}
-		result, replayErr := resolvedInterruptResultTx(ctx, tx, request.TenantID, existingInterruptID)
+		result, replayErr := resolvedInterruptResultTx(ctx, tx, request.OrganizationID, existingInterruptID)
 		if replayErr != nil {
 			return workflowruntime.ResolveInterruptResult{}, replayErr
 		}
@@ -192,20 +192,20 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
 	}
 	var interrupt workflowruntime.Interrupt
-	var tenant string
+	var organization string
 	var digest []byte
 	var status string
 	var attemptStatus, runStatus string
 	err = tx.QueryRow(ctx, `
-		SELECT i.id, i.tenant_id, i.run_id, a.node_id, i.attempt_id, i.kind,
+		SELECT i.id, i.organization_id, i.run_id, a.node_id, i.attempt_id, i.kind,
 		       i.resume_token_hash, i.expires_at, i.resolved_at, i.status, i.created_at,
 		       a.status, r.status
 		FROM interrupts i
-		JOIN node_attempts a ON a.tenant_id = i.tenant_id AND a.id = i.attempt_id
-		JOIN runs r ON r.tenant_id = i.tenant_id AND r.id = i.run_id
-		WHERE i.tenant_id = $1 AND i.id = $2
-		FOR UPDATE OF i, a, r`, string(request.TenantID), request.InterruptID).Scan(
-		&interrupt.ID, &tenant, &interrupt.RunID, &interrupt.NodeID,
+		JOIN node_attempts a ON a.organization_id = i.organization_id AND a.id = i.attempt_id
+		JOIN runs r ON r.organization_id = i.organization_id AND r.id = i.run_id
+		WHERE i.organization_id = $1 AND i.id = $2
+		FOR UPDATE OF i, a, r`, string(request.OrganizationID), request.InterruptID).Scan(
+		&interrupt.ID, &organization, &interrupt.RunID, &interrupt.NodeID,
 		&interrupt.AttemptID, &interrupt.Kind, &digest, &interrupt.ExpiresAt,
 		&interrupt.ResolvedAt, &status, &interrupt.CreatedAt, &attemptStatus, &runStatus,
 	)
@@ -218,7 +218,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	if len(digest) != len(request.TokenDigest) || subtle.ConstantTimeCompare(digest, request.TokenDigest[:]) != 1 {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalInvalid, "approval token is invalid", nil)
 	}
-	interrupt.TenantID = workflowruntime.TenantID(tenant)
+	interrupt.OrganizationID = workflowruntime.OrganizationID(organization)
 	if interrupt.Kind != "approval" && interrupt.Kind != "human_approval" {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalInvalid, "approval token is invalid", nil)
 	}
@@ -245,36 +245,36 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE interrupts SET status = 'resolved', resolved_at = $3
-		WHERE tenant_id = $1 AND id = $2 AND status = 'pending'`, request.TenantID, request.InterruptID, databaseNow); err != nil {
+		WHERE organization_id = $1 AND id = $2 AND status = 'pending'`, request.OrganizationID, request.InterruptID, databaseNow); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not consume approval", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_attempts SET status = 'pending', resume_data = $4,
 		    available_at = $3, updated_at = $3
-		WHERE tenant_id = $1 AND id = $2 AND status = 'suspended'`, request.TenantID, interrupt.AttemptID, databaseNow, decision); err != nil {
+		WHERE organization_id = $1 AND id = $2 AND status = 'suspended'`, request.OrganizationID, interrupt.AttemptID, databaseNow, decision); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume attempt", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'pending', updated_at = $3
-		WHERE tenant_id = $1 AND run_id = $2 AND node_id = $4`, request.TenantID, interrupt.RunID, databaseNow, interrupt.NodeID); err != nil {
+		WHERE organization_id = $1 AND run_id = $2 AND node_id = $4`, request.OrganizationID, interrupt.RunID, databaseNow, interrupt.NodeID); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume node", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runs SET status = CASE WHEN status = 'suspended' THEN 'pending' ELSE status END,
 		    updated_at = $3, version = version + 1
-		WHERE tenant_id = $1 AND id = $2 AND status IN ('suspended','running')`, request.TenantID, interrupt.RunID, databaseNow); err != nil {
+		WHERE organization_id = $1 AND id = $2 AND status IN ('suspended','running')`, request.OrganizationID, interrupt.RunID, databaseNow); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume run", err)
 	}
 	interrupt.ResolvedAt = &databaseNow
 	interrupt.Status = workflowruntime.InterruptResolved
 	interrupt.Decision = decision
-	if _, err = appendEventTx(ctx, tx, string(request.TenantID), interrupt.RunID, "approval.resolved", decision); err != nil {
+	if _, err = appendEventTx(ctx, tx, string(request.OrganizationID), interrupt.RunID, "approval.resolved", decision); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not append approval event", err)
 	}
-	if err = insertOutboxTx(ctx, tx, string(request.TenantID), "run", interrupt.RunID, "approval.resolved", decision); err != nil {
+	if err = insertOutboxTx(ctx, tx, string(request.OrganizationID), "run", interrupt.RunID, "approval.resolved", decision); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not enqueue approval event", err)
 	}
-	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.TenantID), interrupt.RunID))
+	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), interrupt.RunID))
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read resumed run", err)
 	}
@@ -289,15 +289,15 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO approval_decisions (
-		    id, tenant_id, interrupt_id, decision, decision_data, decided_by, comment, decided_at,
+		    id, organization_id, interrupt_id, decision, decision_data, decided_by, comment, decided_at,
 		    idempotency_key, request_hash, response_snapshot
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		decisionID, request.TenantID, request.InterruptID, decisionName, decision,
+		decisionID, request.OrganizationID, request.InterruptID, decisionName, decision,
 		request.DecidedBy, request.Decision.Comment, request.Now, request.IdempotencyKey,
 		request.RequestHash[:], responseSnapshot); err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist approval", err)
 	}
-	storedResult, err := resolvedInterruptResultTx(ctx, tx, request.TenantID, request.InterruptID)
+	storedResult, err := resolvedInterruptResultTx(ctx, tx, request.OrganizationID, request.InterruptID)
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, err
 	}
@@ -311,30 +311,30 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	return storedResult, nil
 }
 
-func resolvedInterruptResultTx(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, interruptID string) (workflowruntime.ResolveInterruptResult, error) {
+func resolvedInterruptResultTx(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, interruptID string) (workflowruntime.ResolveInterruptResult, error) {
 	var interrupt workflowruntime.Interrupt
-	var storedTenant, status string
+	var storedOrganization, status string
 	var digest []byte
 	var responseSnapshotJSON []byte
 	err := tx.QueryRow(ctx, `
-		SELECT i.id, i.tenant_id, i.run_id, a.node_id, i.attempt_id, i.kind,
+		SELECT i.id, i.organization_id, i.run_id, a.node_id, i.attempt_id, i.kind,
 		       i.resume_token_hash, i.expires_at, i.resolved_at, i.status, i.created_at,
 		       d.decision_data, d.response_snapshot
 		FROM approval_decisions d
-		JOIN interrupts i ON i.tenant_id = d.tenant_id AND i.id = d.interrupt_id
-		JOIN node_attempts a ON a.tenant_id = i.tenant_id AND a.id = i.attempt_id
-		WHERE d.tenant_id = $1 AND d.interrupt_id = $2`, tenantID, interruptID).Scan(
-		&interrupt.ID, &storedTenant, &interrupt.RunID, &interrupt.NodeID, &interrupt.AttemptID,
+		JOIN interrupts i ON i.organization_id = d.organization_id AND i.id = d.interrupt_id
+		JOIN node_attempts a ON a.organization_id = i.organization_id AND a.id = i.attempt_id
+		WHERE d.organization_id = $1 AND d.interrupt_id = $2`, organizationID, interruptID).Scan(
+		&interrupt.ID, &storedOrganization, &interrupt.RunID, &interrupt.NodeID, &interrupt.AttemptID,
 		&interrupt.Kind, &digest, &interrupt.ExpiresAt, &interrupt.ResolvedAt, &status,
 		&interrupt.CreatedAt, &interrupt.Decision, &responseSnapshotJSON,
 	)
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not replay approval result", err)
 	}
-	interrupt.TenantID = workflowruntime.TenantID(storedTenant)
+	interrupt.OrganizationID = workflowruntime.OrganizationID(storedOrganization)
 	interrupt.Status = workflowruntime.InterruptResolved
 	copy(interrupt.TokenDigest[:], digest)
-	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(tenantID), interrupt.RunID))
+	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(organizationID), interrupt.RunID))
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read replayed run", err)
 	}

@@ -40,7 +40,7 @@ func TestPlatformOpsSQLCoordinationContracts(t *testing.T) {
 		source.Write(contents)
 	}
 	text := source.String()
-	for _, fragment := range []string{"tenant_id=$1", "FOR UPDATE SKIP LOCKED", "topic = ANY($4::text[])", "ON CONFLICT", "insertAuditTx"} {
+	for _, fragment := range []string{"organization_id=$1", "FOR UPDATE SKIP LOCKED", "topic = ANY($4::text[])", "ON CONFLICT", "insertAuditTx"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("platform SQL coordination missing %q", fragment)
 		}
@@ -102,16 +102,16 @@ func TestImmutableFiringTargetMigrationContract(t *testing.T) {
 	}
 }
 
-// 验证 Trigger lifecycle 的所有修改和查询都带 tenant 与乐观版本谓词。
-func TestTriggerLifecycleSQLUsesTenantAndOptimisticConcurrency(t *testing.T) {
+// 验证 Trigger lifecycle 的所有修改和查询都带 organization 与乐观版本谓词。
+func TestTriggerLifecycleSQLUsesOrganizationAndOptimisticConcurrency(t *testing.T) {
 	contents, err := os.ReadFile("trigger_lifecycle_postgres.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(contents)
 	for _, fragment := range []string{
-		"WHERE tenant_id=$1", "updated_at=$3", "ON CONFLICT (tenant_id,idempotency_key)",
-		"subtle.ConstantTimeCompare", "DELETE FROM triggers WHERE tenant_id=$1",
+		"WHERE organization_id=$1", "updated_at=$3", "ON CONFLICT (organization_id,idempotency_key)",
+		"subtle.ConstantTimeCompare", "DELETE FROM triggers WHERE organization_id=$1",
 	} {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("trigger lifecycle SQL missing %q", fragment)
@@ -139,7 +139,7 @@ func TestDurabilityRetentionMigrationDefinesLeaseAndOutputLifecycle(t *testing.T
 }
 
 // 验证每个迁移后新增租户都由数据库事务自动获得默认 retention 策略。
-func TestDefaultRetentionPolicyMigrationCoversFutureTenants(t *testing.T) {
+func TestDefaultRetentionPolicyMigrationCoversFutureOrganizations(t *testing.T) {
 	contents, err := os.ReadFile("../../migrations/000018_default_retention_policy.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestObjectUploadRecoveryUsesDatabaseClockContract(t *testing.T) {
 	if !strings.Contains(source, "lease_expires_at <= now()") {
 		t.Fatal("object upload recovery does not use the database clock")
 	}
-	if strings.Contains(source, "lease_expires_at <= $2") || strings.Contains(source, "tenantID string, now time.Time") {
+	if strings.Contains(source, "lease_expires_at <= $2") || strings.Contains(source, "organizationID string, now time.Time") {
 		t.Fatal("object upload recovery accepts an application-clock fencing decision")
 	}
 }

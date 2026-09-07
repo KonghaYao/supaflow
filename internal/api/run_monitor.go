@@ -12,8 +12,8 @@ import (
 )
 
 func (h *Handler) registerRunMonitorRoutes(mux *http.ServeMux) {
-	mux.Handle("GET /v1/runs", h.require(RoleViewer, http.HandlerFunc(h.listRuns)))
-	mux.Handle("GET /v1/runs/{runID}/details", h.require(RoleViewer, http.HandlerFunc(h.runDetails)))
+	mux.Handle("GET /v1/runs", h.require(http.HandlerFunc(h.listRuns)))
+	mux.Handle("GET /v1/runs/{runID}/details", h.require(http.HandlerFunc(h.runDetails)))
 }
 
 func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -29,7 +29,7 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := runtime.RunFilter{WorkflowID: strings.TrimSpace(r.URL.Query().Get("workflowId")),
 		Status: runtime.RunStatus(strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status")))), Limit: limit}
-	items, err := h.runtime.ListRuns(r.Context(), runtime.TenantID(principal.TenantID), filter)
+	items, err := h.runtime.ListRuns(r.Context(), runtime.OrganizationID(principal.OrganizationID), filter)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -43,7 +43,7 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) runDetails(w http.ResponseWriter, r *http.Request) {
 	principal, _ := PrincipalFromContext(r.Context())
-	details, err := h.runtime.GetRunDetails(r.Context(), runtime.TenantID(principal.TenantID), r.PathValue("runID"))
+	details, err := h.runtime.GetRunDetails(r.Context(), runtime.OrganizationID(principal.OrganizationID), r.PathValue("runID"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return

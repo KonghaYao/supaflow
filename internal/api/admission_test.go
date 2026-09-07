@@ -14,7 +14,7 @@ import (
 // 验证公开 Run API 接受有界优先级、返回该优先级，并把它纳入幂等语义。
 func TestStartRunPriorityContract(t *testing.T) {
 	handler := testHandler(t)
-	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", tenantAKey, "priority-publish-key", minimalDefinition("flow"))
+	publish := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow/publish", organizationAKey, "priority-publish-key", minimalDefinition("flow"))
 	if publish.Code != http.StatusCreated {
 		t.Fatalf("publish=%d %s", publish.Code, publish.Body.String())
 	}
@@ -23,7 +23,7 @@ func TestStartRunPriorityContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := map[string]any{"planId": plan.ID, "planHash": plan.Hash, "input": map[string]any{}, "priority": 42}
-	started := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "priority-run-key", body)
+	started := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "priority-run-key", body)
 	if started.Code != http.StatusAccepted {
 		t.Fatalf("start=%d %s", started.Code, started.Body.String())
 	}
@@ -35,12 +35,12 @@ func TestStartRunPriorityContract(t *testing.T) {
 		t.Fatalf("priority=%d", run.Priority)
 	}
 	body["priority"] = 41
-	conflict := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "priority-run-key", body)
+	conflict := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "priority-run-key", body)
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("conflict=%d %s", conflict.Code, conflict.Body.String())
 	}
 	body["priority"] = 1001
-	invalid := requestJSON(t, handler, http.MethodPost, "/v1/runs", tenantAKey, "another-priority-key", body)
+	invalid := requestJSON(t, handler, http.MethodPost, "/v1/runs", organizationAKey, "another-priority-key", body)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid=%d %s", invalid.Code, invalid.Body.String())
 	}
@@ -52,7 +52,7 @@ func TestQuotaExceededMapsToRetryableProblem(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/runs", nil)
 	response := httptest.NewRecorder()
 	handler.writeError(response, request, &runtime.Error{
-		Code: runtime.CodeQuotaExceeded, Message: "tenant run capacity is exhausted", RetryAfter: 5 * time.Second,
+		Code: runtime.CodeQuotaExceeded, Message: "organization run capacity is exhausted", RetryAfter: 5 * time.Second,
 	})
 	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "5" {
 		t.Fatalf("status=%d retry=%q body=%s", response.Code, response.Header().Get("Retry-After"), response.Body.String())

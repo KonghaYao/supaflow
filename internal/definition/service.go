@@ -64,15 +64,15 @@ func (CanonicalAdapter) ToDefinition(document json.RawMessage) (workflow.Workflo
 }
 
 // CreateDraft creates or idempotently replays a draft.
-func (s *Service) CreateDraft(ctx context.Context, tenantID string, command CreateDraftCommand) (Draft, error) {
-	result, err := s.CreateDraftWithResult(ctx, tenantID, command)
+func (s *Service) CreateDraft(ctx context.Context, organizationID string, command CreateDraftCommand) (Draft, error) {
+	result, err := s.CreateDraftWithResult(ctx, organizationID, command)
 	return result.Draft, err
 }
 
 // CreateDraftWithResult creates or replays a draft and preserves the atomic
 // persistence outcome for administrative import and observability callers.
-func (s *Service) CreateDraftWithResult(ctx context.Context, tenantID string, command CreateDraftCommand) (CreateDraftResult, error) {
-	if err := validateMutation(tenantID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
+func (s *Service) CreateDraftWithResult(ctx context.Context, organizationID string, command CreateDraftCommand) (CreateDraftResult, error) {
+	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
 		return CreateDraftResult{}, err
 	}
 	id, err := randomID("draft")
@@ -80,7 +80,7 @@ func (s *Service) CreateDraftWithResult(ctx context.Context, tenantID string, co
 		return CreateDraftResult{}, err
 	}
 	now := time.Now().UTC()
-	request := MutationRequest{Draft: Draft{ID: id, TenantID: tenantID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), Revision: 1, UpdatedBy: command.ActorID, CreatedAt: now, UpdatedAt: now}, IdempotencyKey: command.IdempotencyKey}
+	request := MutationRequest{Draft: Draft{ID: id, OrganizationID: organizationID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), Revision: 1, UpdatedBy: command.ActorID, CreatedAt: now, UpdatedAt: now}, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("create", command.WorkflowID, command.ActorID, 0, command.Document)
 	result, err := s.store.CreateDraft(ctx, request)
 	if err == nil && len(result.Draft.Document) == 0 {
@@ -89,31 +89,31 @@ func (s *Service) CreateDraftWithResult(ctx context.Context, tenantID string, co
 	return result, err
 }
 
-// GetDraft returns a tenant-scoped draft.
-func (s *Service) GetDraft(ctx context.Context, tenantID, workflowID string) (Draft, error) {
-	if tenantID == "" || workflowID == "" {
-		return Draft{}, errors.New("tenant and workflow are required")
+// GetDraft returns a organization-scoped draft.
+func (s *Service) GetDraft(ctx context.Context, organizationID, workflowID string) (Draft, error) {
+	if organizationID == "" || workflowID == "" {
+		return Draft{}, errors.New("organization and workflow are required")
 	}
-	return s.store.GetDraft(ctx, tenantID, workflowID)
+	return s.store.GetDraft(ctx, organizationID, workflowID)
 }
 
 // ListDrafts returns one bounded page in stable workflow order.
-func (s *Service) ListDrafts(ctx context.Context, tenantID, cursor string, limit int) (DraftPage, error) {
-	if tenantID == "" || limit < 1 || limit > MaxPageLimit || len(cursor) > 128 {
-		return DraftPage{}, errors.New("tenant, valid cursor, and page limit are required")
+func (s *Service) ListDrafts(ctx context.Context, organizationID, cursor string, limit int) (DraftPage, error) {
+	if organizationID == "" || limit < 1 || limit > MaxPageLimit || len(cursor) > 128 {
+		return DraftPage{}, errors.New("organization, valid cursor, and page limit are required")
 	}
-	return s.store.ListDrafts(ctx, tenantID, cursor, limit)
+	return s.store.ListDrafts(ctx, organizationID, cursor, limit)
 }
 
 // UpdateDraft performs an optimistic autosave mutation.
-func (s *Service) UpdateDraft(ctx context.Context, tenantID string, command UpdateDraftCommand) (Draft, error) {
-	if err := validateMutation(tenantID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil || command.ExpectedRevision == 0 {
+func (s *Service) UpdateDraft(ctx context.Context, organizationID string, command UpdateDraftCommand) (Draft, error) {
+	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil || command.ExpectedRevision == 0 {
 		if err != nil {
 			return Draft{}, err
 		}
 		return Draft{}, errors.New("expected revision is required")
 	}
-	request := MutationRequest{Draft: Draft{TenantID: tenantID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
+	request := MutationRequest{Draft: Draft{OrganizationID: organizationID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("update", command.WorkflowID, command.ActorID, command.ExpectedRevision, command.Document)
 	result, err := s.store.UpdateDraft(ctx, request)
 	if err == nil && len(result.Document) == 0 {
@@ -123,18 +123,18 @@ func (s *Service) UpdateDraft(ctx context.Context, tenantID string, command Upda
 }
 
 // DeleteDraft performs an optimistic idempotent deletion.
-func (s *Service) DeleteDraft(ctx context.Context, tenantID string, command DeleteDraftCommand) error {
-	if tenantID == "" || command.WorkflowID == "" || command.ActorID == "" || len(command.IdempotencyKey) < 8 || command.ExpectedRevision == 0 {
+func (s *Service) DeleteDraft(ctx context.Context, organizationID string, command DeleteDraftCommand) error {
+	if organizationID == "" || command.WorkflowID == "" || command.ActorID == "" || len(command.IdempotencyKey) < 8 || command.ExpectedRevision == 0 {
 		return errors.New("valid delete command is required")
 	}
-	request := MutationRequest{Draft: Draft{TenantID: tenantID, WorkflowID: command.WorkflowID, UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
+	request := MutationRequest{Draft: Draft{OrganizationID: organizationID, WorkflowID: command.WorkflowID, UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("delete", command.WorkflowID, command.ActorID, command.ExpectedRevision, nil)
 	return s.store.DeleteDraft(ctx, request)
 }
 
 // CompileDraft converts the editor document and validates the canonical plan.
-func (s *Service) CompileDraft(ctx context.Context, tenantID, workflowID string) (*workflow.ExecutionPlan, error) {
-	draft, err := s.GetDraft(ctx, tenantID, workflowID)
+func (s *Service) CompileDraft(ctx context.Context, organizationID, workflowID string) (*workflow.ExecutionPlan, error) {
+	draft, err := s.GetDraft(ctx, organizationID, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,29 +149,29 @@ func (s *Service) CompileDraft(ctx context.Context, tenantID, workflowID string)
 }
 
 // Publish stores an immutable version after publication succeeds.
-func (s *Service) Publish(ctx context.Context, tenantID, workflowID string, definition workflow.WorkflowDefinition, key string) (platform.PublishedPlan, bool, error) {
-	published, created, err := s.publisher.Publish(ctx, tenantID, workflowID, definition, key)
+func (s *Service) Publish(ctx context.Context, organizationID, workflowID string, definition workflow.WorkflowDefinition, key string) (platform.PublishedPlan, bool, error) {
+	published, created, err := s.publisher.Publish(ctx, organizationID, workflowID, definition, key)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
-	if err := s.store.RecordVersion(ctx, Version{TenantID: tenantID, WorkflowID: workflowID, PlanID: published.ID, Version: published.Version, PlanHash: published.Hash, Definition: definition, PublishedAt: published.PublishedAt}); err != nil {
+	if err := s.store.RecordVersion(ctx, Version{OrganizationID: organizationID, WorkflowID: workflowID, PlanID: published.ID, Version: published.Version, PlanHash: published.Hash, Definition: definition, PublishedAt: published.PublishedAt}); err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
 	return published, created, nil
 }
 
 // PublishDraft publishes the current editor document.
-func (s *Service) PublishDraft(ctx context.Context, tenantID, workflowID, key string) (platform.PublishedPlan, bool, error) {
-	if tenantID == "" || workflowID == "" || len(key) < 8 || len(key) > 128 {
-		return platform.PublishedPlan{}, false, errors.New("tenant, workflow, and valid idempotency key are required")
+func (s *Service) PublishDraft(ctx context.Context, organizationID, workflowID, key string) (platform.PublishedPlan, bool, error) {
+	if organizationID == "" || workflowID == "" || len(key) < 8 || len(key) > 128 {
+		return platform.PublishedPlan{}, false, errors.New("organization, workflow, and valid idempotency key are required")
 	}
 	if replayer, ok := s.publisher.(publicationReplayer); ok {
-		published, found, err := replayer.ReplayPublication(ctx, tenantID, workflowID, key)
+		published, found, err := replayer.ReplayPublication(ctx, organizationID, workflowID, key)
 		if err != nil || found {
 			return published, false, err
 		}
 	}
-	draft, err := s.GetDraft(ctx, tenantID, workflowID)
+	draft, err := s.GetDraft(ctx, organizationID, workflowID)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -179,49 +179,49 @@ func (s *Service) PublishDraft(ctx context.Context, tenantID, workflowID, key st
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
-	return s.Publish(ctx, tenantID, workflowID, definition, key)
+	return s.Publish(ctx, organizationID, workflowID, definition, key)
 }
 
 // ListVersions returns one bounded page of newest immutable summaries first.
-func (s *Service) ListVersions(ctx context.Context, tenantID, workflowID string, cursor uint64, limit int) (VersionPage, error) {
-	if tenantID == "" || workflowID == "" || limit < 1 || limit > MaxPageLimit {
-		return VersionPage{}, errors.New("tenant, workflow, and page limit are required")
+func (s *Service) ListVersions(ctx context.Context, organizationID, workflowID string, cursor uint64, limit int) (VersionPage, error) {
+	if organizationID == "" || workflowID == "" || limit < 1 || limit > MaxPageLimit {
+		return VersionPage{}, errors.New("organization, workflow, and page limit are required")
 	}
-	return s.store.ListVersions(ctx, tenantID, workflowID, cursor, limit)
+	return s.store.ListVersions(ctx, organizationID, workflowID, cursor, limit)
 }
 
 // GetVersion returns one immutable published definition.
-func (s *Service) GetVersion(ctx context.Context, tenantID, workflowID string, version uint64) (Version, error) {
-	if tenantID == "" || workflowID == "" || version == 0 {
-		return Version{}, errors.New("tenant, workflow, and version are required")
+func (s *Service) GetVersion(ctx context.Context, organizationID, workflowID string, version uint64) (Version, error) {
+	if organizationID == "" || workflowID == "" || version == 0 {
+		return Version{}, errors.New("organization, workflow, and version are required")
 	}
-	return s.store.GetVersion(ctx, tenantID, workflowID, version)
+	return s.store.GetVersion(ctx, organizationID, workflowID, version)
 }
 
 // LatestVersion resolves the immutable plan identity consumed by run clients.
-func (s *Service) LatestVersion(ctx context.Context, tenantID, workflowID string) (Version, error) {
-	if tenantID == "" || workflowID == "" {
-		return Version{}, errors.New("tenant and workflow are required")
+func (s *Service) LatestVersion(ctx context.Context, organizationID, workflowID string) (Version, error) {
+	if organizationID == "" || workflowID == "" {
+		return Version{}, errors.New("organization and workflow are required")
 	}
-	return s.store.GetLatestVersion(ctx, tenantID, workflowID)
+	return s.store.GetLatestVersion(ctx, organizationID, workflowID)
 }
 
 // Republish creates a new immutable version from an older definition.
-func (s *Service) Republish(ctx context.Context, tenantID, workflowID string, version uint64, key string) (platform.PublishedPlan, bool, error) {
-	stored, err := s.store.GetVersion(ctx, tenantID, workflowID, version)
+func (s *Service) Republish(ctx context.Context, organizationID, workflowID string, version uint64, key string) (platform.PublishedPlan, bool, error) {
+	stored, err := s.store.GetVersion(ctx, organizationID, workflowID, version)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
-	return s.Publish(ctx, tenantID, workflowID, stored.Definition, key)
+	return s.Publish(ctx, organizationID, workflowID, stored.Definition, key)
 }
 
 // ImportVersion publishes one migration record only when it is the next source
 // version. The application entry point must restrict this seam to administrators.
-func (s *Service) ImportVersion(ctx context.Context, tenantID, workflowID string, command ImportVersionCommand) (platform.PublishedPlan, bool, error) {
-	if tenantID == "" || workflowID == "" || command.SourceVersion == 0 || len(command.IdempotencyKey) < 8 || command.Definition.ID != workflowID {
+func (s *Service) ImportVersion(ctx context.Context, organizationID, workflowID string, command ImportVersionCommand) (platform.PublishedPlan, bool, error) {
+	if organizationID == "" || workflowID == "" || command.SourceVersion == 0 || len(command.IdempotencyKey) < 8 || command.Definition.ID != workflowID {
 		return platform.PublishedPlan{}, false, errors.New("valid version import command is required")
 	}
-	latest, err := s.store.GetLatestVersion(ctx, tenantID, workflowID)
+	latest, err := s.store.GetLatestVersion(ctx, organizationID, workflowID)
 	expected := uint64(1)
 	if err == nil {
 		expected = latest.Version + 1
@@ -232,7 +232,7 @@ func (s *Service) ImportVersion(ctx context.Context, tenantID, workflowID string
 		return platform.PublishedPlan{}, false, ErrVersionSequenceConflict
 	}
 	if command.SourceVersion < expected {
-		stored, readErr := s.store.GetVersion(ctx, tenantID, workflowID, command.SourceVersion)
+		stored, readErr := s.store.GetVersion(ctx, organizationID, workflowID, command.SourceVersion)
 		if readErr != nil || definitionDigest(stored.Definition) != definitionDigest(command.Definition) {
 			return platform.PublishedPlan{}, false, ErrVersionSequenceConflict
 		}
@@ -243,7 +243,7 @@ func (s *Service) ImportVersion(ctx context.Context, tenantID, workflowID string
 		return platform.PublishedPlan{ID: stored.PlanID, WorkflowID: stored.WorkflowID, Version: stored.Version,
 			Hash: stored.PlanHash, Plan: plan, PublishedAt: stored.PublishedAt}, false, nil
 	}
-	published, created, err := s.Publish(ctx, tenantID, workflowID, command.Definition, command.IdempotencyKey)
+	published, created, err := s.Publish(ctx, organizationID, workflowID, command.Definition, command.IdempotencyKey)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -259,12 +259,12 @@ func definitionDigest(value workflow.WorkflowDefinition) [32]byte {
 }
 
 // DiffVersions returns stable top-level canonical JSON changes.
-func (s *Service) DiffVersions(ctx context.Context, tenantID, workflowID string, from, to uint64) (VersionDiff, error) {
-	left, err := s.store.GetVersion(ctx, tenantID, workflowID, from)
+func (s *Service) DiffVersions(ctx context.Context, organizationID, workflowID string, from, to uint64) (VersionDiff, error) {
+	left, err := s.store.GetVersion(ctx, organizationID, workflowID, from)
 	if err != nil {
 		return VersionDiff{}, err
 	}
-	right, err := s.store.GetVersion(ctx, tenantID, workflowID, to)
+	right, err := s.store.GetVersion(ctx, organizationID, workflowID, to)
 	if err != nil {
 		return VersionDiff{}, err
 	}
@@ -306,9 +306,9 @@ func diffDefinitions(left, right workflow.WorkflowDefinition) ([]VersionChange, 
 	return changes, nil
 }
 
-func validateMutation(tenant, workflowID, actor, key string, document json.RawMessage) error {
-	if tenant == "" || workflowID == "" || actor == "" || len(key) < 8 || len(key) > 128 || !json.Valid(document) {
-		return errors.New("valid tenant, workflow, actor, idempotency key, and JSON document are required")
+func validateMutation(organization, workflowID, actor, key string, document json.RawMessage) error {
+	if organization == "" || workflowID == "" || actor == "" || len(key) < 8 || len(key) > 128 || !json.Valid(document) {
+		return errors.New("valid organization, workflow, actor, idempotency key, and JSON document are required")
 	}
 	return nil
 }

@@ -15,22 +15,22 @@ type targetedExpiryStore struct {
 	batchTarget string
 }
 
-func (s *targetedExpiryStore) ExpireRun(ctx context.Context, tenantID TenantID, runID string, now time.Time) (bool, error) {
+func (s *targetedExpiryStore) ExpireRun(ctx context.Context, organizationID OrganizationID, runID string, now time.Time) (bool, error) {
 	s.mu.Lock()
 	s.targets = append(s.targets, runID)
 	s.mu.Unlock()
-	return s.MemoryStore.ExpireRun(ctx, tenantID, runID, now)
+	return s.MemoryStore.ExpireRun(ctx, organizationID, runID, now)
 }
 
-func (s *targetedExpiryStore) ExpireRuns(ctx context.Context, tenantID TenantID, now time.Time, limit int) (int, error) {
+func (s *targetedExpiryStore) ExpireRuns(ctx context.Context, organizationID OrganizationID, now time.Time, limit int) (int, error) {
 	if s.batchTarget != "" {
-		expired, err := s.MemoryStore.ExpireRun(ctx, tenantID, s.batchTarget, now)
+		expired, err := s.MemoryStore.ExpireRun(ctx, organizationID, s.batchTarget, now)
 		if expired {
 			return 1, err
 		}
 		return 0, err
 	}
-	return s.MemoryStore.ExpireRuns(ctx, tenantID, now, limit)
+	return s.MemoryStore.ExpireRuns(ctx, organizationID, now, limit)
 }
 
 // 验证运行超时被固化为绝对 deadline，且进入幂等指纹并受上下限约束。
@@ -39,23 +39,23 @@ func TestStartRunPersistsBoundedDeadline(t *testing.T) {
 	service, _, _ := testService(now)
 	request := startRequest("deadline-key")
 	request.Timeout = 5 * time.Minute
-	created, err := service.StartRun(context.Background(), "tenant_a", request)
+	created, err := service.StartRun(context.Background(), "organization_a", request)
 	if err != nil || created.Run.DeadlineAt == nil || !created.Run.DeadlineAt.Equal(now.Add(5*time.Minute)) {
 		t.Fatalf("created=%+v err=%v", created, err)
 	}
 	conflict := request
 	conflict.Timeout = 6 * time.Minute
-	if _, err = service.StartRun(context.Background(), "tenant_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
+	if _, err = service.StartRun(context.Background(), "organization_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("timeout must affect idempotency fingerprint: %v", err)
 	}
 	tooShort := startRequest("deadline-short")
 	tooShort.Timeout = time.Millisecond
-	if _, err = service.StartRun(context.Background(), "tenant_a", tooShort); !IsCode(err, CodeInvalidArgument) {
+	if _, err = service.StartRun(context.Background(), "organization_a", tooShort); !IsCode(err, CodeInvalidArgument) {
 		t.Fatalf("short timeout error=%v", err)
 	}
 	tooLong := startRequest("deadline-long")
 	tooLong.Timeout = maximumRunTimeout + time.Second
-	if _, err = service.StartRun(context.Background(), "tenant_a", tooLong); !IsCode(err, CodeInvalidArgument) {
+	if _, err = service.StartRun(context.Background(), "organization_a", tooLong); !IsCode(err, CodeInvalidArgument) {
 		t.Fatalf("long timeout error=%v", err)
 	}
 }
@@ -66,29 +66,29 @@ func TestExpireRunsIsTerminalAndIdempotent(t *testing.T) {
 	service, store, _ := testService(now)
 	request := startRequest("expire-key")
 	request.Timeout = time.Minute
-	created, err := service.StartRun(context.Background(), "tenant_a", request)
+	created, err := service.StartRun(context.Background(), "organization_a", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant_a", WorkerID: "worker", Now: now, LeaseDuration: time.Hour})
+	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization_a", WorkerID: "worker", Now: now, LeaseDuration: time.Hour})
 	if err != nil || work == nil {
 		t.Fatalf("claim=%+v err=%v", work, err)
 	}
-	count, err := store.ExpireRuns(context.Background(), "tenant_a", now.Add(time.Minute), 10)
+	count, err := store.ExpireRuns(context.Background(), "organization_a", now.Add(time.Minute), 10)
 	if err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
-	run, _ := service.GetRun(context.Background(), "tenant_a", created.Run.ID)
+	run, _ := service.GetRun(context.Background(), "organization_a", created.Run.ID)
 	if run.Status != RunError {
 		t.Fatalf("status=%s", run.Status)
 	}
-	if _, err = store.RenewLease(context.Background(), RenewLeaseRequest{TenantID: "tenant_a", RunID: run.ID, AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now.Add(time.Minute), LeaseDuration: time.Minute}); !IsCode(err, CodeLeaseLost) {
+	if _, err = store.RenewLease(context.Background(), RenewLeaseRequest{OrganizationID: "organization_a", RunID: run.ID, AttemptID: work.Attempt.ID, WorkerID: "worker", FencingToken: work.Lease.FencingToken, Now: now.Add(time.Minute), LeaseDuration: time.Minute}); !IsCode(err, CodeLeaseLost) {
 		t.Fatalf("expired lease remained valid: %v", err)
 	}
-	if count, err = store.ExpireRuns(context.Background(), "tenant_a", now.Add(2*time.Minute), 10); err != nil || count != 0 {
+	if count, err = store.ExpireRuns(context.Background(), "organization_a", now.Add(2*time.Minute), 10); err != nil || count != 0 {
 		t.Fatalf("repeat count=%d err=%v", count, err)
 	}
-	events, _ := service.ListEvents(context.Background(), "tenant_a", run.ID, 0, 100)
+	events, _ := service.ListEvents(context.Background(), "organization_a", run.ID, 0, 100)
 	if events[len(events)-2].Type != "run.timed_out" || events[len(events)-1].Type != "run.error" {
 		t.Fatalf("events=%+v", events)
 	}
@@ -103,13 +103,13 @@ func TestOrchestratorDeadlineExpiresClaimedRunByID(t *testing.T) {
 	service := NewService(store, clock, &sequenceIDs{})
 	claimed := startRequest("deadline-claimed")
 	claimed.Timeout = minimumRunTimeout + time.Second
-	created, err := service.StartRun(context.Background(), "tenant_a", claimed)
+	created, err := service.StartRun(context.Background(), "organization_a", claimed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := startRequest("deadline-other")
 	other.Timeout = minimumRunTimeout
-	otherCreated, err := service.StartRun(context.Background(), "tenant_a", other)
+	otherCreated, err := service.StartRun(context.Background(), "organization_a", other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestOrchestratorDeadlineExpiresClaimedRunByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := orchestrator.Advance(context.Background(), "tenant_a")
+	result, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func (e streamingExecutorFunc) ExecuteStream(ctx context.Context, req ExecutionR
 func TestOrchestratorPersistsStreamChunksBeforeCompletion(t *testing.T) {
 	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
 	service, store, clock := testService(now)
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("stream-key"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("stream-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +179,11 @@ func TestOrchestratorPersistsStreamChunksBeforeCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := orchestrator.Advance(context.Background(), "tenant_a")
+	result, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || result.Run == nil || result.Run.Status != RunSuccess {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	events, err := service.ListEvents(context.Background(), "tenant_a", created.Run.ID, 0, 100)
+	events, err := service.ListEvents(context.Background(), "organization_a", created.Run.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,18 +210,18 @@ func TestOrchestratorPersistsStreamChunksBeforeCompletion(t *testing.T) {
 func TestAppendStreamChunkDeduplicatesByAttemptSequence(t *testing.T) {
 	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
 	service, store, _ := testService(now)
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("stream-dedup-key"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("stream-dedup-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker", Now: now, LeaseDuration: time.Minute,
 	})
 	if err != nil || work == nil {
 		t.Fatalf("claim=%+v err=%v", work, err)
 	}
 	request := AppendStreamChunkRequest{
-		TenantID: "tenant_a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: "organization_a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: "worker", FencingToken: work.Lease.FencingToken, Sequence: 1,
 		Now: now, Chunk: json.RawMessage(`{"content":"hello"}`),
 	}
@@ -237,7 +237,7 @@ func TestAppendStreamChunkDeduplicatesByAttemptSequence(t *testing.T) {
 	if _, err = store.AppendStreamChunk(context.Background(), request); !IsCode(err, CodeConflict) {
 		t.Fatalf("conflicting sequence error=%v", err)
 	}
-	events, err := service.ListEvents(context.Background(), "tenant_a", created.Run.ID, 0, 100)
+	events, err := service.ListEvents(context.Background(), "organization_a", created.Run.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

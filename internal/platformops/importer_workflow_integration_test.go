@@ -32,17 +32,13 @@ func TestImportWorkflowPreservesMetadataAndRejectsConflictingReplay(t *testing.T
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenantID, workflowID := "workflow_import_tenant_"+suffix, "workflow_import_"+suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants(id,name) VALUES($1,$1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM tenants WHERE id=$1`, tenantID) })
+	organizationID, workflowID := "workflow_import_organization_"+suffix, "workflow_import_"+suffix
 	importer, err := NewAdminImporter(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := ImportWorkflowRequest{
-		TenantID: tenantID, ActorID: "migration-admin", SourceSystem: "fenix",
+		OrganizationID: organizationID, ActorID: "migration-admin", SourceSystem: "fenix",
 		SourceWorkflowID: workflowID, WorkflowID: workflowID,
 		Name: "Customer onboarding", Description: "Preserved source description",
 	}
@@ -56,8 +52,8 @@ func TestImportWorkflowPreservesMetadataAndRejectsConflictingReplay(t *testing.T
 	if err = pool.QueryRow(ctx, `
 		SELECT workflow.name,workflow.description,marker.source_system
 		FROM workflows workflow JOIN workflow_imports marker
-		ON marker.tenant_id=workflow.tenant_id AND marker.workflow_id=workflow.id
-		WHERE workflow.tenant_id=$1 AND workflow.id=$2`, tenantID, workflowID,
+		ON marker.organization_id=workflow.organization_id AND marker.workflow_id=workflow.id
+		WHERE workflow.organization_id=$1 AND workflow.id=$2`, organizationID, workflowID,
 	).Scan(&name, &description, &sourceSystem); err != nil {
 		t.Fatal(err)
 	}

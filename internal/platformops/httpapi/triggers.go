@@ -7,13 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/platformops"
 )
 
 func (h *Handler) createTrigger(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body triggerBody
@@ -25,7 +24,7 @@ func (h *Handler) createTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trigger, err := h.services.Triggers.Create(r.Context(), platformops.CreateTriggerRequest{
-		TenantID: p.TenantID, ActorID: p.ActorID, WorkflowID: body.WorkflowID, Kind: body.Kind,
+		OrganizationID: p.OrganizationID, ActorID: p.ActorID, WorkflowID: body.WorkflowID, Kind: body.Kind,
 		Name: body.Name, Config: body.Config, ScheduleInterval: time.Duration(body.ScheduleIntervalSeconds) * time.Second,
 		MisfirePolicy: body.MisfirePolicy, FirstFireAt: body.FirstFireAt, SigningCredentialID: body.SigningCredentialID,
 		EventType: body.EventType, IdempotencyKey: key})
@@ -34,7 +33,7 @@ func (h *Handler) createTrigger(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleViewer, api.RoleEditor, api.RolePublisher, api.RoleOperator, api.RoleApprover, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var enabled *bool
@@ -46,7 +45,7 @@ func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
 		}
 		enabled = &value
 	}
-	items, err := h.services.Triggers.List(r.Context(), platformops.ListTriggersRequest{TenantID: p.TenantID,
+	items, err := h.services.Triggers.List(r.Context(), platformops.ListTriggersRequest{OrganizationID: p.OrganizationID,
 		WorkflowID: strings.TrimSpace(r.URL.Query().Get("workflowId")), Kind: platformops.TriggerKind(strings.TrimSpace(r.URL.Query().Get("kind"))),
 		Enabled: enabled, Limit: queryLimit(r, 100)})
 	respond(w, items, err, http.StatusOK)
@@ -54,16 +53,16 @@ func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getTrigger(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleViewer, api.RoleEditor, api.RolePublisher, api.RoleOperator, api.RoleApprover, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	trigger, err := h.services.Triggers.Get(r.Context(), p.TenantID, r.PathValue("id"))
+	trigger, err := h.services.Triggers.Get(r.Context(), p.OrganizationID, r.PathValue("id"))
 	respond(w, trigger, err, http.StatusOK)
 }
 
 func (h *Handler) updateTrigger(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	key, ok := mutationKey(w, r)
@@ -74,7 +73,7 @@ func (h *Handler) updateTrigger(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	trigger, err := h.services.Triggers.Update(r.Context(), platformops.UpdateTriggerRequest{TenantID: p.TenantID,
+	trigger, err := h.services.Triggers.Update(r.Context(), platformops.UpdateTriggerRequest{OrganizationID: p.OrganizationID,
 		ActorID: p.ActorID, TriggerID: r.PathValue("id"), Name: body.Name, Config: body.Config,
 		ScheduleInterval: time.Duration(body.ScheduleIntervalSeconds) * time.Second, MisfirePolicy: body.MisfirePolicy,
 		FirstFireAt: body.FirstFireAt, SigningCredentialID: body.SigningCredentialID, EventType: body.EventType,
@@ -84,7 +83,7 @@ func (h *Handler) updateTrigger(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) changeTriggerState(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	key, ok := mutationKey(w, r)
@@ -98,7 +97,7 @@ func (h *Handler) changeTriggerState(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	trigger, err := h.services.Triggers.ChangeState(r.Context(), platformops.ChangeTriggerStateRequest{TenantID: p.TenantID,
+	trigger, err := h.services.Triggers.ChangeState(r.Context(), platformops.ChangeTriggerStateRequest{OrganizationID: p.OrganizationID,
 		ActorID: p.ActorID, TriggerID: r.PathValue("id"), Enabled: body.Enabled,
 		ExpectedUpdatedAt: body.ExpectedUpdatedAt, IdempotencyKey: key, Now: time.Now().UTC()})
 	respond(w, trigger, err, http.StatusOK)
@@ -106,7 +105,7 @@ func (h *Handler) changeTriggerState(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deleteTrigger(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	key, ok := mutationKey(w, r)
@@ -118,7 +117,7 @@ func (h *Handler) deleteTrigger(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	err = h.services.Triggers.Delete(r.Context(), platformops.DeleteTriggerRequest{TenantID: p.TenantID, ActorID: p.ActorID,
+	err = h.services.Triggers.Delete(r.Context(), platformops.DeleteTriggerRequest{OrganizationID: p.OrganizationID, ActorID: p.ActorID,
 		TriggerID: r.PathValue("id"), ExpectedUpdatedAt: expected, IdempotencyKey: key})
 	if err != nil {
 		respond(w, nil, err, http.StatusNoContent)
@@ -152,7 +151,7 @@ type updateTriggerBody struct {
 
 func (h *Handler) fireTrigger(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -163,14 +162,14 @@ func (h *Handler) fireTrigger(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	firing, created, err := h.services.Triggers.Fire(r.Context(), platformops.FireRequest{TenantID: p.TenantID,
+	firing, created, err := h.services.Triggers.Fire(r.Context(), platformops.FireRequest{OrganizationID: p.OrganizationID,
 		TriggerID: r.PathValue("id"), ExpectedKind: body.Kind, DeduplicationKey: body.IdempotencyKey, Payload: body.Payload})
 	respond(w, map[string]any{"firing": firing, "created": created}, err, http.StatusOK)
 }
 
 func (h *Handler) receiveEvent(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -180,6 +179,6 @@ func (h *Handler) receiveEvent(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	firings, err := h.services.Triggers.ReceiveEvent(r.Context(), p.TenantID, r.PathValue("eventType"), body.EventID, body.Payload, time.Now().UTC())
+	firings, err := h.services.Triggers.ReceiveEvent(r.Context(), p.OrganizationID, r.PathValue("eventType"), body.EventID, body.Payload, time.Now().UTC())
 	respond(w, map[string]any{"firings": firings}, err, http.StatusAccepted)
 }

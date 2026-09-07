@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Trigger is safe tenant-owned trigger metadata without signing secrets.
+// Trigger is safe organization-owned trigger metadata without signing secrets.
 type Trigger struct {
 	ID                  string          `json:"id"`
 	PublicHash          string          `json:"publicHash"`
@@ -60,7 +60,7 @@ type TriggerFilter struct {
 	Limit            int
 }
 
-// ListTriggers returns tenant-owned triggers; tenant selection is intentionally absent.
+// ListTriggers returns organization-owned triggers; organization selection is intentionally absent.
 func (c *Client) ListTriggers(ctx context.Context, filter TriggerFilter) ([]Trigger, error) {
 	query := url.Values{}
 	if filter.WorkflowID != "" {
@@ -84,7 +84,7 @@ func (c *Client) ListTriggers(ctx context.Context, filter TriggerFilter) ([]Trig
 	return result, err
 }
 
-// GetTrigger returns one tenant-owned trigger.
+// GetTrigger returns one organization-owned trigger.
 func (c *Client) GetTrigger(ctx context.Context, triggerID string) (Trigger, error) {
 	var result Trigger
 	err := c.request(ctx, http.MethodGet, "/ops/triggers/"+url.PathEscape(triggerID), "", nil, &result)

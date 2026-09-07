@@ -68,17 +68,17 @@ func startRequest(key string) StartRunRequest {
 func TestStartRunSeparatesShadowIdempotencySemantics(t *testing.T) {
 	service, _, _ := testService(time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC))
 	normal := startRequest("shared-shadow-key")
-	first, err := service.StartRun(context.Background(), "tenant_a", normal)
+	first, err := service.StartRun(context.Background(), "organization_a", normal)
 	if err != nil || !first.Created {
 		t.Fatalf("normal start=%+v err=%v", first, err)
 	}
-	replay, err := service.StartRun(context.Background(), "tenant_a", normal)
+	replay, err := service.StartRun(context.Background(), "organization_a", normal)
 	if err != nil || replay.Created || replay.Run.ID != first.Run.ID {
 		t.Fatalf("normal replay=%+v err=%v", replay, err)
 	}
 	shadow := normal
 	shadow.Plan.Executor = "shadow-v1:builtin.start"
-	if _, err = service.StartRun(context.Background(), "tenant_a", shadow); !IsCode(err, CodeIdempotencyConflict) {
+	if _, err = service.StartRun(context.Background(), "organization_a", shadow); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("normal/shadow idempotency error=%v", err)
 	}
 }
@@ -86,23 +86,23 @@ func TestStartRunSeparatesShadowIdempotencySemantics(t *testing.T) {
 // 验证子工作流创建失败时不会遗留可执行子运行或占用幂等键。
 func TestStartSubworkflowCreatesChildAndLineageAtomically(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	parent, err := service.StartRun(context.Background(), "tenant_a", startRequest("parent-atomic"))
+	parent, err := service.StartRun(context.Background(), "organization_a", startRequest("parent-atomic"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
+	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
 	if err != nil || work == nil {
 		t.Fatalf("claim parent: work=%v err=%v", work, err)
 	}
 	request := StartSubworkflowRequest{ParentRunID: parent.Run.ID, ParentNodeID: work.Attempt.NodeID,
 		ParentAttemptID: "missing-attempt", ParentExecutionID: work.Attempt.ExecutionID, Plan: startRequest("unused").Plan,
 		Input: json.RawMessage(`{"child":true}`), IdempotencyKey: "child-atomic"}
-	if _, err = service.StartSubworkflow(context.Background(), "tenant_a", request); !IsCode(err, CodeNotFound) {
+	if _, err = service.StartSubworkflow(context.Background(), "organization_a", request); !IsCode(err, CodeNotFound) {
 		t.Fatalf("expected missing parent attempt, got %v", err)
 	}
 	standalone := startRequest("child-atomic")
 	standalone.Input = request.Input
-	created, err := service.StartRun(context.Background(), "tenant_a", standalone)
+	created, err := service.StartRun(context.Background(), "organization_a", standalone)
 	if err != nil || !created.Created {
 		t.Fatalf("failed child must not consume idempotency key: created=%v err=%v", created.Created, err)
 	}
@@ -111,22 +111,22 @@ func TestStartSubworkflowCreatesChildAndLineageAtomically(t *testing.T) {
 // 验证父运行取消会在同一租户内递归取消子运行并使其无法继续执行。
 func TestParentCancellationPropagatesToSubworkflow(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	parent, err := service.StartRun(context.Background(), "tenant_a", startRequest("parent-cancel"))
+	parent, err := service.StartRun(context.Background(), "organization_a", startRequest("parent-cancel"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	work, _ := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
-	child, err := service.StartSubworkflow(context.Background(), "tenant_a", StartSubworkflowRequest{
+	work, _ := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
+	child, err := service.StartSubworkflow(context.Background(), "organization_a", StartSubworkflowRequest{
 		ParentRunID: parent.Run.ID, ParentNodeID: work.Attempt.NodeID, ParentAttemptID: work.Attempt.ID, ParentExecutionID: work.Attempt.ExecutionID,
 		Plan: startRequest("unused").Plan, Input: json.RawMessage(`null`), IdempotencyKey: "child-cancel",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.CancelRun(context.Background(), "tenant_a", parent.Run.ID); err != nil {
+	if _, err = service.CancelRun(context.Background(), "organization_a", parent.Run.ID); err != nil {
 		t.Fatal(err)
 	}
-	childRun, err := service.GetRun(context.Background(), "tenant_a", child.Run.ID)
+	childRun, err := service.GetRun(context.Background(), "organization_a", child.Run.ID)
 	if err != nil || childRun.Status != RunCancelled || childRun.CancelRequestedAt == nil {
 		t.Fatalf("child cancellation did not propagate: run=%+v err=%v", childRun, err)
 	}
@@ -137,12 +137,12 @@ func TestParentDeadlinePropagatesToSubworkflow(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
 	request := startRequest("parent-deadline")
 	request.Timeout = time.Minute
-	parent, err := service.StartRun(context.Background(), "tenant_a", request)
+	parent, err := service.StartRun(context.Background(), "organization_a", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	work, _ := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{TenantID: "tenant_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
-	child, err := service.StartSubworkflow(context.Background(), "tenant_a", StartSubworkflowRequest{
+	work, _ := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{OrganizationID: "organization_a", WorkerID: "worker", Now: clock.Now(), LeaseDuration: time.Minute})
+	child, err := service.StartSubworkflow(context.Background(), "organization_a", StartSubworkflowRequest{
 		ParentRunID: parent.Run.ID, ParentNodeID: work.Attempt.NodeID, ParentAttemptID: work.Attempt.ID, ParentExecutionID: work.Attempt.ExecutionID,
 		Plan: startRequest("unused").Plan, Input: json.RawMessage(`null`), IdempotencyKey: "child-deadline",
 	})
@@ -152,10 +152,10 @@ func TestParentDeadlinePropagatesToSubworkflow(t *testing.T) {
 	if child.Run.DeadlineAt == nil || !child.Run.DeadlineAt.Equal(*parent.Run.DeadlineAt) {
 		t.Fatalf("child deadline=%v want %v", child.Run.DeadlineAt, parent.Run.DeadlineAt)
 	}
-	if changed, expireErr := store.ExpireRun(context.Background(), "tenant_a", parent.Run.ID, *parent.Run.DeadlineAt); expireErr != nil || !changed {
+	if changed, expireErr := store.ExpireRun(context.Background(), "organization_a", parent.Run.ID, *parent.Run.DeadlineAt); expireErr != nil || !changed {
 		t.Fatalf("expire parent: changed=%v err=%v", changed, expireErr)
 	}
-	childRun, _ := service.GetRun(context.Background(), "tenant_a", child.Run.ID)
+	childRun, _ := service.GetRun(context.Background(), "organization_a", child.Run.ID)
 	if childRun.Status != RunError {
 		t.Fatalf("child status=%s want ERROR", childRun.Status)
 	}
@@ -197,7 +197,7 @@ func TestStartRunConcurrentIdempotency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := service.StartRun(context.Background(), "tenant_a", startRequest("same-key"))
+			result, err := service.StartRun(context.Background(), "organization_a", startRequest("same-key"))
 			results <- result
 			errors <- err
 		}()
@@ -228,42 +228,42 @@ func TestStartRunConcurrentIdempotency(t *testing.T) {
 	}
 	conflict := startRequest("same-key")
 	conflict.Input = json.RawMessage(`{"message":"different"}`)
-	if _, err := service.StartRun(context.Background(), "tenant_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
+	if _, err := service.StartRun(context.Background(), "organization_a", conflict); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("expected idempotency conflict, got %v", err)
 	}
 }
 
 // 验证相同幂等键按租户隔离，跨租户读取不会泄漏运行数据。
-func TestTenantIsolation(t *testing.T) {
+func TestOrganizationIsolation(t *testing.T) {
 	service, _, _ := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	a, err := service.StartRun(context.Background(), "tenant_a", startRequest("key"))
+	a, err := service.StartRun(context.Background(), "organization_a", startRequest("key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := service.StartRun(context.Background(), "tenant_b", startRequest("key"))
+	b, err := service.StartRun(context.Background(), "organization_b", startRequest("key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.Run.ID == b.Run.ID {
-		t.Fatal("different tenants unexpectedly shared a run")
+		t.Fatal("different organizations unexpectedly shared a run")
 	}
-	if _, err := service.GetRun(context.Background(), "tenant_b", a.Run.ID); !IsCode(err, CodeNotFound) {
-		t.Fatalf("cross-tenant get returned %v", err)
+	if _, err := service.GetRun(context.Background(), "organization_b", a.Run.ID); !IsCode(err, CodeNotFound) {
+		t.Fatalf("cross-organization get returned %v", err)
 	}
-	if _, err := service.ListInterrupts(context.Background(), "tenant_b", a.Run.ID); !IsCode(err, CodeNotFound) {
-		t.Fatalf("cross-tenant interrupt list returned %v", err)
+	if _, err := service.ListInterrupts(context.Background(), "organization_b", a.Run.ID); !IsCode(err, CodeNotFound) {
+		t.Fatalf("cross-organization interrupt list returned %v", err)
 	}
 }
 
 // 验证租约过期后新 worker 接管并以 fencing token 拒绝旧 worker 提交。
 func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("lease"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("lease"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	first, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
 	})
 	if err != nil || first == nil {
 		t.Fatalf("first claim: work=%v err=%v", first, err)
@@ -272,14 +272,14 @@ func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 		t.Fatal("initial claim was marked as a takeover")
 	}
 	beforeExpiry, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker_2", Now: clock.Now().Add(30 * time.Second), LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker_2", Now: clock.Now().Add(30 * time.Second), LeaseDuration: time.Minute,
 	})
 	if err != nil || beforeExpiry != nil {
 		t.Fatalf("claim before expiry: work=%v err=%v", beforeExpiry, err)
 	}
 	takeoverAt := clock.Now().Add(time.Minute)
 	second, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker_2", Now: takeoverAt, LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker_2", Now: takeoverAt, LeaseDuration: time.Minute,
 	})
 	if err != nil || second == nil {
 		t.Fatalf("takeover claim: work=%v err=%v", second, err)
@@ -290,7 +290,7 @@ func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 	if second.Lease.FencingToken <= first.Lease.FencingToken {
 		t.Fatal("takeover did not advance fencing token")
 	}
-	events, err := store.ListEvents(context.Background(), "tenant_a", created.Run.ID, 0, 100)
+	events, err := store.ListEvents(context.Background(), "organization_a", created.Run.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 		t.Fatalf("unexpected claim events: counts=%v events=%+v", eventCounts, events)
 	}
 	_, err = store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: created.Run.ID, AttemptID: first.Attempt.ID,
+		OrganizationID: "organization_a", RunID: created.Run.ID, AttemptID: first.Attempt.ID,
 		WorkerID: "worker_1", FencingToken: first.Lease.FencingToken,
 		Now: takeoverAt.Add(time.Second), RunStatus: RunSuccess,
 	})
@@ -313,7 +313,7 @@ func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 		t.Fatalf("stale worker completion returned %v", err)
 	}
 	completed, err := store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: created.Run.ID, AttemptID: second.Attempt.ID,
+		OrganizationID: "organization_a", RunID: created.Run.ID, AttemptID: second.Attempt.ID,
 		WorkerID: "worker_2", FencingToken: second.Lease.FencingToken,
 		Now: takeoverAt.Add(time.Second), RunStatus: RunSuccess,
 	})
@@ -325,17 +325,17 @@ func TestLeaseExpiryTakeoverRejectsStaleFencingToken(t *testing.T) {
 // 验证运行中取消先进入 CANCELLING，并由 worker 调用 executor cancel 后终结。
 func TestCancellationIntentAndWorkerFinalization(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("cancel"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("cancel"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
 	})
 	if err != nil || work == nil {
 		t.Fatalf("claim: work=%v err=%v", work, err)
 	}
-	cancelled, err := service.CancelRun(context.Background(), "tenant_a", created.Run.ID)
+	cancelled, err := service.CancelRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || cancelled.Run.Status != RunCancelling {
 		t.Fatalf("cancel intent: result=%+v err=%v", cancelled, err)
 	}
@@ -356,14 +356,14 @@ func TestCancellationIntentAndWorkerFinalization(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Set(clock.Now().Add(time.Minute))
-	advanced, err := orchestrator.Advance(context.Background(), "tenant_a")
+	advanced, err := orchestrator.Advance(context.Background(), "organization_a")
 	if err != nil || advanced.Run == nil || advanced.Run.Status != RunCancelled {
 		t.Fatalf("cancel finalization: result=%+v err=%v", advanced, err)
 	}
 	if cancelCalls.Load() != 1 {
 		t.Fatalf("Cancel calls = %d, want 1", cancelCalls.Load())
 	}
-	repeated, err := service.CancelRun(context.Background(), "tenant_a", created.Run.ID)
+	repeated, err := service.CancelRun(context.Background(), "organization_a", created.Run.ID)
 	if err != nil || !repeated.AlreadyRequested {
 		t.Fatalf("repeated cancellation: result=%+v err=%v", repeated, err)
 	}
@@ -372,21 +372,21 @@ func TestCancellationIntentAndWorkerFinalization(t *testing.T) {
 // 验证取消 intent 与成功结果竞争时，内存适配器丢弃结果和后继并原子终结为 CANCELLED。
 func TestMemoryStoreCancellationWinsSuccessfulCompletion(t *testing.T) {
 	service, store, clock := testService(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	created, err := service.StartRun(context.Background(), "tenant_a", startRequest("cancel-wins-completion"))
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("cancel-wins-completion"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	work, err := store.ClaimAttempt(context.Background(), ClaimAttemptRequest{
-		TenantID: "tenant_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
+		OrganizationID: "organization_a", WorkerID: "worker_1", Now: clock.Now(), LeaseDuration: time.Minute,
 	})
 	if err != nil || work == nil {
 		t.Fatalf("claim: work=%+v err=%v", work, err)
 	}
-	if _, err = service.CancelRun(context.Background(), "tenant_a", created.Run.ID); err != nil {
+	if _, err = service.CancelRun(context.Background(), "organization_a", created.Run.ID); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := store.CompleteAttempt(context.Background(), CompleteAttemptRequest{
-		TenantID: "tenant_a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
+		OrganizationID: "organization_a", RunID: created.Run.ID, AttemptID: work.Attempt.ID,
 		WorkerID: "worker_1", FencingToken: work.Lease.FencingToken, Now: clock.Now(),
 		RunStatus: RunSuccess,
 		Output:    &Output{Inline: json.RawMessage(`{"must":"discard"}`)},
@@ -401,17 +401,17 @@ func TestMemoryStoreCancellationWinsSuccessfulCompletion(t *testing.T) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.outputs) != 0 || len(store.snapshots[scoped("tenant_a", created.Run.ID)]) != 0 {
+	if len(store.outputs) != 0 || len(store.snapshots[scoped("organization_a", created.Run.ID)]) != 0 {
 		t.Fatalf("cancelled completion persisted output/snapshot: outputs=%d snapshots=%d", len(store.outputs), len(store.snapshots))
 	}
-	if len(store.attemptOrder) != 1 || store.attempts[scoped("tenant_a", work.Attempt.ID)].Status != AttemptCancelled {
+	if len(store.attemptOrder) != 1 || store.attempts[scoped("organization_a", work.Attempt.ID)].Status != AttemptCancelled {
 		t.Fatalf("cancelled completion created successor or kept active attempt: order=%v attempts=%v", store.attemptOrder, store.attempts)
 	}
-	node := store.nodes[nodeScoped("tenant_a", created.Run.ID, work.Attempt.NodeID)]
+	node := store.nodes[nodeScoped("organization_a", created.Run.ID, work.Attempt.NodeID)]
 	if node.Status != NodeCancelled {
 		t.Fatalf("node status=%s", node.Status)
 	}
-	events := store.events[scoped("tenant_a", created.Run.ID)]
+	events := store.events[scoped("organization_a", created.Run.ID)]
 	if events[len(events)-1].Type != "run.cancelled" {
 		t.Fatalf("terminal event=%q events=%+v", events[len(events)-1].Type, events)
 	}
@@ -425,7 +425,7 @@ func TestMemoryStoreCancellationWinsSuccessfulCompletion(t *testing.T) {
 // 验证 Run 优先级只接受平台约定的有界范围，避免队列排序被极端输入操纵。
 func TestStartRunRejectsOutOfRangePriority(t *testing.T) {
 	service := NewService(NewMemoryStore(), &fakeClock{now: time.Unix(100, 0)}, &sequenceIDs{})
-	_, err := service.StartRun(context.Background(), "tenant_a", StartRunRequest{
+	_, err := service.StartRun(context.Background(), "organization_a", StartRunRequest{
 		Plan:  PlanRef{ID: "plan_1", Hash: "hash_1", EntryNodeID: "start", Executor: "builtin"},
 		Input: json.RawMessage(`{}`), IdempotencyKey: "priority-key", Priority: 1001,
 	})
@@ -441,11 +441,11 @@ func TestStartRunPriorityParticipatesInIdempotency(t *testing.T) {
 		Plan:  PlanRef{ID: "plan_1", Hash: "hash_1", EntryNodeID: "start", Executor: "builtin"},
 		Input: json.RawMessage(`{}`), IdempotencyKey: "priority-key", Priority: 10,
 	}
-	if _, err := service.StartRun(context.Background(), "tenant_a", request); err != nil {
+	if _, err := service.StartRun(context.Background(), "organization_a", request); err != nil {
 		t.Fatal(err)
 	}
 	request.Priority = 20
-	if _, err := service.StartRun(context.Background(), "tenant_a", request); !IsCode(err, CodeIdempotencyConflict) {
+	if _, err := service.StartRun(context.Background(), "organization_a", request); !IsCode(err, CodeIdempotencyConflict) {
 		t.Fatalf("StartRun() replay error = %v", err)
 	}
 }

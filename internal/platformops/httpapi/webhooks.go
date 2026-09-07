@@ -4,22 +4,21 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/platformops"
 )
 
 func (h *Handler) listWebhookSubscriptions(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleOperator, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	items, err := h.services.Webhooks.List(r.Context(), p.TenantID, queryLimit(r, 100))
+	items, err := h.services.Webhooks.List(r.Context(), p.OrganizationID, queryLimit(r, 100))
 	respond(w, items, err, http.StatusOK)
 }
 
 func (h *Handler) createWebhookSubscription(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
 	var body struct {
@@ -33,7 +32,7 @@ func (h *Handler) createWebhookSubscription(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	item, err := h.services.Webhooks.Create(r.Context(), platformops.CreateOutboundWebhookRequest{
-		TenantID: p.TenantID, ActorID: p.ActorID, Name: body.Name, EndpointURL: body.EndpointURL,
+		OrganizationID: p.OrganizationID, ActorID: p.ActorID, Name: body.Name, EndpointURL: body.EndpointURL,
 		EventTypes: body.EventTypes, SigningCredentialID: body.SigningCredentialID,
 		Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,
 	})
@@ -50,18 +49,18 @@ func (h *Handler) disableWebhookSubscription(w http.ResponseWriter, r *http.Requ
 
 func (h *Handler) setWebhookSubscriptionEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	item, err := h.services.Webhooks.SetEnabled(r.Context(), p.TenantID, r.PathValue("id"), p.ActorID, enabled, time.Now().UTC())
+	item, err := h.services.Webhooks.SetEnabled(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, enabled, time.Now().UTC())
 	respond(w, item, err, http.StatusOK)
 }
 
 func (h *Handler) deleteWebhookSubscription(w http.ResponseWriter, r *http.Request) {
 	p, ok := principal(w, r)
-	if !ok || !requireRole(w, p, api.RoleAdmin) {
+	if !ok {
 		return
 	}
-	err := h.services.Webhooks.Delete(r.Context(), p.TenantID, r.PathValue("id"), p.ActorID, time.Now().UTC())
+	err := h.services.Webhooks.Delete(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, time.Now().UTC())
 	respond(w, map[string]bool{"deleted": err == nil}, err, http.StatusOK)
 }

@@ -42,7 +42,7 @@ type TargetAttestation struct {
 
 // Target is the privileged write boundary used by the one-time migration runner.
 type Target interface {
-	EnsureTenant(context.Context, string, string) error
+	EnsureOrganization(context.Context, string, string) error
 	ImportWorkflow(context.Context, platformops.ImportWorkflowRequest) (bool, error)
 	ImportVersion(context.Context, string, string, uint64, workflow.WorkflowDefinition, string) (ImportedVersion, bool, error)
 	ImportDraft(context.Context, string, string, string, workflow.WorkflowDefinition, string) (bool, error)
@@ -82,33 +82,23 @@ func NewPostgresTarget(pool *pgxpool.Pool) (*PostgresTarget, error) {
 	return &PostgresTarget{pool: pool, definitions: definitions, admin: admin}, nil
 }
 
-// EnsureTenant creates a migration tenant or verifies that an existing one is active.
-func (t *PostgresTarget) EnsureTenant(ctx context.Context, tenantID, name string) error {
-	if tenantID == "" || name == "" {
-		return errors.New("tenant id and name are required")
-	}
-	if _, err := t.pool.Exec(ctx, `INSERT INTO tenants (id,name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, tenantID, name); err != nil {
-		return fmt.Errorf("ensure migration tenant: %w", err)
-	}
-	var status string
-	if err := t.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id=$1`, tenantID).Scan(&status); err != nil {
-		return fmt.Errorf("verify migration tenant: %w", err)
-	}
-	if status != "active" {
-		return errors.New("migration tenant is not active")
+// EnsureOrganization validates the opaque Fenix organization scope without persisting a local registry.
+func (t *PostgresTarget) EnsureOrganization(_ context.Context, organizationID, name string) error {
+	if organizationID == "" || name == "" {
+		return errors.New("organization id and name are required")
 	}
 	return nil
 }
 
 // ImportVersion preserves source ordering through Definition's administrative seam.
-func (t *PostgresTarget) ImportVersion(ctx context.Context, tenantID, workflowID string, sourceVersion uint64, value workflow.WorkflowDefinition, key string) (ImportedVersion, bool, error) {
-	published, created, err := t.definitions.ImportVersion(ctx, tenantID, workflowID, definition.ImportVersionCommand{
+func (t *PostgresTarget) ImportVersion(ctx context.Context, organizationID, workflowID string, sourceVersion uint64, value workflow.WorkflowDefinition, key string) (ImportedVersion, bool, error) {
+	published, created, err := t.definitions.ImportVersion(ctx, organizationID, workflowID, definition.ImportVersionCommand{
 		Definition: value, SourceVersion: sourceVersion, IdempotencyKey: key,
 	})
 	if err != nil {
 		return ImportedVersion{}, false, err
 	}
-	version, err := t.definitions.GetVersion(ctx, tenantID, workflowID, sourceVersion)
+	version, err := t.definitions.GetVersion(ctx, organizationID, workflowID, sourceVersion)
 	if err != nil {
 		return ImportedVersion{}, false, err
 	}
@@ -119,12 +109,12 @@ func (t *PostgresTarget) ImportVersion(ctx context.Context, tenantID, workflowID
 }
 
 // ImportDraft stores a FlowGram adapter document derived from the converted canonical model.
-func (t *PostgresTarget) ImportDraft(ctx context.Context, tenantID, workflowID, actorID string, value workflow.WorkflowDefinition, key string) (bool, error) {
+func (t *PostgresTarget) ImportDraft(ctx context.Context, organizationID, workflowID, actorID string, value workflow.WorkflowDefinition, key string) (bool, error) {
 	document, err := flowgramDocument(value)
 	if err != nil {
 		return false, err
 	}
-	result, err := t.definitions.CreateDraftWithResult(ctx, tenantID, definition.CreateDraftCommand{
+	result, err := t.definitions.CreateDraftWithResult(ctx, organizationID, definition.CreateDraftCommand{
 		WorkflowID: workflowID, Document: document, ActorID: actorID, IdempotencyKey: key,
 	})
 	if errors.Is(err, definition.ErrRevisionConflict) {

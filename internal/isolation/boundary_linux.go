@@ -98,7 +98,7 @@ func createAttemptCgroup(request Request, limits resolvedLimits) (*attemptCgroup
 	if err != nil || !containsWord(string(enabled), "pids") || !containsWord(string(enabled), "memory") {
 		return nil, errResourceLimitsUnavailable
 	}
-	digest := sha256.Sum256([]byte(request.TenantID + "\x00" + request.RunID + "\x00" + request.AttemptID + "\x00" + strconv.FormatUint(request.FencingToken, 10)))
+	digest := sha256.Sum256([]byte(request.OrganizationID + "\x00" + request.RunID + "\x00" + request.AttemptID + "\x00" + strconv.FormatUint(request.FencingToken, 10)))
 	path := filepath.Join(cleanRoot, fmt.Sprintf("attempt-%x", digest[:12]))
 	if err = os.Mkdir(path, 0o700); err != nil {
 		return nil, errResourceLimitsUnavailable

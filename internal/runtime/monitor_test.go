@@ -30,13 +30,13 @@ func TestRedactRunDetailsHidesSecretsAndSensitiveOutput(t *testing.T) {
 }
 
 // 验证列表过滤的租户边界和状态约束由内存规格实现保持。
-func TestMemoryMonitorListRunsIsTenantScoped(t *testing.T) {
+func TestMemoryMonitorListRunsIsOrganizationScoped(t *testing.T) {
 	store := NewMemoryStore()
 	service := NewService(store, &fakeClock{now: time.Unix(100, 0)}, &sequenceIDs{})
-	_, _ = service.StartRun(context.Background(), "tenant_a", StartRunRequest{Plan: PlanRef{ID: "plan-a", Hash: "hash-a"}, Input: json.RawMessage(`{}`), IdempotencyKey: "tenant-a-run"})
-	_, _ = service.StartRun(context.Background(), "tenant_b", StartRunRequest{Plan: PlanRef{ID: "plan-b", Hash: "hash-b"}, Input: json.RawMessage(`{}`), IdempotencyKey: "tenant-b-run"})
-	items, err := service.ListRuns(context.Background(), "tenant_a", RunFilter{Status: RunPending, Limit: 20})
-	if err != nil || len(items) != 1 || items[0].Run.TenantID != "tenant_a" {
+	_, _ = service.StartRun(context.Background(), "organization_a", StartRunRequest{Plan: PlanRef{ID: "plan-a", Hash: "hash-a"}, Input: json.RawMessage(`{}`), IdempotencyKey: "organization-a-run"})
+	_, _ = service.StartRun(context.Background(), "organization_b", StartRunRequest{Plan: PlanRef{ID: "plan-b", Hash: "hash-b"}, Input: json.RawMessage(`{}`), IdempotencyKey: "organization-b-run"})
+	items, err := service.ListRuns(context.Background(), "organization_a", RunFilter{Status: RunPending, Limit: 20})
+	if err != nil || len(items) != 1 || items[0].Run.OrganizationID != "organization_a" {
 		t.Fatalf("items=%+v err=%v", items, err)
 	}
 }

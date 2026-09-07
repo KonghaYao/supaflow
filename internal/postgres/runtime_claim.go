@@ -12,18 +12,18 @@ import (
 )
 
 const selectRuntimeAttemptForClaimSQL = `
-SELECT a.id, a.execution_id, a.tenant_id, a.run_id, a.node_state_id, a.node_id, a.executor,
+SELECT a.id, a.execution_id, a.organization_id, a.run_id, a.node_state_id, a.node_id, a.executor,
        a.attempt_number, a.status, a.input, a.resume_data, a.available_at, a.started_at,
        a.finished_at, COALESCE(a.error->>'code', ''), a.created_at, a.updated_at
 FROM node_attempts a
-JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
+JOIN runs r ON r.organization_id = a.organization_id AND r.id = a.run_id
 JOIN admission_entries admission
-  ON admission.tenant_id = r.tenant_id
+  ON admission.organization_id = r.organization_id
  AND admission.resource_type = 'run'
  AND admission.resource_id = r.id
  AND admission.status = 'active'
-LEFT JOIN worker_leases l ON l.tenant_id = a.tenant_id AND l.attempt_id = a.id
-WHERE a.tenant_id = $1 AND a.available_at <= $2
+LEFT JOIN worker_leases l ON l.organization_id = a.organization_id AND l.attempt_id = a.id
+WHERE a.organization_id = $1 AND a.available_at <= $2
 	AND (r.deadline_at IS NULL OR r.deadline_at > $2)
   AND (
       (r.status IN ('pending', 'running') AND a.status IN ('pending', 'retry_ready'))
@@ -36,7 +36,7 @@ LIMIT 1`
 // ClaimAttempt claims one ready attempt or takes over an expired lease.
 func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime.ClaimAttemptRequest) (*workflowruntime.WorkItem, error) {
 	request.Now = timeOrNow(request.Now)
-	if _, err := s.ExpireRuns(ctx, request.TenantID, request.Now, 100); err != nil {
+	if _, err := s.ExpireRuns(ctx, request.OrganizationID, request.Now, 100); err != nil {
 		return nil, err
 	}
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -48,14 +48,14 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
 	}
-	if err = resumeDueTimer(ctx, tx, request.TenantID, databaseNow); err != nil {
+	if err = resumeDueTimer(ctx, tx, request.OrganizationID, databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not resume due timer", err)
 	}
 	var work workflowruntime.WorkItem
-	var tenantID, attemptStatus string
+	var organizationID, attemptStatus string
 	var nodeStateID string
-	err = tx.QueryRow(ctx, selectRuntimeAttemptForClaimSQL, string(request.TenantID), databaseNow).Scan(
-		&work.Attempt.ID, &work.Attempt.ExecutionID, &tenantID, &work.Attempt.RunID, &nodeStateID,
+	err = tx.QueryRow(ctx, selectRuntimeAttemptForClaimSQL, string(request.OrganizationID), databaseNow).Scan(
+		&work.Attempt.ID, &work.Attempt.ExecutionID, &organizationID, &work.Attempt.RunID, &nodeStateID,
 		&work.Attempt.NodeID, &work.Attempt.Executor, &work.Attempt.Number,
 		&attemptStatus, &work.Attempt.Input, &work.Attempt.ResumeData, &work.Attempt.NextAttemptAt,
 		&work.Attempt.StartedAt, &work.Attempt.FinishedAt, &work.Attempt.ErrorCode,
@@ -67,26 +67,26 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 	if err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not select claimable attempt", err)
 	}
-	work.Attempt.TenantID = workflowruntime.TenantID(tenantID)
+	work.Attempt.OrganizationID = workflowruntime.OrganizationID(organizationID)
 	work.Attempt.Status = runtimeAttemptStatus(attemptStatus)
 	tookOver := attemptStatus == "running"
 	work.Takeover = tookOver
 	work.Lease = workflowruntime.Lease{
-		TenantID: request.TenantID, RunID: work.Attempt.RunID,
+		OrganizationID: request.OrganizationID, RunID: work.Attempt.RunID,
 		AttemptID: work.Attempt.ID, WorkerID: request.WorkerID,
 		ExpiresAt: databaseNow.Add(request.LeaseDuration), UpdatedAt: databaseNow,
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO worker_leases (
-		    attempt_id, tenant_id, run_id, worker_id, fencing_token, acquired_at, expires_at
+		    attempt_id, organization_id, run_id, worker_id, fencing_token, acquired_at, expires_at
 		) VALUES ($1, $2, $3, $4, 1, $5, $6)
 		ON CONFLICT (attempt_id) DO UPDATE SET
 		    worker_id = EXCLUDED.worker_id,
 		    fencing_token = worker_leases.fencing_token + 1,
 		    acquired_at = EXCLUDED.acquired_at,
 		    expires_at = EXCLUDED.expires_at
-		WHERE worker_leases.tenant_id = EXCLUDED.tenant_id
-		RETURNING fencing_token`, work.Attempt.ID, request.TenantID, work.Attempt.RunID,
+		WHERE worker_leases.organization_id = EXCLUDED.organization_id
+		RETURNING fencing_token`, work.Attempt.ID, request.OrganizationID, work.Attempt.RunID,
 		request.WorkerID, databaseNow, work.Lease.ExpiresAt,
 	).Scan(&work.Lease.FencingToken)
 	if err != nil {
@@ -96,29 +96,29 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 		UPDATE node_attempts
 		SET status = 'running', worker_id = $3, fencing_token = $4,
 		    started_at = COALESCE(started_at, $5), updated_at = $5
-		WHERE tenant_id = $1 AND id = $2`, request.TenantID, work.Attempt.ID,
+		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, work.Attempt.ID,
 		request.WorkerID, work.Lease.FencingToken, databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark attempt running", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'running', updated_at = $3
-		WHERE tenant_id = $1 AND id = $2`, request.TenantID, nodeStateID, databaseNow); err != nil {
+		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID, databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark node running", err)
 	}
 	var firstStart bool
 	err = tx.QueryRow(ctx, `
 		WITH pending_run AS (
-		    SELECT tenant_id, id, started_at
+		    SELECT organization_id, id, started_at
 		    FROM runs
-		    WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
+		    WHERE organization_id = $1 AND id = $2 AND status = 'pending'
 		    FOR UPDATE
 		)
 		UPDATE runs AS r
 		SET status = 'running', started_at = COALESCE(r.started_at, $3),
 		    updated_at = $3, version = r.version + 1
 		FROM pending_run AS pending
-		WHERE r.tenant_id = pending.tenant_id AND r.id = pending.id
-		RETURNING pending.started_at IS NULL`, request.TenantID, work.Attempt.RunID, databaseNow).Scan(&firstStart)
+		WHERE r.organization_id = pending.organization_id AND r.id = pending.id
+		RETURNING pending.started_at IS NULL`, request.OrganizationID, work.Attempt.RunID, databaseNow).Scan(&firstStart)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark run running", err)
 	}
@@ -137,35 +137,35 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 	if tookOver {
 		claimEvents = append(claimEvents, workflowruntime.Event{Type: "attempt.lease_taken_over", Data: claimPayload})
 	}
-	if _, err = appendRuntimeEvents(ctx, tx, request.TenantID, work.Attempt.RunID, claimEvents); err != nil {
+	if _, err = appendRuntimeEvents(ctx, tx, request.OrganizationID, work.Attempt.RunID, claimEvents); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not persist claim events", err)
 	}
-	work.Run, err = scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.TenantID), work.Attempt.RunID))
+	work.Run, err = scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), work.Attempt.RunID))
 	if err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not read claimed run", err)
 	}
 	err = tx.QueryRow(ctx, `
-		SELECT tenant_id, run_id, node_id, status, attempt_count, latest_attempt_id, updated_at
-		FROM node_states WHERE tenant_id = $1 AND id = $2`, request.TenantID, nodeStateID).Scan(
-		&tenantID, &work.Node.RunID, &work.Node.NodeID, &attemptStatus,
+		SELECT organization_id, run_id, node_id, status, attempt_count, latest_attempt_id, updated_at
+		FROM node_states WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID).Scan(
+		&organizationID, &work.Node.RunID, &work.Node.NodeID, &attemptStatus,
 		&work.Node.AttemptCount, &work.Node.LatestAttemptID, &work.Node.UpdatedAt,
 	)
 	if err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not read claimed node", err)
 	}
-	work.Node.TenantID = workflowruntime.TenantID(tenantID)
+	work.Node.OrganizationID = workflowruntime.OrganizationID(organizationID)
 	work.Node.Status = runtimeNodeStatus(attemptStatus)
 	var snapshot workflowruntime.Snapshot
-	var snapshotTenant string
+	var snapshotOrganization string
 	snapshotErr := tx.QueryRow(ctx, `
-		SELECT id, tenant_id, run_id, attempt_id, sequence, state, created_at
+		SELECT id, organization_id, run_id, attempt_id, sequence, state, created_at
 		FROM run_snapshots
-		WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
-		ORDER BY sequence DESC LIMIT 1`, request.TenantID, work.Attempt.RunID, work.Attempt.ID).Scan(
-		&snapshot.ID, &snapshotTenant, &snapshot.RunID, &snapshot.AttemptID,
+		WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+		ORDER BY sequence DESC LIMIT 1`, request.OrganizationID, work.Attempt.RunID, work.Attempt.ID).Scan(
+		&snapshot.ID, &snapshotOrganization, &snapshot.RunID, &snapshot.AttemptID,
 		&snapshot.Sequence, &snapshot.Data, &snapshot.CreatedAt)
 	if snapshotErr == nil {
-		snapshot.TenantID = workflowruntime.TenantID(snapshotTenant)
+		snapshot.OrganizationID = workflowruntime.OrganizationID(snapshotOrganization)
 		work.Snapshot = &snapshot
 	} else if !errors.Is(snapshotErr, pgx.ErrNoRows) {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not read run snapshot", snapshotErr)
@@ -185,7 +185,7 @@ func (s *RuntimeStore) RenewLease(ctx context.Context, request workflowruntime.R
 		return workflowruntime.Lease{}, runtimeError(workflowruntime.CodeInvalidArgument, "lease duration must be positive", nil)
 	}
 	lease := workflowruntime.Lease{
-		TenantID: request.TenantID, RunID: request.RunID, AttemptID: request.AttemptID,
+		OrganizationID: request.OrganizationID, RunID: request.RunID, AttemptID: request.AttemptID,
 		WorkerID: request.WorkerID, FencingToken: request.FencingToken,
 	}
 	err := s.repository.pool.QueryRow(ctx, `
@@ -193,11 +193,11 @@ func (s *RuntimeStore) RenewLease(ctx context.Context, request workflowruntime.R
 		UPDATE worker_leases lease
 		SET expires_at = coordination_clock.current_time + $6 * interval '1 millisecond'
 		FROM coordination_clock
-		WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
+		WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
 		  AND worker_id = $4 AND fencing_token = $5
 		  AND expires_at > coordination_clock.current_time
 		RETURNING lease.expires_at, coordination_clock.current_time`,
-		request.TenantID, request.RunID, request.AttemptID, request.WorkerID,
+		request.OrganizationID, request.RunID, request.AttemptID, request.WorkerID,
 		request.FencingToken, request.LeaseDuration.Milliseconds()).Scan(&lease.ExpiresAt, &lease.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -227,16 +227,16 @@ func runtimeNodeStatus(status string) workflowruntime.NodeStatus {
 
 func timePointerRuntime(value time.Time) *time.Time { return &value }
 
-func validateRuntimeLease(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, runID, attemptID, workerID string, fencingToken uint64, _ time.Time) (string, string, error) {
+func validateRuntimeLease(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, runID, attemptID, workerID string, fencingToken uint64, _ time.Time) (string, string, error) {
 	var nodeStateID, nodeID string
 	err := tx.QueryRow(ctx, `
 		SELECT a.node_state_id, a.node_id
 		FROM node_attempts a
-		JOIN worker_leases l ON l.tenant_id = a.tenant_id AND l.attempt_id = a.id
-		WHERE a.tenant_id = $1 AND a.run_id = $2 AND a.id = $3
+		JOIN worker_leases l ON l.organization_id = a.organization_id AND l.attempt_id = a.id
+		WHERE a.organization_id = $1 AND a.run_id = $2 AND a.id = $3
 		  AND a.status = 'running' AND a.worker_id = $4 AND a.fencing_token = $5
 		  AND l.worker_id = $4 AND l.fencing_token = $5 AND l.expires_at > clock_timestamp()
-		FOR UPDATE OF a, l`, tenantID, runID, attemptID, workerID, fencingToken).Scan(&nodeStateID, &nodeID)
+		FOR UPDATE OF a, l`, organizationID, runID, attemptID, workerID, fencingToken).Scan(&nodeStateID, &nodeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", runtimeError(workflowruntime.CodeStaleFencingToken, "attempt lease is stale", ErrStaleLease)
 	}

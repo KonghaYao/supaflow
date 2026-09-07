@@ -35,10 +35,7 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
-	tenantID, workflowID := "shadow_tenant_"+suffix, "shadow_flow_"+suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ($1, $1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
+	organizationID, workflowID := "shadow_organization_"+suffix, "shadow_flow_"+suffix
 	definition := workflow.WorkflowDefinition{
 		SchemaVersion: workflow.DefinitionSchemaV1,
 		ID:            workflowID,
@@ -56,7 +53,7 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 		AllowedCapabilities: workflow.CapabilitySet{Cancellable: true, Idempotent: true},
 		AllowedPermissions:  workflow.PermissionSet{Network: true, Credentials: true},
 	})
-	published, _, err := catalog.Publish(ctx, tenantID, workflowID, definition, "publish_shadow_"+suffix)
+	published, _, err := catalog.Publish(ctx, organizationID, workflowID, definition, "publish_shadow_"+suffix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +62,7 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := service.Start(ctx, tenantID, shadowrun.StartRequest{
+	started, err := service.Start(ctx, organizationID, shadowrun.StartRequest{
 		PlanID: published.ID, PlanHash: published.Hash, Input: json.RawMessage(`{"order":42}`),
 		StubBindings:   map[string]string{"request": workflow.ShadowStubExecutorKind},
 		IdempotencyKey: "shadow_run_" + suffix,
@@ -78,7 +75,7 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, err := NewRuntimeStore(pool).ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "shadow_worker", LeaseDuration: time.Minute,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), WorkerID: "shadow_worker", LeaseDuration: time.Minute,
 	})
 	if err != nil || first == nil || first.Attempt.Executor != "shadow-v1:builtin.start" {
 		t.Fatalf("first claim=%+v err=%v", first, err)
@@ -88,14 +85,14 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 		t.Fatalf("first execute=%+v err=%v", firstResult, err)
 	}
 	if _, err = store.CompleteAttempt(ctx, workflowruntime.CompleteAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), RunID: first.Run.ID, AttemptID: first.Attempt.ID,
+		OrganizationID: workflowruntime.OrganizationID(organizationID), RunID: first.Run.ID, AttemptID: first.Attempt.ID,
 		WorkerID: "shadow_worker", FencingToken: first.Lease.FencingToken, Now: first.Lease.UpdatedAt,
 		RunStatus: workflowruntime.RunRunning, Output: firstResult.Output, Next: firstResult.Next,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	second, err := NewRuntimeStore(pool).ClaimAttempt(ctx, workflowruntime.ClaimAttemptRequest{
-		TenantID: workflowruntime.TenantID(tenantID), WorkerID: "shadow_worker_after_restart",
+		OrganizationID: workflowruntime.OrganizationID(organizationID), WorkerID: "shadow_worker_after_restart",
 		LeaseDuration: time.Minute,
 	})
 	if err != nil || second == nil || second.Attempt.NodeID != "request" || second.Attempt.Executor != "shadow-v1:builtin.shadow-noop.v1" {
@@ -109,7 +106,7 @@ func TestPostgresShadowRunPreservesStubModeAcrossClaims(t *testing.T) {
 
 func executionRequestFromClaim(work *workflowruntime.WorkItem) workflowruntime.ExecutionRequest {
 	return workflowruntime.ExecutionRequest{
-		TenantID: work.Run.TenantID, RunID: work.Run.ID, Plan: work.Run.Plan,
+		OrganizationID: work.Run.OrganizationID, RunID: work.Run.ID, Plan: work.Run.Plan,
 		NodeID: work.Attempt.NodeID, AttemptID: work.Attempt.ID, ExecutionID: work.Attempt.ExecutionID,
 		Attempt: work.Attempt.Number, Executor: work.Attempt.Executor, Input: work.Attempt.Input,
 		FencingToken: work.Lease.FencingToken, Takeover: work.Takeover,

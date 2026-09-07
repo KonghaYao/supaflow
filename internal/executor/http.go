@@ -383,7 +383,7 @@ func isForbiddenRequestHeader(name string) bool {
 
 func attemptIdempotencyKey(req workflowruntime.ExecutionRequest) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte(req.TenantID))
+	_, _ = digest.Write([]byte(req.OrganizationID))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(req.RunID))
 	_, _ = digest.Write([]byte{0})

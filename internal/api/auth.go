@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/pazhou/supaflow/internal/identity"
+	"github.com/pazhou/supaflow/internal/organization"
 )
 
 const (
@@ -16,20 +16,8 @@ const (
 	maxOrganizationID  = 128
 )
 
-// Role remains an alias while handlers migrate away from Supaflow business RBAC.
-type Role = identity.Role
-
-const (
-	RoleViewer    = identity.RoleViewer
-	RoleEditor    = identity.RoleEditor
-	RolePublisher = identity.RolePublisher
-	RoleOperator  = identity.RoleOperator
-	RoleApprover  = identity.RoleApprover
-	RoleAdmin     = identity.RoleAdmin
-)
-
 // Principal is the authenticated organization context injected into requests.
-type Principal = identity.Principal
+type Principal = organization.Principal
 
 // Authenticator validates platform master keys and injects Fenix organization scope.
 type Authenticator struct {
@@ -72,8 +60,8 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			writeProblem(w, r, http.StatusBadRequest, "invalid_organization", organizationHeader+" is required and must be valid")
 			return
 		}
-		principal := Principal{TenantID: organizationID, ActorID: "fenix", Role: RoleAdmin}
-		protected.ServeHTTP(w, r.WithContext(identity.ContextWithPrincipal(r.Context(), principal)))
+		principal := Principal{OrganizationID: organizationID, ActorID: "fenix"}
+		protected.ServeHTTP(w, r.WithContext(organization.ContextWithPrincipal(r.Context(), principal)))
 	})
 }
 
@@ -114,8 +102,5 @@ func (a *Authenticator) SetRequestMiddleware(middleware func(http.Handler) http.
 
 // PrincipalFromContext returns the authenticated principal.
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
-	return identity.PrincipalFromContext(ctx)
+	return organization.PrincipalFromContext(ctx)
 }
-
-// SessionCookieName remains for the unchanged Studio/identity tables during this transition.
-const SessionCookieName = "__Host-supaflow_session"

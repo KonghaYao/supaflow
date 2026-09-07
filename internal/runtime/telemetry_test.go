@@ -17,7 +17,7 @@ func TestStartRunCallsTelemetry(t *testing.T) {
 	telemetry := &runtimeTelemetry{}
 	service := NewService(NewMemoryStore(), nil, nil)
 	service.SetTelemetry(telemetry)
-	if _, err := service.StartRun(context.Background(), "tenant", startRequest("telemetry-start")); err != nil {
+	if _, err := service.StartRun(context.Background(), "organization", startRequest("telemetry-start")); err != nil {
 		t.Fatal(err)
 	}
 	if len(telemetry.operations) != 1 || telemetry.operations[0] != "runtime.start" {

@@ -33,13 +33,9 @@ func TestAPIMutationAuditAndDomainCommitAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	tenantID, workflowID := "atomic_"+suffix, "workflow_"+suffix
-	if _, err = pool.Exec(ctx, `INSERT INTO tenants(id,name) VALUES($1,$1)`, tenantID); err != nil {
-		t.Fatal(err)
-	}
+	organizationID, workflowID := "atomic_"+suffix, "workflow_"+suffix
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM audit_records WHERE tenant_id=$1`, tenantID)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM tenants WHERE id=$1`, tenantID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM audit_records WHERE organization_id=$1`, organizationID)
 	})
 	definition := workflow.WorkflowDefinition{SchemaVersion: workflow.DefinitionSchemaV1, ID: workflowID,
 		Nodes: []workflow.NodeDefinition{
@@ -47,25 +43,25 @@ func TestAPIMutationAuditAndDomainCommitAreAtomic(t *testing.T) {
 			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
 		}, Edges: []workflow.EdgeDefinition{{ID: "edge", FromNode: "start", FromPort: "input", ToNode: "end", ToPort: "result"}}}
 	catalog := NewPlanCatalog(pool, workflow.BuiltinRegistry(), workflow.CompilePolicy{AllowedCapabilities: workflow.CapabilitySet{Idempotent: true}})
-	failed := apimutation.New(tenantID, "publisher", "workflow.publish", "workflow", workflowID, "atomic-failure-key", "POST", "/v1/workflows/x/publish", []byte(`{}`), "")
-	if _, err = pool.Exec(ctx, `INSERT INTO audit_records(id,tenant_id,actor_id,action,resource_type,resource_id,outcome,operation_id) VALUES($1,$2,'other','other','workflow',$3,'allowed',$4)`, "audit_conflict_"+suffix, tenantID, workflowID, failed.ID); err != nil {
+	failed := apimutation.New(organizationID, "publisher", "workflow.publish", "workflow", workflowID, "atomic-failure-key", "POST", "/v1/workflows/x/publish", []byte(`{}`), "")
+	if _, err = pool.Exec(ctx, `INSERT INTO audit_records(id,organization_id,actor_id,action,resource_type,resource_id,outcome,operation_id) VALUES($1,$2,'other','other','workflow',$3,'allowed',$4)`, "audit_conflict_"+suffix, organizationID, workflowID, failed.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = catalog.Publish(apimutation.WithContext(ctx, failed), tenantID, workflowID, definition, "atomic-failure-key"); err == nil {
+	if _, _, err = catalog.Publish(apimutation.WithContext(ctx, failed), organizationID, workflowID, definition, "atomic-failure-key"); err == nil {
 		t.Fatal("publication unexpectedly committed despite audit conflict")
 	}
 	var count int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM workflow_versions WHERE tenant_id=$1 AND publication_key='atomic-failure-key'`, tenantID).Scan(&count); err != nil || count != 0 {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM workflow_versions WHERE organization_id=$1 AND publication_key='atomic-failure-key'`, organizationID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("publication survived failed audit count=%d err=%v", count, err)
 	}
-	succeeded := apimutation.New(tenantID, "publisher", "workflow.publish", "workflow", workflowID, "atomic-success-key", "POST", "/v1/workflows/x/publish", []byte(`{}`), "")
-	if _, _, err = catalog.Publish(apimutation.WithContext(ctx, succeeded), tenantID, workflowID, definition, "atomic-success-key"); err != nil {
+	succeeded := apimutation.New(organizationID, "publisher", "workflow.publish", "workflow", workflowID, "atomic-success-key", "POST", "/v1/workflows/x/publish", []byte(`{}`), "")
+	if _, _, err = catalog.Publish(apimutation.WithContext(ctx, succeeded), organizationID, workflowID, definition, "atomic-success-key"); err != nil {
 		t.Fatal(err)
 	}
 	if !succeeded.Committed() {
 		t.Fatal("successful transaction did not expose committed marker")
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM api_mutation_ledger ledger JOIN audit_records audit ON audit.tenant_id=ledger.tenant_id AND audit.operation_id=ledger.operation_id WHERE ledger.tenant_id=$1 AND ledger.operation_id=$2`, tenantID, succeeded.ID).Scan(&count); err != nil || count != 1 {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM api_mutation_ledger ledger JOIN audit_records audit ON audit.organization_id=ledger.organization_id AND audit.operation_id=ledger.operation_id WHERE ledger.organization_id=$1 AND ledger.operation_id=$2`, organizationID, succeeded.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("durable completion/audit count=%d err=%v", count, err)
 	}
 }

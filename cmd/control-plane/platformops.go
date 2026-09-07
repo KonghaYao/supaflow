@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/definition"
-	"github.com/pazhou/supaflow/internal/identity"
 	"github.com/pazhou/supaflow/internal/platform"
 	"github.com/pazhou/supaflow/internal/platformops"
 	platformhttp "github.com/pazhou/supaflow/internal/platformops/httpapi"
@@ -181,7 +180,7 @@ func eventStreamConfigFromEnv() (api.EventStreamConfig, error) {
 	if err != nil {
 		return api.EventStreamConfig{}, err
 	}
-	tenant, err := read("SUPAFLOW_SSE_TENANT_LIMIT", 64)
+	organization, err := read("SUPAFLOW_SSE_ORGANIZATION_LIMIT", 64)
 	if err != nil {
 		return api.EventStreamConfig{}, err
 	}
@@ -197,7 +196,7 @@ func eventStreamConfigFromEnv() (api.EventStreamConfig, error) {
 	if err != nil {
 		return api.EventStreamConfig{}, err
 	}
-	return api.EventStreamConfig{GlobalLimit: global, TenantLimit: tenant,
+	return api.EventStreamConfig{GlobalLimit: global, OrganizationLimit: organization,
 		PollMin: time.Duration(pollMin) * time.Millisecond, PollMax: time.Duration(pollMax) * time.Millisecond,
 		WriteTimeout: time.Duration(writeTimeout) * time.Millisecond}, nil
 }
@@ -218,15 +217,15 @@ func configureTelemetry(ctx context.Context) (*platformops.Telemetry, error) {
 	if endpoint == "" {
 		return nil, nil
 	}
-	tenantKey, err := decodeKey(strings.TrimSpace(os.Getenv("SUPAFLOW_TENANT_HASH_KEY")))
+	organizationKey, err := decodeKey(strings.TrimSpace(os.Getenv("SUPAFLOW_ORGANIZATION_HASH_KEY")))
 	if err != nil {
-		return nil, errors.New("SUPAFLOW_TENANT_HASH_KEY must encode exactly 32 bytes when telemetry is enabled")
+		return nil, errors.New("SUPAFLOW_ORGANIZATION_HASH_KEY must encode exactly 32 bytes when telemetry is enabled")
 	}
-	defer clearKey(tenantKey)
+	defer clearKey(organizationKey)
 	return platformops.NewTelemetry(ctx, platformops.TelemetryConfig{
 		ServiceName: "supaflow-control-plane", Endpoint: endpoint,
-		Insecure:      strings.EqualFold(strings.TrimSpace(os.Getenv("SUPAFLOW_OTEL_INSECURE")), "true"),
-		TenantHashKey: tenantKey, MetricInterval: 15 * time.Second,
+		Insecure:            strings.EqualFold(strings.TrimSpace(os.Getenv("SUPAFLOW_OTEL_INSECURE")), "true"),
+		OrganizationHashKey: organizationKey, MetricInterval: 15 * time.Second,
 	})
 }
 
@@ -251,7 +250,7 @@ func clearKey(value []byte) {
 	}
 }
 
-func mountHandlers(core http.Handler, ops *platformhttp.Handler, auth *api.Authenticator, identityRoutes *identity.HTTPHandler, telemetry *platformops.Telemetry) http.Handler {
+func mountHandlers(core http.Handler, ops *platformhttp.Handler, auth *api.Authenticator, telemetry *platformops.Telemetry) http.Handler {
 	public := func(handler http.Handler) http.Handler { return handler }
 	if telemetry != nil {
 		public = telemetry.HTTPMiddleware
@@ -260,13 +259,10 @@ func mountHandlers(core http.Handler, ops *platformhttp.Handler, auth *api.Authe
 	root.Handle("/hooks/resume/", public(core))
 	webhookRoutes := ops.WebhookRoutes()
 	if telemetry != nil {
-		webhookRoutes = platformops.NewDeferredTenantTelemetryHTTPMiddleware(telemetry, webhookRoutes)
+		webhookRoutes = platformops.NewDeferredOrganizationTelemetryHTTPMiddleware(telemetry, webhookRoutes)
 	}
 	root.Handle("/hooks/", webhookRoutes)
 	root.Handle("/ops/", auth.Middleware(ops.Routes()))
-	if identityRoutes != nil {
-		root.Handle("/auth/", public(identityRoutes.Routes()))
-	}
 	root.Handle("/v1/", core)
 	root.Handle("/", public(core))
 	return root

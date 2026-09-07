@@ -11,12 +11,12 @@ import (
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
 
-func resumeDueTimer(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, now time.Time) error {
+func resumeDueTimer(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, now time.Time) error {
 	var interruptID, runID, attemptID, nodeStateID string
 	err := tx.QueryRow(ctx, `
 		SELECT id, run_id, attempt_id, node_state_id FROM interrupts
-		WHERE tenant_id=$1 AND status='pending' AND auto_resume=true AND expires_at <= $2
-		ORDER BY expires_at, id FOR UPDATE SKIP LOCKED LIMIT 1`, tenantID, now).Scan(&interruptID, &runID, &attemptID, &nodeStateID)
+		WHERE organization_id=$1 AND status='pending' AND auto_resume=true AND expires_at <= $2
+		ORDER BY expires_at, id FOR UPDATE SKIP LOCKED LIMIT 1`, organizationID, now).Scan(&interruptID, &runID, &attemptID, &nodeStateID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -25,28 +25,28 @@ func resumeDueTimer(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.Ten
 	}
 	decision := json.RawMessage(`{"expired":true}`)
 	if _, err = tx.Exec(ctx, `UPDATE interrupts SET status='resolved', resolved_at=$3
-		WHERE tenant_id=$1 AND id=$2`, tenantID, interruptID, now); err != nil {
+		WHERE organization_id=$1 AND id=$2`, organizationID, interruptID, now); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE node_attempts SET status='pending', resume_data=$3, available_at=$4, updated_at=$4
-		WHERE tenant_id=$1 AND id=$2 AND status='suspended'`, tenantID, attemptID, decision, now); err != nil {
+		WHERE organization_id=$1 AND id=$2 AND status='suspended'`, organizationID, attemptID, decision, now); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE node_states SET status='pending', updated_at=$3
-		WHERE tenant_id=$1 AND id=$2`, tenantID, nodeStateID, now); err != nil {
+		WHERE organization_id=$1 AND id=$2`, organizationID, nodeStateID, now); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE runs SET status='running', updated_at=$3, version=version+1
-		WHERE tenant_id=$1 AND id=$2 AND status='suspended'`, tenantID, runID, now); err != nil {
+		WHERE organization_id=$1 AND id=$2 AND status='suspended'`, organizationID, runID, now); err != nil {
 		return err
 	}
-	_, err = appendRuntimeEvents(ctx, tx, tenantID, runID, nil, "wait.resumed")
+	_, err = appendRuntimeEvents(ctx, tx, organizationID, runID, nil, "wait.resumed")
 	return err
 }
 
-func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, runID string, next workflowruntime.NewAttempt, now time.Time) error {
+func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, runID string, next workflowruntime.NewAttempt, now time.Time) error {
 	if (next.EdgeID == "" || len(next.RequiredEdges) <= 1) && !next.AggregateInput {
-		return createSuccessorAttempt(ctx, tx, tenantID, runID, next, now)
+		return createSuccessorAttempt(ctx, tx, organizationID, runID, next, now)
 	}
 	if len(next.RequiredEdges) <= 1 {
 		input, inputErr := aggregateDAGInput(next)
@@ -54,16 +54,16 @@ func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntim
 			return inputErr
 		}
 		next.Input = input
-		return createSuccessorAttempt(ctx, tx, tenantID, runID, next, now)
+		return createSuccessorAttempt(ctx, tx, organizationID, runID, next, now)
 	}
 	required, err := json.Marshal(next.RequiredEdges)
 	if err != nil {
 		return fmt.Errorf("encode required edges: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO dag_joins (tenant_id, run_id, node_id, executor, required_edges, created_at, updated_at)
+		INSERT INTO dag_joins (organization_id, run_id, node_id, executor, required_edges, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $6)
-		ON CONFLICT (tenant_id, run_id, node_id) DO NOTHING`, tenantID, runID, next.NodeID, next.Executor, required, now); err != nil {
+		ON CONFLICT (organization_id, run_id, node_id) DO NOTHING`, organizationID, runID, next.NodeID, next.Executor, required, now); err != nil {
 		return fmt.Errorf("create join barrier: %w", err)
 	}
 	var executor string
@@ -71,8 +71,8 @@ func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntim
 	var scheduled bool
 	if err = tx.QueryRow(ctx, `
 		SELECT executor, required_edges = $4::jsonb, scheduled FROM dag_joins
-		WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3 FOR UPDATE`,
-		tenantID, runID, next.NodeID, required).Scan(&executor, &requiredMatches, &scheduled); err != nil {
+		WHERE organization_id = $1 AND run_id = $2 AND node_id = $3 FOR UPDATE`,
+		organizationID, runID, next.NodeID, required).Scan(&executor, &requiredMatches, &scheduled); err != nil {
 		return fmt.Errorf("lock join barrier: %w", err)
 	}
 	if executor != next.Executor || !requiredMatches {
@@ -87,17 +87,17 @@ func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntim
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO dag_edge_inputs (
-		    tenant_id, run_id, node_id, edge_id, source_node_id, source_port,
+		    organization_id, run_id, node_id, edge_id, source_node_id, source_port,
 		    target_port, value, available_at, created_at
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		ON CONFLICT (tenant_id, run_id, node_id, edge_id) DO NOTHING`, tenantID, runID,
+		ON CONFLICT (organization_id, run_id, node_id, edge_id) DO NOTHING`, organizationID, runID,
 		next.NodeID, next.EdgeID, next.SourceNodeID, next.SourcePort, next.TargetPort,
 		next.Input, availableAt, now); err != nil {
 		return fmt.Errorf("persist edge input: %w", err)
 	}
 	var count int
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM dag_edge_inputs
-		WHERE tenant_id=$1 AND run_id=$2 AND node_id=$3`, tenantID, runID, next.NodeID).Scan(&count); err != nil {
+		WHERE organization_id=$1 AND run_id=$2 AND node_id=$3`, organizationID, runID, next.NodeID).Scan(&count); err != nil {
 		return err
 	}
 	if count < len(next.RequiredEdges) {
@@ -107,8 +107,8 @@ func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntim
 	var readyAt time.Time
 	if err = tx.QueryRow(ctx, `
 		SELECT jsonb_object_agg(CASE WHEN target_port='' THEN source_node_id ELSE target_port END, value), max(available_at)
-		FROM dag_edge_inputs WHERE tenant_id=$1 AND run_id=$2 AND node_id=$3`,
-		tenantID, runID, next.NodeID).Scan(&input, &readyAt); err != nil {
+		FROM dag_edge_inputs WHERE organization_id=$1 AND run_id=$2 AND node_id=$3`,
+		organizationID, runID, next.NodeID).Scan(&input, &readyAt); err != nil {
 		return fmt.Errorf("assemble join input: %w", err)
 	}
 	if len(next.StaticInputs) > 0 {
@@ -128,12 +128,12 @@ func enqueueDAGSuccessor(ctx context.Context, tx pgx.Tx, tenantID workflowruntim
 		}
 	}
 	tag, err := tx.Exec(ctx, `UPDATE dag_joins SET scheduled=true, updated_at=$4
-		WHERE tenant_id=$1 AND run_id=$2 AND node_id=$3 AND scheduled=false`, tenantID, runID, next.NodeID, now)
+		WHERE organization_id=$1 AND run_id=$2 AND node_id=$3 AND scheduled=false`, organizationID, runID, next.NodeID, now)
 	if err != nil || tag.RowsAffected() != 1 {
 		return fmt.Errorf("claim ready join: %w", err)
 	}
 	next.Input, next.NextAttemptAt = input, readyAt
-	return createSuccessorAttempt(ctx, tx, tenantID, runID, next, now)
+	return createSuccessorAttempt(ctx, tx, organizationID, runID, next, now)
 }
 
 func aggregateDAGInput(next workflowruntime.NewAttempt) ([]byte, error) {
@@ -155,12 +155,12 @@ func aggregateDAGInput(next workflowruntime.NewAttempt) ([]byte, error) {
 	return json.Marshal(values)
 }
 
-func remainingDAGRunStatus(ctx context.Context, tx pgx.Tx, tenantID workflowruntime.TenantID, runID string) (workflowruntime.RunStatus, error) {
+func remainingDAGRunStatus(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, runID string) (workflowruntime.RunStatus, error) {
 	var runnable, suspended, waitingJoin bool
 	err := tx.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM node_attempts WHERE tenant_id=$1 AND run_id=$2 AND status IN ('pending','retry_ready','running')),
-		EXISTS (SELECT 1 FROM node_attempts WHERE tenant_id=$1 AND run_id=$2 AND status='suspended'),
-		EXISTS (SELECT 1 FROM dag_joins WHERE tenant_id=$1 AND run_id=$2 AND scheduled=false)`, tenantID, runID).Scan(&runnable, &suspended, &waitingJoin)
+		EXISTS (SELECT 1 FROM node_attempts WHERE organization_id=$1 AND run_id=$2 AND status IN ('pending','retry_ready','running')),
+		EXISTS (SELECT 1 FROM node_attempts WHERE organization_id=$1 AND run_id=$2 AND status='suspended'),
+		EXISTS (SELECT 1 FROM dag_joins WHERE organization_id=$1 AND run_id=$2 AND scheduled=false)`, organizationID, runID).Scan(&runnable, &suspended, &waitingJoin)
 	if err != nil {
 		return "", err
 	}

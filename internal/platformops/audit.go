@@ -33,25 +33,25 @@ const (
 
 // AuditRecord is immutable security evidence with redacted metadata.
 type AuditRecord struct {
-	ID           string          `json:"id"`
-	TenantID     string          `json:"-"`
-	ActorID      string          `json:"actorId"`
-	Action       string          `json:"action"`
-	ResourceType string          `json:"resourceType"`
-	ResourceID   string          `json:"resourceId"`
-	Outcome      AuditOutcome    `json:"outcome"`
-	Metadata     json.RawMessage `json:"metadata"`
-	CreatedAt    time.Time       `json:"createdAt"`
+	ID             string          `json:"id"`
+	OrganizationID string          `json:"-"`
+	ActorID        string          `json:"actorId"`
+	Action         string          `json:"action"`
+	ResourceType   string          `json:"resourceType"`
+	ResourceID     string          `json:"resourceId"`
+	Outcome        AuditOutcome    `json:"outcome"`
+	Metadata       json.RawMessage `json:"metadata"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
-// AuditQuery is always scoped to one authenticated tenant.
+// AuditQuery is always scoped to one authenticated organization.
 type AuditQuery struct {
-	TenantID     string
-	CanViewAudit bool
-	ResourceType string
-	ResourceID   string
-	After        time.Time
-	Limit        int
+	OrganizationID string
+	CanViewAudit   bool
+	ResourceType   string
+	ResourceID     string
+	After          time.Time
+	Limit          int
 }
 
 // AuditService writes and permission-gates immutable audit records.
@@ -85,9 +85,9 @@ func (s *AuditService) Record(ctx context.Context, record AuditRecord) (AuditRec
 	return record, nil
 }
 
-// Query returns tenant-scoped audit evidence only to an authorized caller.
+// Query returns organization-scoped audit evidence only to an authorized caller.
 func (s *AuditService) Query(ctx context.Context, query AuditQuery) ([]AuditRecord, error) {
-	if query.TenantID == "" || !query.CanViewAudit {
+	if query.OrganizationID == "" || !query.CanViewAudit {
 		return nil, ErrPermissionDenied
 	}
 	if query.Limit <= 0 || query.Limit > 500 {
@@ -98,11 +98,11 @@ func (s *AuditService) Query(ctx context.Context, query AuditQuery) ([]AuditReco
 		after = query.After
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id,tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at
+		SELECT id,organization_id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at
 		FROM audit_records
-		WHERE tenant_id=$1 AND ($2='' OR resource_type=$2) AND ($3='' OR resource_id=$3)
+		WHERE organization_id=$1 AND ($2='' OR resource_type=$2) AND ($3='' OR resource_id=$3)
 		  AND ($4::timestamptz IS NULL OR created_at > $4)
-		ORDER BY created_at,id LIMIT $5`, query.TenantID, query.ResourceType, query.ResourceID, after, query.Limit)
+		ORDER BY created_at,id LIMIT $5`, query.OrganizationID, query.ResourceType, query.ResourceID, after, query.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("query audit records: %w", err)
 	}
@@ -110,7 +110,7 @@ func (s *AuditService) Query(ctx context.Context, query AuditQuery) ([]AuditReco
 	records := make([]AuditRecord, 0, query.Limit)
 	for rows.Next() {
 		var record AuditRecord
-		if err = rows.Scan(&record.ID, &record.TenantID, &record.ActorID, &record.Action,
+		if err = rows.Scan(&record.ID, &record.OrganizationID, &record.ActorID, &record.Action,
 			&record.ResourceType, &record.ResourceID, &record.Outcome, &record.Metadata, &record.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan audit record: %w", err)
 		}
@@ -135,9 +135,9 @@ func insertAuditTx(ctx context.Context, tx pgx.Tx, record AuditRecord) (AuditRec
 		return AuditRecord{}, ErrInvalidArgument
 	}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO audit_records (id,tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata)
+		INSERT INTO audit_records (id,organization_id,actor_id,action,resource_type,resource_id,outcome,metadata)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING created_at`, record.ID, record.TenantID, record.ActorID, record.Action,
+		RETURNING created_at`, record.ID, record.OrganizationID, record.ActorID, record.Action,
 		record.ResourceType, record.ResourceID, record.Outcome, metadata).Scan(&record.CreatedAt)
 	if err != nil {
 		return AuditRecord{}, fmt.Errorf("append audit record: %w", err)
@@ -155,9 +155,9 @@ func insertAuditOnceTx(ctx context.Context, tx pgx.Tx, record AuditRecord) error
 		return ErrInvalidArgument
 	}
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO audit_records (id,tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata)
+		INSERT INTO audit_records (id,organization_id,actor_id,action,resource_type,resource_id,outcome,metadata)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`, record.ID,
-		record.TenantID, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.Outcome, metadata)
+		record.OrganizationID, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.Outcome, metadata)
 	if err != nil {
 		return fmt.Errorf("append idempotent audit record: %w", err)
 	}
@@ -166,12 +166,12 @@ func insertAuditOnceTx(ctx context.Context, tx pgx.Tx, record AuditRecord) error
 	}
 	var existing AuditRecord
 	var metadataMatches bool
-	if err = tx.QueryRow(ctx, `SELECT tenant_id,actor_id,action,resource_type,resource_id,outcome,metadata=$2::jsonb
-		FROM audit_records WHERE id=$1`, record.ID, metadata).Scan(&existing.TenantID, &existing.ActorID,
+	if err = tx.QueryRow(ctx, `SELECT organization_id,actor_id,action,resource_type,resource_id,outcome,metadata=$2::jsonb
+		FROM audit_records WHERE id=$1`, record.ID, metadata).Scan(&existing.OrganizationID, &existing.ActorID,
 		&existing.Action, &existing.ResourceType, &existing.ResourceID, &existing.Outcome, &metadataMatches); err != nil {
 		return fmt.Errorf("read idempotent audit record: %w", err)
 	}
-	if existing.TenantID != record.TenantID || existing.ActorID != record.ActorID ||
+	if existing.OrganizationID != record.OrganizationID || existing.ActorID != record.ActorID ||
 		existing.Action != record.Action || existing.ResourceType != record.ResourceType ||
 		existing.ResourceID != record.ResourceID || existing.Outcome != record.Outcome || !metadataMatches {
 		return ErrConflict
@@ -180,7 +180,7 @@ func insertAuditOnceTx(ctx context.Context, tx pgx.Tx, record AuditRecord) error
 }
 
 func validateAuditRecord(record AuditRecord) error {
-	if record.TenantID == "" || record.ActorID == "" || record.Action == "" || record.ResourceType == "" || record.ResourceID == "" {
+	if record.OrganizationID == "" || record.ActorID == "" || record.Action == "" || record.ResourceType == "" || record.ResourceID == "" {
 		return ErrInvalidArgument
 	}
 	if record.Outcome != AuditAllowed && record.Outcome != AuditDenied && record.Outcome != AuditFailed {
