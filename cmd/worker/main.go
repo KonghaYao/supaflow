@@ -40,10 +40,6 @@ func run() error {
 	if err != nil {
 		return errors.New("SUPAFLOW_RESUME_TOKEN_SECRET must contain at least 32 bytes")
 	}
-	organizations := parseList(os.Getenv("SUPAFLOW_WORKER_TENANTS"))
-	if len(organizations) == 0 {
-		return errors.New("SUPAFLOW_WORKER_TENANTS requires at least one organization")
-	}
 	allowedHosts := parseList(os.Getenv("SUPAFLOW_HTTP_ALLOWED_HOSTS"))
 	if len(allowedHosts) == 0 {
 		return errors.New("SUPAFLOW_HTTP_ALLOWED_HOSTS requires an explicit egress allowlist")
@@ -135,56 +131,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	operations, err := configureWorkerOperations(ctx, pool, workerID, organizations)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := operations.close(); closeErr != nil {
-			slog.Error("worker quota release failed", "error", platformops.RedactDiagnostic(closeErr.Error()))
-		}
-	}()
-	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		operations.runHeartbeat(heartbeatCtx)
-	}()
-	defer func() {
-		stopHeartbeat()
-		<-heartbeatDone
-	}()
-	slog.Info("worker started", "workerId", workerID, "organizationCount", len(organizations))
+	slog.Info("worker started", "workerId", workerID)
 	idle := time.NewTicker(100 * time.Millisecond)
 	defer idle.Stop()
 	for {
-		worked := false
-		for _, organization := range organizations {
-			if ctx.Err() != nil {
-				slog.Info("worker drained", "workerId", workerID)
-				return nil
-			}
-			if !operations.mayClaim(ctx, organization) {
-				continue
-			}
-			operations.setActive(1)
-			operations.heartbeatOrganization(ctx, organization, 1)
-			executionCtx := ctx
-			completeTelemetry := func(error) {}
-			if telemetry != nil {
-				executionCtx, completeTelemetry = telemetry.Start(ctx, "worker.execution", organization)
-			}
-			result, advanceErr := orchestrator.Advance(executionCtx, workflowruntime.OrganizationID(organization))
-			completeTelemetry(advanceErr)
-			operations.setActive(0)
-			operations.heartbeatOrganization(ctx, organization, 0)
-			if advanceErr != nil {
-				slog.Error("attempt advance failed", "error", advanceErr)
-				continue
-			}
-			worked = worked || result.Worked
+		result, advanceErr := orchestrator.AdvanceNext(ctx)
+		if advanceErr != nil {
+			slog.Error("attempt advance failed", "error", advanceErr)
 		}
-		if worked {
+		if result.Worked {
 			continue
 		}
 		select {

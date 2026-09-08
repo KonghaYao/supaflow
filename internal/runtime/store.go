@@ -100,6 +100,20 @@ type ClaimAttemptRequest struct {
 	LeaseDuration  time.Duration
 }
 
+// ClaimNextAttemptRequest asks a trusted worker to discover and claim one attempt
+// across organizations. Durable work remains organization-scoped after claim.
+type ClaimNextAttemptRequest struct {
+	WorkerID      string
+	Now           time.Time
+	LeaseDuration time.Duration
+}
+
+// DynamicStore is implemented by production stores that support database-led
+// organization discovery. It intentionally does not make organizations a registry.
+type DynamicStore interface {
+	ClaimNext(context.Context, ClaimNextAttemptRequest) (*WorkItem, error)
+}
+
 // WorkItem is the immutable worker view produced by an atomic claim.
 type WorkItem struct {
 	Run      Run

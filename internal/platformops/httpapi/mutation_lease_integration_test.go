@@ -48,7 +48,7 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 	responseDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		request := httptest.NewRequest(http.MethodPost, "/ops/quotas", bytes.NewReader([]byte(`{}`)))
-		request.Header.Set("Authorization", "Bearer mutation-lease-master-key-at-least-32-bytes")
+		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
 		request.Header.Set("X-Fenix-Organization-Id", organizationID)
 		request.Header.Set("Idempotency-Key", "mutation-lease-long-handler")
 		response := httptest.NewRecorder()

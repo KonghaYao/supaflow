@@ -204,6 +204,20 @@ type AdvanceResult struct {
 	Interrupt *Interrupt
 }
 
+// AdvanceNext dynamically discovers, claims, and processes at most one attempt.
+func (o *Orchestrator) AdvanceNext(ctx context.Context) (AdvanceResult, error) {
+	store, ok := o.store.(DynamicStore)
+	if !ok {
+		return AdvanceResult{}, errorf(CodeConflict, "dynamic work claiming is unavailable")
+	}
+	now := o.clock.Now()
+	work, err := store.ClaimNext(ctx, ClaimNextAttemptRequest{WorkerID: o.workerID, Now: now, LeaseDuration: o.leaseDuration})
+	if err != nil || work == nil {
+		return AdvanceResult{}, err
+	}
+	return o.advanceWork(ctx, work)
+}
+
 // Advance claims and processes at most one attempt for organizationID.
 func (o *Orchestrator) Advance(ctx context.Context, organizationID OrganizationID) (AdvanceResult, error) {
 	if o.telemetry != nil {
@@ -235,6 +249,11 @@ func (o *Orchestrator) advance(ctx context.Context, organizationID OrganizationI
 	if err != nil || work == nil {
 		return AdvanceResult{}, err
 	}
+	return o.advanceWork(ctx, work)
+}
+
+func (o *Orchestrator) advanceWork(ctx context.Context, work *WorkItem) (AdvanceResult, error) {
+	organizationID := work.Attempt.OrganizationID
 	req := ExecutionRequest{
 		OrganizationID: organizationID, RunID: work.Run.ID, Plan: work.Run.Plan, NodeID: work.Attempt.NodeID,
 		AttemptID: work.Attempt.ID, ExecutionID: work.Attempt.ExecutionID, Attempt: work.Attempt.Number,

@@ -35,10 +35,6 @@ LIMIT 1`
 
 // ClaimAttempt claims one ready attempt or takes over an expired lease.
 func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime.ClaimAttemptRequest) (*workflowruntime.WorkItem, error) {
-	request.Now = timeOrNow(request.Now)
-	if _, err := s.ExpireRuns(ctx, request.OrganizationID, request.Now, 100); err != nil {
-		return nil, err
-	}
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not claim attempt", err)
@@ -48,7 +44,22 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
 	}
-	if err = resumeDueTimer(ctx, tx, request.OrganizationID, databaseNow); err != nil {
+	work, err := s.claimAttemptTx(ctx, tx, request, databaseNow)
+	if err != nil || work == nil {
+		return work, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, runtimeError(workflowruntime.CodeConflict, "could not commit attempt claim", err)
+	}
+	return work, nil
+}
+
+func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request workflowruntime.ClaimAttemptRequest, databaseNow time.Time) (*workflowruntime.WorkItem, error) {
+	var err error
+	if request.LeaseDuration <= 0 {
+		return nil, runtimeError(workflowruntime.CodeInvalidArgument, "lease duration must be positive", nil)
+	}
+	if err := resumeDueTimer(ctx, tx, request.OrganizationID, databaseNow); err != nil {
 		return nil, runtimeError(workflowruntime.CodeConflict, "could not resume due timer", err)
 	}
 	var work workflowruntime.WorkItem
@@ -173,9 +184,6 @@ func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime
 	work.Attempt.Status = workflowruntime.AttemptRunning
 	work.Attempt.StartedAt = timePointerRuntime(databaseNow)
 	work.Attempt.UpdatedAt = databaseNow
-	if err = tx.Commit(ctx); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not commit attempt claim", err)
-	}
 	return &work, nil
 }
 

@@ -101,7 +101,8 @@ func TestRerunSourceKeepsAtomicLineageAndArtifacts(t *testing.T) {
 // 验证领取事务在提交前原子追加可观测事件及其 outbox，并区分首次启动与租约接管。
 func TestClaimSourceKeepsEventsAndOutboxAtomic(t *testing.T) {
 	t.Parallel()
-	source := readSource(t, "runtime_claim.go") + readSource(t, "runtime_persist.go")
+	claim := readSource(t, "runtime_claim.go")
+	source := claim + readSource(t, "runtime_persist.go")
 	for _, contract := range []string{
 		"BeginTx", `status = 'pending'`, `"run.started"`, `"attempt.claimed"`,
 		`"attempt.lease_taken_over"`, "appendRuntimeEvents", "insertOutboxTx", "tx.Commit",
@@ -110,8 +111,8 @@ func TestClaimSourceKeepsEventsAndOutboxAtomic(t *testing.T) {
 			t.Errorf("claim transaction lacks %q", contract)
 		}
 	}
-	if strings.Index(source, "appendRuntimeEvents") > strings.Index(source, "tx.Commit") {
-		t.Error("claim transaction commits before appending events and outbox")
+	if strings.Index(claim, "claimAttemptTx(ctx") > strings.Index(claim, "tx.Commit(ctx)") {
+		t.Error("claim helper runs after transaction commit")
 	}
 }
 

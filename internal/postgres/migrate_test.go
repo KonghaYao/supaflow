@@ -172,7 +172,7 @@ func TestFenixOrganizationScopeUpgradeFromV25(t *testing.T) {
 		admin.Close()
 	})
 	migrations, err := LoadMigrations(os.DirFS("../.."), "migrations")
-	if err != nil || len(migrations) != 26 {
+	if err != nil || len(migrations) != 27 {
 		t.Fatalf("migrations=%d err=%v", len(migrations), err)
 	}
 	migrator := NewMigrator(pool)
