@@ -28,8 +28,11 @@ const workspaceRootEnv = "SUPAFLOW_ISOLATION_WORKSPACE_ROOT"
 const allowUnsafeLocalExecutionEnv = "SUPAFLOW_ISOLATION_ALLOW_UNSAFE_LOCAL_EXECUTION"
 
 // allowUnsafeLocalExecution reports whether the operator explicitly accepted the
-// degraded runner. Only the exact opt-in values enable it, so an unset, empty or
-// misspelled value keeps the fail-closed startup probe.
+// degraded runner. It normalizes case and surrounding whitespace the way every other
+// boolean in this codebase does, so a trailing newline from a generated env file still
+// means what the operator wrote; everything else, including an unset or empty value,
+// keeps the fail-closed startup probe. Deliberately conservative in the other
+// direction: no truthy-looking spelling beyond "1" and "true" is accepted.
 func allowUnsafeLocalExecution() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(allowUnsafeLocalExecutionEnv))) {
 	case "1", "true":
@@ -406,9 +409,12 @@ var errResourceLimitsUnavailable = errors.New("resource limits unavailable")
 // provide the production sandbox and the operator explicitly authorized the trade.
 // The helper re-executes itself in launcher mode, so the interpreter still inherits
 // every ceiling resourceLimitsToApply reports for this platform. Unlike the production
-// path it gets no mount, PID, IPC or UTS namespace, no filesystem confinement, no
-// workspace byte or inode quota, and no per-invocation process ceiling: user code
-// runs as the worker's own user and can read or write anything that user can.
+// path it gets no mount, PID, IPC, UTS or network namespace, no filesystem confinement,
+// no workspace byte or inode quota, and no per-invocation process ceiling: user code
+// runs as the worker's own user and can read or write anything that user can, and it
+// reaches the host network stack directly. It also loses the production path's
+// die-with-parent guarantee, because Darwin's SysProcAttr has no Pdeathsig equivalent,
+// so a helper killed with SIGKILL leaves the attempt running as an orphan.
 func localSandboxCommand(interpreter string, args []string, limits resolvedLimits) ([]string, error) {
 	if len(args) == 0 {
 		return nil, errResourceLimitsUnavailable

@@ -14,16 +14,25 @@ import "golang.org/x/sys/unix"
 //   - processes is absent for the reason documented on sandboxCommand: RLIMIT_NPROC
 //     is per-host-user on Darwin and cannot express a per-invocation ceiling.
 //   - file_size is absent because macOS cannot start a Python interpreter beneath it.
-//     /usr/bin/python3 links libxcselect.dylib, which rewrites a ~1.4 MB xcrun_db
-//     cache into TMPDIR on every invocation (measured: 1,431,272 bytes on macOS 26);
-//     any lower RLIMIT_FSIZE kills the interpreter with SIGXFSZ before user code runs,
-//     and the production ceiling is the request OutputLimit, which is 1 MiB for worker
-//     runs. Neither TMPDIR, HOME, PYTHONPYCACHEPREFIX, PYTHONDONTWRITEBYTECODE nor -B
-//     moves that write out of the process, so the ceiling and Python are mutually
-//     exclusive here. The same xcselect dependency breaks every other developer tool
-//     the platform shims, which makes dropping the ceiling the honest choice: the
-//     degraded runner already abandons filesystem confinement, so it cannot claim a
-//     per-file byte limit that its own interpreter is forbidden to exceed.
+//     /usr/bin/python3 links libxcselect.dylib, which rebuilds its xcrun_db cache
+//     whenever the interpreter's HOME changes, and the runner gives every attempt a
+//     fresh HOME (see isolatedEnvironment), so it happens on every attempt. The rebuild
+//     writes a new file in place of the old one, growing it in power-of-two steps to the
+//     accumulated cache size (~1.4 MB here, measured 1,442,395 bytes; it grows as the
+//     cache learns about more tools, so treat any exact figure as a snapshot, not a
+//     constant). That write lands in the Darwin per-user temp directory and not the
+//     attempt workspace, because libxcselect ignores TMPDIR. Any RLIMIT_FSIZE below the
+//     cache size kills the interpreter with SIGXFSZ before user code runs, and it leaves
+//     the partially written temp file behind: 79 such orphans totalling ~20 MB were the
+//     measured residue of this comment's own investigation. The production ceiling is the
+//     request OutputLimit, which is 1 MiB for worker runs, so the ceiling and Python are
+//     mutually exclusive here. PYTHONPYCACHEPREFIX, PYTHONDONTWRITEBYTECODE and the
+//     interpreter's own -B, -S, -E, -I and -s flags all leave that write in place, so
+//     nothing the runner controls can move it out of the interpreter's startup path. The
+//     same xcselect dependency breaks every other developer tool the platform shims,
+//     which makes dropping the ceiling the honest choice: the degraded runner already
+//     abandons filesystem confinement, so it cannot claim a per-file byte limit that its
+//     own interpreter is forbidden to exceed.
 //
 // The remaining ceilings, the request timeout and the bounded output are all an
 // attempt is bounded by; disk exhaustion is not defended against on Darwin.

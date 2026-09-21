@@ -15,9 +15,10 @@ import (
 //
 // macOS provides no bubblewrap equivalent and no cgroup v2, so this is a plain
 // temporary workspace. Measured against the Linux boundary it drops the mount, PID,
-// IPC and UTS namespaces, the read-only system bind mounts, the workspace byte and
-// inode quotas, and the per-invocation process ceiling (RLIMIT_NPROC is per-host-user
-// on Darwin, which is why the production path refuses this host outright).
+// IPC, UTS and network namespaces, the read-only system bind mounts, the workspace
+// byte and inode quotas, the die-with-parent guarantee, and the per-invocation process
+// ceiling (RLIMIT_NPROC is per-host-user on Darwin, which is why the production path
+// refuses this host outright).
 //
 // It keeps the per-attempt workspace, the process group that cancellation kills, the
 // rlimit ceilings the launcher installs on the interpreter, and the timeout plus
