@@ -22,7 +22,7 @@ func (s *RuntimeStore) CreateSubworkflow(ctx context.Context, request workflowru
 	}
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.Run.OrganizationID))
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not start subworkflow", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not start subworkflow", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var parentAttemptID, parentExecutionID string
@@ -36,7 +36,7 @@ func (s *RuntimeStore) CreateSubworkflow(ctx context.Context, request workflowru
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "parent attempt not found", err)
 	}
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock parent attempt", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not lock parent attempt", err)
 	}
 	if parentExecutionID != link.ParentExecutionID {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "parent execution identity does not match attempt", nil)
@@ -55,20 +55,20 @@ func (s *RuntimeStore) CreateSubworkflow(ctx context.Context, request workflowru
 	ON CONFLICT (organization_id,parent_execution_id) DO NOTHING`, link.OrganizationID, link.ParentRunID,
 		link.ParentNodeID, link.ParentAttemptID, link.ParentExecutionID, link.ChildRunID, link.CreatedAt)
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist subworkflow lineage", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist subworkflow lineage", err)
 	}
 	if tag.RowsAffected() == 0 {
 		var childRunID string
 		if err = tx.QueryRow(ctx, `SELECT child_run_id FROM subworkflow_links
 			WHERE organization_id=$1 AND parent_execution_id=$2`, link.OrganizationID, link.ParentExecutionID).Scan(&childRunID); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not verify subworkflow lineage", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not verify subworkflow lineage", err)
 		}
 		if childRunID != link.ChildRunID {
 			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "parent execution already links another child", nil)
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit subworkflow", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not commit subworkflow", err)
 	}
 	return result, nil
 }

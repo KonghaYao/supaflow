@@ -99,7 +99,7 @@ func (s *RuntimeStore) createRunTx(ctx context.Context, request workflowruntime.
 	if err = CompleteAPIMutationTx(ctx, tx, result.Run.ID, map[string]any{"runId": result.Run.ID}); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
 			// 幂等键被另一个 body 用过：这是语义结论，重试不会改变它，也仍然报 conflict。
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete run operation", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete run operation", err)
 		}
 		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete run operation", err)
 	}
@@ -283,7 +283,7 @@ func (s *RuntimeStore) GetRun(ctx context.Context, organizationID workflowruntim
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeNotFound, "run not found", err)
 	}
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not read run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not read run", err)
 	}
 	return run, nil
 }
@@ -292,7 +292,7 @@ func (s *RuntimeStore) GetRun(ctx context.Context, organizationID workflowruntim
 func (s *RuntimeStore) ListEvents(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string, afterCursor uint64, limit int) ([]workflowruntime.Event, error) {
 	events, err := s.repository.ListEvents(ctx, string(organizationID), runID, int64(afterCursor), limit)
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not list run events", err)
+		return nil, runtimePersistenceError("could not list run events", err)
 	}
 	result := make([]workflowruntime.Event, 0, len(events))
 	for _, event := range events {
@@ -316,7 +316,7 @@ func (s *RuntimeStore) ListInterrupts(ctx context.Context, organizationID workfl
 		WHERE i.organization_id = $1 AND i.run_id = $2 AND i.status = 'pending'
 		ORDER BY i.created_at, i.id`, string(organizationID), runID)
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not list interrupts", err)
+		return nil, runtimePersistenceError("could not list interrupts", err)
 	}
 	defer rows.Close()
 	result := make([]workflowruntime.Interrupt, 0)
@@ -327,7 +327,7 @@ func (s *RuntimeStore) ListInterrupts(ctx context.Context, organizationID workfl
 		if err := rows.Scan(&item.ID, &storedOrganization, &item.RunID, &item.NodeID,
 			&item.AttemptID, &item.Kind, &status, &digest, &item.ExpiresAt, &item.ResolvedAt,
 			&item.Decision, &item.CreatedAt); err != nil {
-			return nil, runtimeError(workflowruntime.CodeConflict, "could not decode interrupt", err)
+			return nil, runtimePersistenceError("could not decode interrupt", err)
 		}
 		item.OrganizationID = workflowruntime.OrganizationID(storedOrganization)
 		item.Status = workflowruntime.InterruptStatus(strings.ToUpper(status))
@@ -335,7 +335,7 @@ func (s *RuntimeStore) ListInterrupts(ctx context.Context, organizationID workfl
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not iterate interrupts", err)
+		return nil, runtimePersistenceError("could not iterate interrupts", err)
 	}
 	return result, nil
 }

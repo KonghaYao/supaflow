@@ -13,7 +13,7 @@ import (
 func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.FailAttemptRequest) (workflowruntime.Run, error) {
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not fail attempt", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not fail attempt", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	request.Now = timeOrNow(request.Now)
@@ -28,7 +28,7 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 		SELECT status, cancel_requested_at FROM runs
 		WHERE organization_id = $1 AND id = $2 FOR UPDATE`, request.OrganizationID, request.RunID).Scan(
 		&currentStatus, &cancelRequestedAt); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not lock failing run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not lock failing run", err)
 	}
 	if currentStatus != "running" && currentStatus != "cancelling" {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeInvalidTransition, "run cannot accept attempt failure", nil)
@@ -44,7 +44,7 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 		SELECT executor, execution_id, input, attempt_number FROM node_attempts
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.AttemptID).Scan(
 		&executor, &executionID, &input, &attemptNumber); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not read failed attempt", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not read failed attempt", err)
 	}
 	errorData, _ := json.Marshal(map[string]string{"code": request.ErrorCode})
 	if _, err = tx.Exec(ctx, `
@@ -52,14 +52,14 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 		    finished_at = $4, updated_at = $4
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.AttemptID,
 		errorData, request.Now); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist attempt failure", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not persist attempt failure", err)
 	}
 	status := request.TerminalStatus
 	if request.RetryAt != nil {
 		status = workflowruntime.RunRunning
 		newAttemptID, idErr := NewID("att")
 		if idErr != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not allocate retry attempt", idErr)
+			return workflowruntime.Run{}, runtimePersistenceError("could not allocate retry attempt", idErr)
 		}
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO node_attempts (
@@ -68,14 +68,14 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'retry_ready', $10, $11, $11)`,
 			newAttemptID, executionID, request.OrganizationID, request.RunID, nodeStateID, nodeID,
 			executor, input, attemptNumber+1, *request.RetryAt, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist retry attempt", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not persist retry attempt", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE node_states SET status = 'pending', last_error = $3,
 			    attempt_count = $4, latest_attempt_id = $5, updated_at = $6
 			WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID,
 			errorData, attemptNumber+1, newAttemptID, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not schedule retry node", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not schedule retry node", err)
 		}
 	} else {
 		if status == "" {
@@ -91,13 +91,13 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 			UPDATE node_states SET status = $3, last_error = $4, updated_at = $5
 			WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID,
 			nodeStatus, errorData, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not fail node", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not fail node", err)
 		}
 		if err = terminateRemainingRunWorkTx(ctx, tx, request.OrganizationID, request.RunID, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish terminal run work", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not finish terminal run work", err)
 		}
 		if err = cancelSubworkflowDescendantsWithReasonTx(ctx, tx, request.OrganizationID, request.RunID, request.Now, "parent_terminal"); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not cancel terminal run descendants", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not cancel terminal run descendants", err)
 		}
 	}
 	if _, err = tx.Exec(ctx, `
@@ -106,11 +106,11 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 		    version = version + 1
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.RunID,
 		dbRunStatus(status), request.Now); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not update failed run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not update failed run", err)
 	}
 	if request.RetryAt == nil {
 		if _, err = releaseRunAdmissionTx(ctx, tx, request.OrganizationID, request.RunID, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release run capacity", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not release run capacity", err)
 		}
 	}
 	defaultEvents := []string{"node.failed"}
@@ -121,20 +121,20 @@ func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.
 	}
 	if _, err = appendRuntimeEvents(ctx, tx, request.OrganizationID, request.RunID,
 		request.Events, defaultEvents...); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist failure events", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not persist failure events", err)
 	}
 	if request.RetryAt != nil {
 		err = releaseTerminalLease(ctx, tx, request.OrganizationID, request.AttemptID)
 	}
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release failed lease", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not release failed lease", err)
 	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), request.RunID))
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not read failed run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not read failed run", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not commit attempt failure", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not commit attempt failure", err)
 	}
 	return run, nil
 }

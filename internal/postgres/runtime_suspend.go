@@ -13,7 +13,7 @@ import (
 func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowruntime.SuspendAttemptRequest) (workflowruntime.Interrupt, error) {
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not suspend attempt", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not suspend attempt", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	request.Now = timeOrNow(request.Now)
@@ -28,7 +28,7 @@ func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowrunti
 		SELECT status, cancel_requested_at FROM runs
 		WHERE organization_id = $1 AND id = $2 FOR UPDATE`, request.OrganizationID, request.RunID).Scan(
 		&runStatus, &cancelRequestedAt); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not lock suspending run", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not lock suspending run", err)
 	}
 	if runStatus != "running" || cancelRequestedAt != nil {
 		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeInvalidTransition, "run cannot be suspended", nil)
@@ -50,17 +50,17 @@ func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowrunti
 		interrupt.ID, request.OrganizationID, request.RunID, nodeStateID, request.AttemptID,
 		interrupt.Kind, json.RawMessage(`{}`), interrupt.TokenDigest[:], interrupt.ExpiresAt,
 		interrupt.AutoResume, interrupt.CreatedAt); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not persist interrupt", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not persist interrupt", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_attempts SET status = 'suspended', updated_at = $3
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.AttemptID, request.Now); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not suspend node attempt", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not suspend node attempt", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'suspended', updated_at = $3
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID, request.Now); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not suspend node", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not suspend node", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runs SET status = CASE WHEN EXISTS (
@@ -68,7 +68,7 @@ func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowrunti
 		    WHERE organization_id = $1 AND run_id = $2 AND status IN ('pending','retry_ready','running')
 		) THEN 'running' ELSE 'suspended' END, updated_at = $3, version = version + 1
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.RunID, request.Now); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not suspend run", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not suspend run", err)
 	}
 	eventType := "approval.requested"
 	if interrupt.Kind == "wait" {
@@ -79,14 +79,14 @@ func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowrunti
 	}
 	sequence, err := appendRuntimeEvents(ctx, tx, request.OrganizationID, request.RunID, request.Events, eventType)
 	if err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not persist suspension events", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not persist suspension events", err)
 	}
 	if err = persistRuntimeSnapshot(ctx, tx, request.OrganizationID, request.RunID,
 		request.AttemptID, request.Snapshot, sequence, request.Now); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not persist suspension snapshot", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not persist suspension snapshot", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not commit suspension", err)
+		return workflowruntime.Interrupt{}, runtimePersistenceError("could not commit suspension", err)
 	}
 	return interrupt, nil
 }

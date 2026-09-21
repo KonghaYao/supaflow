@@ -25,11 +25,11 @@ func (s *RuntimeStore) ResumeWebhook(ctx context.Context, request workflowruntim
 	request.Now = timeOrNow(request.Now)
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume webhook", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not resume webhook", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`, string(request.OrganizationID), request.IdempotencyKey); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock webhook idempotency key", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not lock webhook idempotency key", err)
 	}
 	var existingHash []byte
 	var existingInterruptID string
@@ -46,7 +46,7 @@ func (s *RuntimeStore) ResumeWebhook(ctx context.Context, request workflowruntim
 		return result, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not inspect webhook idempotency key", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not inspect webhook idempotency key", err)
 	}
 	interrupt, attemptStatus, runStatus, err := lockWebhookInterrupt(ctx, tx, request)
 	if err != nil {
@@ -63,36 +63,36 @@ func (s *RuntimeStore) ResumeWebhook(ctx context.Context, request workflowruntim
 	}
 	if _, err = tx.Exec(ctx, `UPDATE interrupts SET status='resolved',resolved_at=$3
 		WHERE organization_id=$1 AND id=$2 AND status='pending'`, request.OrganizationID, request.InterruptID, request.Now); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not consume webhook token", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not consume webhook token", err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE node_attempts SET status='pending',resume_data=$4,available_at=$3,updated_at=$3
 		WHERE organization_id=$1 AND id=$2 AND status='suspended'`, request.OrganizationID, request.AttemptID, request.Now, request.Data); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume webhook attempt", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not resume webhook attempt", err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE node_states SET status='pending',updated_at=$4
 		WHERE organization_id=$1 AND run_id=$2 AND node_id=$3`, request.OrganizationID, request.RunID, request.NodeID, request.Now); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume webhook node", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not resume webhook node", err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE runs SET status=CASE WHEN status='suspended' THEN 'pending' ELSE status END,
 		updated_at=$3,version=version+1 WHERE organization_id=$1 AND id=$2 AND status IN ('suspended','running')`, request.OrganizationID, request.RunID, request.Now); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume webhook run", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not resume webhook run", err)
 	}
 	if _, err = appendRuntimeEvents(ctx, tx, request.OrganizationID, request.RunID, []workflowruntime.Event{{Type: "webhook.resumed", Data: request.Data}}); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist webhook resume event", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not persist webhook resume event", err)
 	}
 	auditID, err := NewID("audit")
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not allocate webhook audit", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not allocate webhook audit", err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"runId": request.RunID, "nodeId": request.NodeID, "payloadBytes": len(request.Data)})
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_records
 		(id,organization_id,actor_id,action,resource_type,resource_id,outcome,metadata,created_at)
 		VALUES ($1,$2,'external_webhook','webhook.resume','interrupt',$3,'allowed',$4,$5)`, auditID, request.OrganizationID, request.InterruptID, metadata, request.Now); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist webhook audit", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not persist webhook audit", err)
 	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), request.RunID))
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not read resumed webhook run", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not read resumed webhook run", err)
 	}
 	snapshot, err := encodeRunResponseSnapshot(run)
 	if err != nil {
@@ -100,20 +100,20 @@ func (s *RuntimeStore) ResumeWebhook(ctx context.Context, request workflowruntim
 	}
 	resumeID, err := NewID("resume")
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not allocate webhook resume", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not allocate webhook resume", err)
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO webhook_resumptions
 		(id,organization_id,interrupt_id,idempotency_key,request_hash,resume_data,response_snapshot,created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, resumeID, request.OrganizationID, request.InterruptID,
 		request.IdempotencyKey, request.RequestHash[:], request.Data, snapshot, request.Now); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist webhook resume", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not persist webhook resume", err)
 	}
 	stored, err := webhookResumeResultTx(ctx, tx, request.OrganizationID, request.InterruptID)
 	if err != nil {
 		return workflowruntime.ResumeWebhookResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit webhook resume", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not commit webhook resume", err)
 	}
 	return stored, nil
 }
@@ -135,7 +135,7 @@ func lockWebhookInterrupt(ctx context.Context, tx pgx.Tx, request workflowruntim
 		return workflowruntime.Interrupt{}, "", "", runtimeError(workflowruntime.CodeApprovalInvalid, "webhook resume token is invalid", nil)
 	}
 	if err != nil {
-		return workflowruntime.Interrupt{}, "", "", runtimeError(workflowruntime.CodeConflict, "could not lock webhook interrupt", err)
+		return workflowruntime.Interrupt{}, "", "", runtimePersistenceError("could not lock webhook interrupt", err)
 	}
 	interrupt.OrganizationID, interrupt.Status = workflowruntime.OrganizationID(organization), workflowruntime.InterruptStatus(strings.ToUpper(status))
 	copy(interrupt.TokenDigest[:], digest)
@@ -147,7 +147,7 @@ func encodeRunResponseSnapshot(run workflowruntime.Run) ([]byte, error) {
 		Status: run.Status, DeadlineAt: run.DeadlineAt, CancelRequestedAt: run.CancelRequestedAt,
 		CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, Version: run.Version})
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not encode webhook response", err)
+		return nil, runtimePersistenceError("could not encode webhook response", err)
 	}
 	return value, nil
 }
@@ -165,17 +165,17 @@ func webhookResumeResultTx(ctx context.Context, tx pgx.Tx, organizationID workfl
 		&interrupt.Kind, &digest, &interrupt.ExpiresAt, &interrupt.ResolvedAt,
 		&interrupt.CreatedAt, &interrupt.Decision, &response)
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not replay webhook resume", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not replay webhook resume", err)
 	}
 	interrupt.OrganizationID, interrupt.Status = workflowruntime.OrganizationID(organization), workflowruntime.InterruptResolved
 	copy(interrupt.TokenDigest[:], digest)
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(organizationID), interrupt.RunID))
 	if err != nil {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not read replayed webhook run", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("could not read replayed webhook run", err)
 	}
 	var snapshot approvalResponseSnapshot
 	if err = json.Unmarshal(response, &snapshot); err != nil || snapshot.RunID != interrupt.RunID || snapshot.Status == "" {
-		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "webhook response snapshot is invalid", err)
+		return workflowruntime.ResumeWebhookResult{}, runtimePersistenceError("webhook response snapshot is invalid", err)
 	}
 	run.ID, run.Plan.ID, run.Plan.Hash, run.Status = snapshot.RunID, snapshot.PlanID, snapshot.PlanHash, snapshot.Status
 	run.DeadlineAt, run.CancelRequestedAt, run.CreatedAt = snapshot.DeadlineAt, snapshot.CancelRequestedAt, snapshot.CreatedAt

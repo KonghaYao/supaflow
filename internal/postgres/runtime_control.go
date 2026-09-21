@@ -29,28 +29,28 @@ type approvalResponseSnapshot struct {
 func (s *RuntimeStore) RequestCancel(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string, now time.Time) (workflowruntime.CancelRunResult, error) {
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not request cancellation", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not request cancellation", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = LockAPIMutationTx(ctx, tx); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
 			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", err)
 		}
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock cancellation operation", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not lock cancellation operation", err)
 	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL+` FOR UPDATE`, string(organizationID), runID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeNotFound, "run not found", err)
 	}
 	if err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock run", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not lock run", err)
 	}
 	if run.CancelRequestedAt != nil || run.Status == workflowruntime.RunCancelled {
 		if err = CompleteAPIMutationTx(ctx, tx, runID, map[string]any{"runId": runID}); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete cancellation operation", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not complete cancellation operation", err)
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit cancellation replay", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not commit cancellation replay", err)
 		}
 		apimutation.MarkCommitted(ctx)
 		return workflowruntime.CancelRunResult{Run: run, AlreadyRequested: true}, nil
@@ -65,7 +65,7 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, organizationID workflo
 		    SELECT 1 FROM node_attempts
 		    WHERE organization_id = $1 AND run_id = $2 AND status = 'running'
 		)`, string(organizationID), runID).Scan(&active); err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not inspect active attempts", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not inspect active attempts", err)
 	}
 	status := workflowruntime.RunCancelled
 	if active {
@@ -76,47 +76,47 @@ func (s *RuntimeStore) RequestCancel(ctx context.Context, organizationID workflo
 		    finished_at = CASE WHEN $4::text = 'cancelled' THEN $3::timestamptz ELSE finished_at END,
 		    version = version + 1
 		WHERE organization_id = $1 AND id = $2`, string(organizationID), runID, now, dbRunStatus(status)); err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist cancellation", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not persist cancellation", err)
 	}
 	if !active {
 		if _, err = tx.Exec(ctx, `
 			UPDATE node_attempts SET status = 'cancelled', finished_at = $3, updated_at = $3
 			WHERE organization_id = $1 AND run_id = $2 AND status IN ('pending', 'retry_ready', 'suspended')`,
 			string(organizationID), runID, now); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel idle attempts", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not cancel idle attempts", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE node_states SET status = 'cancelled', updated_at = $3
 			WHERE organization_id = $1 AND run_id = $2 AND status IN ('pending', 'ready', 'suspended')`,
 			string(organizationID), runID, now); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel idle nodes", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not cancel idle nodes", err)
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE interrupts SET status = 'cancelled', resolved_at = $3
 			WHERE organization_id = $1 AND run_id = $2 AND status = 'pending'`,
 			string(organizationID), runID, now); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel pending interrupts", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not cancel pending interrupts", err)
 		}
 		if _, err = releaseRunAdmissionTx(ctx, tx, organizationID, runID, now); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not release run capacity", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not release run capacity", err)
 		}
 	}
 	for _, eventType := range cancellationEventTypes(active) {
 		if _, err = appendEventTx(ctx, tx, string(organizationID), runID, eventType, json.RawMessage(`{}`)); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not append cancellation event", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not append cancellation event", err)
 		}
 		if err = insertOutboxTx(ctx, tx, string(organizationID), "run", runID, eventType, json.RawMessage(`{}`)); err != nil {
-			return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not enqueue cancellation event", err)
+			return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not enqueue cancellation event", err)
 		}
 	}
 	if err = cancelSubworkflowDescendantsTx(ctx, tx, organizationID, runID, now); err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not cancel subworkflow descendants", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not cancel subworkflow descendants", err)
 	}
 	if err = CompleteAPIMutationTx(ctx, tx, runID, map[string]any{"runId": runID}); err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete cancellation operation", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not complete cancellation operation", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit cancellation", err)
+		return workflowruntime.CancelRunResult{}, runtimePersistenceError("could not commit cancellation", err)
 	}
 	apimutation.MarkCommitted(ctx)
 	updated, err := s.GetRun(ctx, organizationID, runID)
@@ -146,20 +146,20 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resolve approval", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not resolve approval", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = LockAPIMutationTx(ctx, tx); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
 			return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", err)
 		}
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock approval operation", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not lock approval operation", err)
 	}
 	if _, err = tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))`,
 		string(request.OrganizationID), request.IdempotencyKey,
 	); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock approval idempotency key", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not lock approval idempotency key", err)
 	}
 	var existingHash []byte
 	var existingInterruptID string
@@ -176,20 +176,20 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 			return workflowruntime.ResolveInterruptResult{}, replayErr
 		}
 		if err = CompleteAPIMutationTx(ctx, tx, request.InterruptID, map[string]any{"runId": result.Run.ID}); err != nil {
-			return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete approval operation", err)
+			return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not complete approval operation", err)
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit approval replay", err)
+			return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not commit approval replay", err)
 		}
 		apimutation.MarkCommitted(ctx)
 		return result, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not inspect approval idempotency key", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not inspect approval idempotency key", err)
 	}
 	var databaseNow time.Time
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not read database clock", err)
 	}
 	var interrupt workflowruntime.Interrupt
 	var organization string
@@ -213,7 +213,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalInvalid, "approval token is invalid", nil)
 	}
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock approval", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not lock approval", err)
 	}
 	if len(digest) != len(request.TokenDigest) || subtle.ConstantTimeCompare(digest, request.TokenDigest[:]) != 1 {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeApprovalInvalid, "approval token is invalid", nil)
@@ -241,42 +241,42 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	}
 	decisionID, err := NewID("decision")
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not allocate approval decision", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not allocate approval decision", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE interrupts SET status = 'resolved', resolved_at = $3
 		WHERE organization_id = $1 AND id = $2 AND status = 'pending'`, request.OrganizationID, request.InterruptID, databaseNow); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not consume approval", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not consume approval", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_attempts SET status = 'pending', resume_data = $4,
 		    available_at = $3, updated_at = $3
 		WHERE organization_id = $1 AND id = $2 AND status = 'suspended'`, request.OrganizationID, interrupt.AttemptID, databaseNow, decision); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume attempt", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not resume attempt", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'pending', updated_at = $3
 		WHERE organization_id = $1 AND run_id = $2 AND node_id = $4`, request.OrganizationID, interrupt.RunID, databaseNow, interrupt.NodeID); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume node", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not resume node", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runs SET status = CASE WHEN status = 'suspended' THEN 'pending' ELSE status END,
 		    updated_at = $3, version = version + 1
 		WHERE organization_id = $1 AND id = $2 AND status IN ('suspended','running')`, request.OrganizationID, interrupt.RunID, databaseNow); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume run", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not resume run", err)
 	}
 	interrupt.ResolvedAt = &databaseNow
 	interrupt.Status = workflowruntime.InterruptResolved
 	interrupt.Decision = decision
 	if _, err = appendEventTx(ctx, tx, string(request.OrganizationID), interrupt.RunID, "approval.resolved", decision); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not append approval event", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not append approval event", err)
 	}
 	if err = insertOutboxTx(ctx, tx, string(request.OrganizationID), "run", interrupt.RunID, "approval.resolved", decision); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not enqueue approval event", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not enqueue approval event", err)
 	}
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), interrupt.RunID))
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read resumed run", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not read resumed run", err)
 	}
 	responseSnapshot, err := json.Marshal(approvalResponseSnapshot{
 		RunID: run.ID, PlanID: run.Plan.ID, PlanHash: run.Plan.Hash, Status: run.Status,
@@ -285,7 +285,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 		UpdatedAt: run.UpdatedAt, Version: run.Version,
 	})
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not encode approval response", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not encode approval response", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO approval_decisions (
@@ -295,17 +295,17 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 		decisionID, request.OrganizationID, request.InterruptID, decisionName, decision,
 		request.DecidedBy, request.Decision.Comment, request.Now, request.IdempotencyKey,
 		request.RequestHash[:], responseSnapshot); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist approval", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not persist approval", err)
 	}
 	storedResult, err := resolvedInterruptResultTx(ctx, tx, request.OrganizationID, request.InterruptID)
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, err
 	}
 	if err = CompleteAPIMutationTx(ctx, tx, request.InterruptID, map[string]any{"runId": storedResult.Run.ID}); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete approval operation", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not complete approval operation", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit approval", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not commit approval", err)
 	}
 	apimutation.MarkCommitted(ctx)
 	return storedResult, nil
@@ -329,18 +329,18 @@ func resolvedInterruptResultTx(ctx context.Context, tx pgx.Tx, organizationID wo
 		&interrupt.CreatedAt, &interrupt.Decision, &responseSnapshotJSON,
 	)
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not replay approval result", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not replay approval result", err)
 	}
 	interrupt.OrganizationID = workflowruntime.OrganizationID(storedOrganization)
 	interrupt.Status = workflowruntime.InterruptResolved
 	copy(interrupt.TokenDigest[:], digest)
 	run, err := scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(organizationID), interrupt.RunID))
 	if err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not read replayed run", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not read replayed run", err)
 	}
 	var snapshot approvalResponseSnapshot
 	if err = json.Unmarshal(responseSnapshotJSON, &snapshot); err != nil {
-		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not decode approval response", err)
+		return workflowruntime.ResolveInterruptResult{}, runtimePersistenceError("could not decode approval response", err)
 	}
 	if snapshot.RunID == "" || snapshot.PlanID == "" || snapshot.PlanHash == "" || snapshot.Status == "" ||
 		snapshot.CreatedAt.IsZero() || snapshot.UpdatedAt.IsZero() || snapshot.RunID != interrupt.RunID {

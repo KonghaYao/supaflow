@@ -143,7 +143,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		"fencingToken": work.Lease.FencingToken, "takeover": tookOver,
 	})
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not encode claim event", err)
+		return nil, runtimePersistenceError("could not encode claim event", err)
 	}
 	claimEvents := make([]workflowruntime.Event, 0, 3)
 	if firstStart {

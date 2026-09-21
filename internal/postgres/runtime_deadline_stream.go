@@ -30,31 +30,31 @@ func (s *RuntimeStore) ExpireRuns(ctx context.Context, organizationID workflowru
 	now = timeOrNow(now)
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not start run expiry", err)
+		return 0, runtimePersistenceError("could not start run expiry", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not read deadline clock", err)
+		return 0, runtimePersistenceError("could not read deadline clock", err)
 	}
 	rows, err := tx.Query(ctx, `SELECT id FROM runs
 		WHERE organization_id=$1 AND deadline_at IS NOT NULL AND deadline_at <= $2
 		  AND status IN ('pending','running','suspended','cancelling')
 		ORDER BY deadline_at,id FOR UPDATE SKIP LOCKED LIMIT $3`, organizationID, now, limit)
 	if err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not claim expired runs", err)
+		return 0, runtimePersistenceError("could not claim expired runs", err)
 	}
 	runIDs := make([]string, 0, limit)
 	for rows.Next() {
 		var runID string
 		if err = rows.Scan(&runID); err != nil {
 			rows.Close()
-			return 0, runtimeError(workflowruntime.CodeConflict, "could not decode expired run", err)
+			return 0, runtimePersistenceError("could not decode expired run", err)
 		}
 		runIDs = append(runIDs, runID)
 	}
 	rows.Close()
 	if err = rows.Err(); err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not iterate expired runs", err)
+		return 0, runtimePersistenceError("could not iterate expired runs", err)
 	}
 	payload := json.RawMessage(`{"code":"run_timeout"}`)
 	for _, runID := range runIDs {
@@ -72,7 +72,7 @@ func (s *RuntimeStore) ExpireRuns(ctx context.Context, organizationID workflowru
 		expired += approvalCount
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not commit run expiry", err)
+		return 0, runtimePersistenceError("could not commit run expiry", err)
 	}
 	return expired, nil
 }
@@ -98,19 +98,19 @@ func expireApprovalInterruptsTx(ctx context.Context, tx pgx.Tx, organizationID w
 		  AND r.status IN ('pending','running','suspended','cancelling')
 		ORDER BY i.expires_at,i.id FOR UPDATE OF i,r SKIP LOCKED LIMIT $3`, organizationID, now, limit)
 	if err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not claim expired approvals", err)
+		return 0, runtimePersistenceError("could not claim expired approvals", err)
 	}
 	defer rows.Close()
 	approvals := make([]expiredApproval, 0, limit)
 	for rows.Next() {
 		var approval expiredApproval
 		if err = rows.Scan(&approval.id, &approval.runID, &approval.attemptID, &approval.nodeStateID, &approval.nodeID); err != nil {
-			return 0, runtimeError(workflowruntime.CodeConflict, "could not decode expired approval", err)
+			return 0, runtimePersistenceError("could not decode expired approval", err)
 		}
 		approvals = append(approvals, approval)
 	}
 	if err = rows.Err(); err != nil {
-		return 0, runtimeError(workflowruntime.CodeConflict, "could not iterate expired approvals", err)
+		return 0, runtimePersistenceError("could not iterate expired approvals", err)
 	}
 	expired := 0
 	for _, approval := range approvals {
@@ -130,7 +130,7 @@ func expireApprovalTx(ctx context.Context, tx pgx.Tx, organizationID workflowrun
 	tag, err := tx.Exec(ctx, `UPDATE runs SET status='error', finished_at=$3, updated_at=$3, version=version+1
 		WHERE organization_id=$1 AND id=$2 AND status IN ('pending','running','suspended','cancelling')`, organizationID, approval.runID, now)
 	if err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not finalize approval run", err)
+		return false, runtimePersistenceError("could not finalize approval run", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return false, nil
@@ -141,7 +141,7 @@ func expireApprovalTx(ctx context.Context, tx pgx.Tx, organizationID workflowrun
 		finished_at=$4, updated_at=$4
 		WHERE organization_id=$1 AND run_id=$2 AND status IN ('pending','retry_ready','running','suspended')`,
 		organizationID, approval.runID, approval.attemptID, now, payload); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not finalize approval attempts", err)
+		return false, runtimePersistenceError("could not finalize approval attempts", err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE node_states SET
 		status=CASE WHEN id=$3 THEN 'error' ELSE 'cancelled' END,
@@ -149,18 +149,18 @@ func expireApprovalTx(ctx context.Context, tx pgx.Tx, organizationID workflowrun
 		updated_at=$4
 		WHERE organization_id=$1 AND run_id=$2 AND status IN ('pending','ready','running','suspended')`,
 		organizationID, approval.runID, approval.nodeStateID, now, payload); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not finalize approval nodes", err)
+		return false, runtimePersistenceError("could not finalize approval nodes", err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE interrupts SET
 		status=CASE WHEN id=$3 THEN 'expired' ELSE 'cancelled' END, resolved_at=$4
 		WHERE organization_id=$1 AND run_id=$2 AND status='pending'`, organizationID, approval.runID, approval.id, now); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not close expired approval interrupts", err)
+		return false, runtimePersistenceError("could not close expired approval interrupts", err)
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM worker_leases WHERE organization_id=$1 AND run_id=$2`, organizationID, approval.runID); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not invalidate approval leases", err)
+		return false, runtimePersistenceError("could not invalidate approval leases", err)
 	}
 	if _, err = releaseRunAdmissionTx(ctx, tx, organizationID, approval.runID, now); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not release expired approval capacity", err)
+		return false, runtimePersistenceError("could not release expired approval capacity", err)
 	}
 	if err = cancelSubworkflowDescendantsWithReasonTx(ctx, tx, organizationID, approval.runID, now, "parent_terminal"); err != nil {
 		return false, err
@@ -168,7 +168,7 @@ func expireApprovalTx(ctx context.Context, tx pgx.Tx, organizationID workflowrun
 	if _, err = appendRuntimeEvents(ctx, tx, organizationID, approval.runID, []workflowruntime.Event{
 		{Type: "node.timed_out", Data: payload}, {Type: "run.error", Data: payload},
 	}); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not persist approval timeout events", err)
+		return false, runtimePersistenceError("could not persist approval timeout events", err)
 	}
 	return true, nil
 }
@@ -184,11 +184,11 @@ func (s *RuntimeStore) ExpireRun(ctx context.Context, organizationID workflowrun
 	now = timeOrNow(now)
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not start targeted run expiry", err)
+		return false, runtimePersistenceError("could not start targeted run expiry", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not read deadline clock", err)
+		return false, runtimePersistenceError("could not read deadline clock", err)
 	}
 	var found string
 	err = tx.QueryRow(ctx, `SELECT id FROM runs
@@ -198,25 +198,25 @@ func (s *RuntimeStore) ExpireRun(ctx context.Context, organizationID workflowrun
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if lookupErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE organization_id=$1 AND id=$2)`, organizationID, runID).Scan(&exists); lookupErr != nil {
-			return false, runtimeError(workflowruntime.CodeConflict, "could not inspect targeted run expiry", lookupErr)
+			return false, runtimePersistenceError("could not inspect targeted run expiry", lookupErr)
 		}
 		if !exists {
 			return false, runtimeError(workflowruntime.CodeNotFound, "run not found", nil)
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return false, runtimeError(workflowruntime.CodeConflict, "could not commit targeted run expiry", err)
+			return false, runtimePersistenceError("could not commit targeted run expiry", err)
 		}
 		return false, nil
 	}
 	if err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not lock targeted run expiry", err)
+		return false, runtimePersistenceError("could not lock targeted run expiry", err)
 	}
 	payload := json.RawMessage(`{"code":"run_timeout"}`)
 	if err = expireRunTx(ctx, tx, organizationID, found, now, payload); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return false, runtimeError(workflowruntime.CodeConflict, "could not commit targeted run expiry", err)
+		return false, runtimePersistenceError("could not commit targeted run expiry", err)
 	}
 	return true, nil
 }
@@ -224,7 +224,7 @@ func (s *RuntimeStore) ExpireRun(ctx context.Context, organizationID workflowrun
 func expireRunTx(ctx context.Context, tx pgx.Tx, organizationID workflowruntime.OrganizationID, runID string, now time.Time, payload json.RawMessage) error {
 	descendants, err := descendantRunIDsTx(ctx, tx, organizationID, runID)
 	if err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not lock subworkflow descendants", err)
+		return runtimePersistenceError("could not lock subworkflow descendants", err)
 	}
 	if err = expireSingleRunTx(ctx, tx, organizationID, runID, now, payload); err != nil {
 		return err
@@ -241,7 +241,7 @@ func expireSingleRunTx(ctx context.Context, tx pgx.Tx, organizationID workflowru
 	tag, err := tx.Exec(ctx, `UPDATE runs SET status='error', finished_at=$3, updated_at=$3, version=version+1
 		WHERE organization_id=$1 AND id=$2 AND status IN ('pending','running','suspended','cancelling')`, organizationID, runID, now)
 	if err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not timeout run", err)
+		return runtimePersistenceError("could not timeout run", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return nil
@@ -249,26 +249,26 @@ func expireSingleRunTx(ctx context.Context, tx pgx.Tx, organizationID workflowru
 	if _, err := tx.Exec(ctx, `UPDATE node_attempts
 		SET status='timed_out', error=$4, finished_at=$3, updated_at=$3
 		WHERE organization_id=$1 AND run_id=$2 AND status IN ('pending','retry_ready','running','suspended')`, organizationID, runID, now, payload); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not timeout attempts", err)
+		return runtimePersistenceError("could not timeout attempts", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_states SET status='error', last_error=$4, updated_at=$3
 		WHERE organization_id=$1 AND run_id=$2 AND status IN ('pending','ready','running','suspended')`, organizationID, runID, now, payload); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not timeout nodes", err)
+		return runtimePersistenceError("could not timeout nodes", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE interrupts SET status='cancelled', resolved_at=$3
 		WHERE organization_id=$1 AND run_id=$2 AND status='pending'`, organizationID, runID, now); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not close timed out interrupts", err)
+		return runtimePersistenceError("could not close timed out interrupts", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM worker_leases WHERE organization_id=$1 AND run_id=$2`, organizationID, runID); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not invalidate timed out leases", err)
+		return runtimePersistenceError("could not invalidate timed out leases", err)
 	}
 	if _, err := releaseRunAdmissionTx(ctx, tx, organizationID, runID, now); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not release timed out run capacity", err)
+		return runtimePersistenceError("could not release timed out run capacity", err)
 	}
 	if _, err := appendRuntimeEvents(ctx, tx, organizationID, runID, []workflowruntime.Event{
 		{Type: "run.timed_out", Data: payload}, {Type: "run.error", Data: payload},
 	}); err != nil {
-		return runtimeError(workflowruntime.CodeConflict, "could not persist timeout events", err)
+		return runtimePersistenceError("could not persist timeout events", err)
 	}
 	return nil
 }
@@ -284,7 +284,7 @@ func (s *RuntimeStore) AppendStreamChunk(ctx context.Context, request workflowru
 	request.Now = timeOrNow(request.Now)
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not start stream commit", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not start stream commit", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	_, nodeID, err := validateRuntimeLease(ctx, tx, request.OrganizationID, request.RunID, request.AttemptID, request.WorkerID, request.FencingToken, request.Now)
@@ -316,30 +316,30 @@ func (s *RuntimeStore) AppendStreamChunk(ctx context.Context, request workflowru
 		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "stream sequence is not contiguous or attempt stream limit was exceeded", nil)
 	}
 	if err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not reserve stream chunk", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not reserve stream chunk", err)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"attemptId": request.AttemptID, "nodeId": nodeID, "sequence": request.Sequence,
 		"chunk": json.RawMessage(request.Chunk),
 	})
 	if err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not encode stream chunk", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not encode stream chunk", err)
 	}
 	event, err := appendEventTx(ctx, tx, string(request.OrganizationID), request.RunID, "stream.chunk", payload)
 	if err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not persist stream chunk", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not persist stream chunk", err)
 	}
 	if err = insertOutboxTx(ctx, tx, string(request.OrganizationID), "run", request.RunID, "stream.chunk", payload); err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not enqueue stream chunk", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not enqueue stream chunk", err)
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO attempt_stream_chunks
 		(organization_id,attempt_id,run_id,chunk_sequence,content_hash,event_sequence,created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)`, request.OrganizationID, request.AttemptID, request.RunID,
 		request.Sequence, digest[:], event.Sequence, request.Now); err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not record stream idempotency", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not record stream idempotency", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not commit stream chunk", err)
+		return workflowruntime.Event{}, runtimePersistenceError("could not commit stream chunk", err)
 	}
 	return workflowruntime.Event{OrganizationID: request.OrganizationID, RunID: request.RunID, Cursor: uint64(event.Sequence), Type: event.Type, Data: event.Payload, At: event.CreatedAt}, nil
 }
@@ -357,7 +357,7 @@ func findStreamChunk(ctx context.Context, tx pgx.Tx, request workflowruntime.App
 		return workflowruntime.Event{}, false, nil
 	}
 	if err != nil {
-		return workflowruntime.Event{}, false, runtimeError(workflowruntime.CodeConflict, "could not read stream idempotency", err)
+		return workflowruntime.Event{}, false, runtimePersistenceError("could not read stream idempotency", err)
 	}
 	if subtle.ConstantTimeCompare(storedDigest, digest[:]) != 1 {
 		return workflowruntime.Event{}, false, runtimeError(workflowruntime.CodeConflict, "stream sequence was used for different content", nil)

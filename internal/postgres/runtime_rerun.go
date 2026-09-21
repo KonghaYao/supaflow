@@ -18,24 +18,24 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	}
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.Run.OrganizationID))
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not start rerun", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not start rerun", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = LockAPIMutationTx(ctx, tx); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
 			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", err)
 		}
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock rerun operation", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not lock rerun operation", err)
 	}
 
 	if replay, found, lookupErr := rerunReplay(ctx, tx, request); lookupErr != nil {
 		return workflowruntime.CreateRunResult{}, lookupErr
 	} else if found {
 		if err = CompleteAPIMutationTx(ctx, tx, replay.ID, map[string]any{"runId": replay.ID}); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete rerun operation", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete rerun operation", err)
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit rerun replay", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not commit rerun replay", err)
 		}
 		apimutation.MarkCommitted(ctx)
 		return workflowruntime.CreateRunResult{Run: replay}, nil
@@ -47,7 +47,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "source run not found", err)
 	}
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not read source run", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not read source run", err)
 	}
 	if !workflowruntime.IsTerminalRun(source.Status) {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeInvalidTransition, "only terminal runs can be rerun", nil)
@@ -62,7 +62,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "source node attempt not found", err)
 		}
 		if err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not read source node input", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not read source node input", err)
 		}
 	}
 	run := request.Run
@@ -75,10 +75,10 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 			return workflowruntime.CreateRunResult{}, replayErr
 		} else if found {
 			if err = CompleteAPIMutationTx(ctx, tx, replay.ID, map[string]any{"runId": replay.ID}); err != nil {
-				return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete rerun operation", err)
+				return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete rerun operation", err)
 			}
 			if err = tx.Commit(ctx); err != nil {
-				return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit rerun replay", err)
+				return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not commit rerun replay", err)
 			}
 			apimutation.MarkCommitted(ctx)
 			return workflowruntime.CreateRunResult{Run: replay}, nil
@@ -86,7 +86,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "execution plan not found", err)
 	}
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun", err)
 	}
 	admission, admissionErr := admitRunTx(ctx, tx, run)
 	if admissionErr != nil {
@@ -94,7 +94,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 		if errors.As(admissionErr, &runtimeAdmissionErr) {
 			return workflowruntime.CreateRunResult{}, admissionErr
 		}
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not admit rerun", admissionErr)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not admit rerun", admissionErr)
 	}
 	var fromNode any
 	if request.FromNodeID != "" {
@@ -103,31 +103,31 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	_, err = tx.Exec(ctx, `INSERT INTO run_rerun_lineage (organization_id, run_id, source_run_id, from_node_id, created_at)
 		VALUES ($1, $2, $3, $4, $5)`, run.OrganizationID, run.ID, source.ID, fromNode, run.CreatedAt)
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun lineage", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun lineage", err)
 	}
 	payload, _ := json.Marshal(map[string]any{"sourceRunId": source.ID, "fromNodeId": fromNode})
 	if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, "run.created", payload); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun event", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun event", err)
 	}
 	if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, "run.created", payload); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun delivery", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun delivery", err)
 	}
 	admissionPayload, _ := json.Marshal(map[string]any{"priority": run.Priority, "status": admission.status})
 	admissionEvent := runtimeAdmissionEvent(admission.status)
 	if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, admissionEvent, admissionPayload); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun admission event", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun admission event", err)
 	}
 	if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, admissionEvent, admissionPayload); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist rerun admission delivery", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist rerun admission delivery", err)
 	}
 	if err = seedRuntimeAttempt(ctx, tx, run); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not seed rerun attempt", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not seed rerun attempt", err)
 	}
 	if err = CompleteAPIMutationTx(ctx, tx, stored.ID, map[string]any{"runId": stored.ID}); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete rerun operation", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete rerun operation", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit rerun", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not commit rerun", err)
 	}
 	apimutation.MarkCommitted(ctx)
 	stored.Input = input
@@ -142,7 +142,7 @@ func rerunReplay(ctx context.Context, tx pgx.Tx, request workflowruntime.RerunRu
 		return workflowruntime.Run{}, false, nil
 	}
 	if err != nil {
-		return workflowruntime.Run{}, false, runtimeError(workflowruntime.CodeConflict, "could not inspect rerun idempotency", err)
+		return workflowruntime.Run{}, false, runtimePersistenceError("could not inspect rerun idempotency", err)
 	}
 	if subtle.ConstantTimeCompare([]byte(run.RequestFingerprint), []byte(request.Run.RequestFingerprint)) != 1 {
 		return workflowruntime.Run{}, false, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", ErrIdempotencyConflict)

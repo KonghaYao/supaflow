@@ -13,7 +13,7 @@ import (
 func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowruntime.CompleteAttemptRequest) (workflowruntime.Run, error) {
 	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not complete attempt", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not complete attempt", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	request.Now = timeOrNow(request.Now)
@@ -28,7 +28,7 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		SELECT status, cancel_requested_at FROM runs
 		WHERE organization_id = $1 AND id = $2 FOR UPDATE`, request.OrganizationID, request.RunID).Scan(
 		&currentStatus, &cancelRequestedAt); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not lock completing run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not lock completing run", err)
 	}
 	if currentStatus != "running" && currentStatus != "cancelling" {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeInvalidTransition, "run cannot accept attempt completion", nil)
@@ -51,7 +51,7 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		request.Output.RunID = request.RunID
 		request.Output.AttemptID = request.AttemptID
 		if err = persistRuntimeOutput(ctx, tx, nodeStateID, request.Output, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist attempt output", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not persist attempt output", err)
 		}
 	}
 	if _, err = tx.Exec(ctx, `
@@ -59,7 +59,7 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		SET status = $4, finished_at = $5, updated_at = $5
 		WHERE organization_id = $1 AND run_id = $2 AND id = $3`,
 		request.OrganizationID, request.RunID, request.AttemptID, attemptStatus, request.Now); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish attempt", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not finish attempt", err)
 	}
 	var outputID any
 	if request.Output != nil {
@@ -69,23 +69,23 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		UPDATE node_states SET status = $3, output_id = $4, updated_at = $5
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID,
 		nodeStatus, outputID, request.Now); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish node", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not finish node", err)
 	}
 	if request.RunStatus == workflowruntime.RunCancelled {
 		if err = terminateRemainingRunWorkTx(ctx, tx, request.OrganizationID, request.RunID, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not finish cancelled run work", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not finish cancelled run work", err)
 		}
 	}
 	for _, next := range request.Next {
 		if err = enqueueDAGSuccessor(ctx, tx, request.OrganizationID, request.RunID, next, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not create successor attempt", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not create successor attempt", err)
 		}
 	}
 	status := request.RunStatus
 	if status != workflowruntime.RunCancelled {
 		status, err = remainingDAGRunStatus(ctx, tx, request.OrganizationID, request.RunID)
 		if err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not inspect DAG completion", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not inspect DAG completion", err)
 		}
 	}
 	if _, err = tx.Exec(ctx, `
@@ -95,11 +95,11 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 		    version = version + 1
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, request.RunID,
 		dbRunStatus(status), request.Now, outputID); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not advance run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not advance run", err)
 	}
 	if isTerminalRuntimeStatus(status) {
 		if _, err = releaseRunAdmissionTx(ctx, tx, request.OrganizationID, request.RunID, request.Now); err != nil {
-			return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release run capacity", err)
+			return workflowruntime.Run{}, runtimePersistenceError("could not release run capacity", err)
 		}
 	}
 	defaultEvents := []string{"node.completed"}
@@ -108,24 +108,24 @@ func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowrunt
 	}
 	sequence, err := appendRuntimeEvents(ctx, tx, request.OrganizationID, request.RunID, request.Events, defaultEvents...)
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist completion events", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not persist completion events", err)
 	}
 	if err = persistRuntimeSnapshot(ctx, tx, request.OrganizationID, request.RunID,
 		request.AttemptID, request.Snapshot, sequence, request.Now); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not persist completion snapshot", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not persist completion snapshot", err)
 	}
 	if request.RunStatus != workflowruntime.RunCancelled {
 		err = releaseTerminalLease(ctx, tx, request.OrganizationID, request.AttemptID)
 	}
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not release completed lease", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not release completed lease", err)
 	}
 	run, err := scanRuntimeRunProjection(tx.QueryRow(ctx, runtimeRunProjectionByIDSQL, string(request.OrganizationID), request.RunID))
 	if err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not read completed run", err)
+		return workflowruntime.Run{}, runtimePersistenceError("could not read completed run", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not commit attempt completion", workflowruntime.MarkCommitOutcomeUnknown(err))
+		return workflowruntime.Run{}, runtimePersistenceError("could not commit attempt completion", workflowruntime.MarkCommitOutcomeUnknown(err))
 	}
 	return run, nil
 }

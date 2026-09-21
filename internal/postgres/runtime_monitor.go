@@ -25,19 +25,19 @@ func (s *RuntimeStore) ListRuns(ctx context.Context, organizationID workflowrunt
 		WHERE r.organization_id=$1 AND ($2='' OR r.workflow_id=$2) AND ($3='' OR r.status=$3)
 		ORDER BY r.created_at DESC,r.id DESC LIMIT $4`, string(organizationID), filter.WorkflowID, dbRunStatus(filter.Status), filter.Limit)
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not list runs", err)
+		return nil, runtimePersistenceError("could not list runs", err)
 	}
 	defer rows.Close()
 	items := make([]workflowruntime.RunSummary, 0)
 	for rows.Next() {
 		item, scanErr := scanRuntimeRunSummary(rows, organizationID)
 		if scanErr != nil {
-			return nil, runtimeError(workflowruntime.CodeConflict, "could not decode run", scanErr)
+			return nil, runtimePersistenceError("could not decode run", scanErr)
 		}
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not iterate runs", err)
+		return nil, runtimePersistenceError("could not iterate runs", err)
 	}
 	return items, nil
 }
@@ -88,7 +88,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, organizationID workflo
 		WHERE n.organization_id=$1 AND n.run_id=$2
 		ORDER BY n.created_at,n.node_id,a.attempt_number`, string(organizationID), runID)
 	if err != nil {
-		return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not read run diagnostics", err)
+		return workflowruntime.RunDetails{}, runtimePersistenceError("could not read run diagnostics", err)
 	}
 	defer rows.Close()
 	byNode := make(map[string]*workflowruntime.NodeDiagnostic)
@@ -110,7 +110,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, organizationID workflo
 			&attemptID, &executor, &attemptNumber, &attemptStatus, &input, &availableAt, &startedAt, &finishedAt,
 			&errorCode, &attemptCreatedAt, &attemptUpdatedAt, &outputID, &inline, &contentType, &outputSize,
 			&outputHash, &sensitivity, &external, &retentionStatus); err != nil {
-			return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not decode diagnostics", err)
+			return workflowruntime.RunDetails{}, runtimePersistenceError("could not decode diagnostics", err)
 		}
 		node := byNode[nodeID]
 		if node == nil {
@@ -132,7 +132,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, organizationID workflo
 		}
 	}
 	if err = rows.Err(); err != nil {
-		return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not iterate diagnostics", err)
+		return workflowruntime.RunDetails{}, runtimePersistenceError("could not iterate diagnostics", err)
 	}
 	nodes := make([]workflowruntime.NodeDiagnostic, 0, len(order))
 	for _, nodeID := range order {
@@ -140,7 +140,7 @@ func (s *RuntimeStore) GetRunDetails(ctx context.Context, organizationID workflo
 	}
 	var cursor uint64
 	if err = s.repository.pool.QueryRow(ctx, `SELECT next_event_sequence FROM runs WHERE organization_id=$1 AND id=$2`, string(organizationID), runID).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return workflowruntime.RunDetails{}, runtimeError(workflowruntime.CodeConflict, "could not read event cursor", err)
+		return workflowruntime.RunDetails{}, runtimePersistenceError("could not read event cursor", err)
 	}
 	return workflowruntime.RunDetails{Run: run, Nodes: nodes, LastEventCursor: cursor}, nil
 }

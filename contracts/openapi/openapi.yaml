@@ -422,7 +422,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Run'
+        '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: The transaction could not be completed, so the cancellation was not persisted; repeating the request is safe after the `Retry-After` delay.
+          headers:
+            Retry-After: { schema: { type: integer, minimum: 1 } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /runs/{runId}/events:
     get:
       operationId: streamRunEvents
