@@ -33,8 +33,9 @@ func TestValidRequestTargetRefusesUnstorableBytes(t *testing.T) {
 	}
 }
 
-// 验证请求体里「JSON 语法合法、jsonb 却存不下」的转义被识别：\u0000 与孤立代理拒绝，
-// 合法代理对与字面量 \\u0000 放行。放宽这一格会让调用方拿到 500，收紧则会把能存的文档挡在门外。
+// 验证请求体里「JSON 语法合法、存下去却会变形或存不下」的字节在边缘被识别：\u0000 与孤立代理、
+// 以及裸的非法 UTF-8 字节都拒绝，合法代理对与字面量 \\u0000 放行。放宽这一格会让调用方拿到 500，
+// 或让两个不同的名字在库里合并成一个（解码器把非法字节换成 U+FFFD），收紧则会把能存的文档挡在门外。
 func TestStorableJSONMatchesOnlyEscapesJSONBRejects(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -59,6 +60,11 @@ func TestStorableJSONMatchesOnlyEscapesJSONBRejects(t *testing.T) {
 		{name: "非 ASCII 与 emoji 原文放行", body: `{"label":"流程 🚀"}`, storable: true},
 		{name: "不含转义的大 body 放行", body: `{"document":{` + strings.Repeat(`"node":"value",`, 4096) + `"end":1}}`, storable: true},
 		{name: "字符串外的转义不由本函数判定，语法错误交给解码器", body: `{"label": \u0000}`, storable: true},
+		{name: "字符串里的裸非法字节被拒", body: `{"label":"name-a` + "\xff" + `"}`, storable: false},
+		{name: "另一个裸非法字节同样被拒", body: `{"label":"name-a` + "\xfe" + `"}`, storable: false},
+		{name: "字符串外的裸非法字节也被拒", body: `{` + "\xf5" + `"label":"ok"}`, storable: false},
+		{name: "截断的多字节序列被拒", body: `{"label":"` + "\xe4\xb8" + `"}`, storable: false},
+		{name: "合法 UTF-8 原文放行", body: `{"label":"流程` + "\xf0\x9f\x9a\x80" + `"}`, storable: true},
 	}
 	for _, testCase := range cases {
 		if got := StorableJSON([]byte(testCase.body)); got != testCase.storable {

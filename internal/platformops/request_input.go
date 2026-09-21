@@ -57,7 +57,18 @@ func StorableText(value string) bool {
 // Only escapes inside string literals are interpreted, and an escape is consumed together with
 // the character it escapes, so the literal text \\ followed by u0000 — a backslash, which jsonb
 // stores happily — is not mistaken for a NUL escape, and \" does not end the string early.
+//
+// A JSON document is UTF-8 by definition (RFC 8259), so a body that is not valid UTF-8 has no
+// decoded form to preserve: encoding/json substitutes U+FFFD for every illegal byte without any
+// error, which makes two different requests (…-a\xff and …-a\xfe) decode to the same text and
+// store the same value. The second one is then answered "already exists" for a name the caller
+// never asked for, and the name it did ask for becomes impossible to create. Rejecting the bytes
+// keeps naming honest; it is also the same judgement StorableText already makes for the request
+// target, so the body and the target stay symmetric.
 func StorableJSON(value []byte) bool {
+	if !utf8.Valid(value) {
+		return false
+	}
 	insideString := false
 	for index := 0; index < len(value); index++ {
 		switch value[index] {

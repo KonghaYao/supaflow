@@ -152,6 +152,46 @@ func TestCredentialRouteRejectsUnstorableName(t *testing.T) {
 	}
 }
 
+// 验证 /ops 请求体里的裸非法 UTF-8 字节在解码边界返回 400 invalid_request：credentials.name 是
+// text 列，Go 的解码器会把非法字节静默换成 U+FFFD，于是两个只差一个字节的名字在库里合并成同一个
+// 名字——第一个 201、第二个 409，调用方以为是自己重名，实际是服务端把它的输入改掉了。
+// 这是有意的行为变更：此前这类 body 会被接受并写入。
+func TestCredentialRouteRejectsInvalidUTF8Name(t *testing.T) {
+	provider, err := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &httpCredentialStore{}
+	credentials, err := platformops.NewCredentialService(store, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{services: Services{Credentials: credentials, Mutations: newHTTPMutationLedger()}}
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/ops/credentials",
+		strings.NewReader(`{"name":"name-a`+"\xff"+`","purpose":"webhook_signing","secret":"never-return-this"}`))
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", "organization_auth")
+	request.Header.Set("Idempotency-Key", "credential-utf8-name-1")
+	response := httptest.NewRecorder()
+	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "invalid_request" || store.creates != 0 {
+		t.Fatalf("code=%q creates=%d", body.Code, store.creates)
+	}
+}
+
 // 验证所有 ops mutation 共用持久幂等语义：同指纹重放，异指纹冲突且不再执行。
 func TestCredentialMutationReplaysAndRejectsFingerprintConflict(t *testing.T) {
 	provider, _ := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{7}, 32))

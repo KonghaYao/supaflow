@@ -47,6 +47,29 @@ func TestInvalidJSONKeepsItsOwnCode(t *testing.T) {
 	assertProblemCode(t, response, http.StatusBadRequest, "invalid_json")
 }
 
+// 验证请求体里的裸非法 UTF-8 字节在解码边界返回 400：JSON 文档按 RFC 8259 必须是 UTF-8，
+// Go 的解码器却会把它静默换成 U+FFFD——两个只差最后一个字节的名字因此在库里合并成一个，
+// 第一个 201、第二个 409 conflict，调用方被告知「你已经建过了」，而它真正要的名字永远建不出来。
+// 这是有意的行为变更：此前这类 body 会被接受。
+func TestInvalidUTF8RequestBodyIsRejectedBeforeHandler(t *testing.T) {
+	handler := studioHandler(t)
+	// 裸字节必须手工拼：json.Marshal 会把非法序列预先换成 \ufffd，那正是要拦掉的那种静默替换。
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/workflows",
+		strings.NewReader(`{"workflowId":"body-utf8`+"\xff"+`","document":`+string(documentWithLabel("body-utf8", "ok"))+`}`))
+	authenticatedTestRequest(request, organizationAKey)
+	request.Header.Set("Idempotency-Key", "body-utf8-create-1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertProblemCode(t, response, http.StatusBadRequest, "invalid_argument")
+
+	// 对照组：合法 UTF-8 文本必须照常写下来，边缘校验不能把能存的文档挡在门外。
+	accepted := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey, "body-utf8-create-2",
+		map[string]any{"workflowId": "body-utf8", "document": documentWithLabel("body-utf8", "名称 🚀")})
+	if accepted.Code != http.StatusCreated {
+		t.Fatalf("accepted status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+}
+
 // documentWithLabel 构造编辑器形状的文档，label 原样嵌入，用于精确输送某个转义序列。
 func documentWithLabel(id, label string) json.RawMessage {
 	return json.RawMessage(`{"schemaVersion":"flowgram-v1","workflowId":"` + id + `","nodes":[` +
