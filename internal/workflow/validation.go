@@ -36,6 +36,22 @@ type ValidationError struct {
 	Issues []ValidationIssue `json:"issues"`
 }
 
+// ValidWorkflowID reports whether id may name a stored workflow. The rule lives here rather than at
+// each write boundary because a definition stored under any other shape can only ever fail
+// compilation: the draft write boundary and the compiler must agree on exactly the same set, or a
+// draft that can never compile still gets stored.
+func ValidWorkflowID(id string) bool { return idPattern.MatchString(id) }
+
+// InvalidWorkflowIDIssue is the one description of that rule. The compiler and the draft write
+// boundary both report it, so a caller sees the same code, path, and wording whichever of them
+// rejects the id — two spellings of the same rejection would read as two different problems.
+func InvalidWorkflowIDIssue() ValidationIssue {
+	return ValidationIssue{
+		Code: "invalid_id", Path: "id",
+		Message: "workflow id must start with a letter or digit and contain only letters, digits, underscores, or hyphens",
+	}
+}
+
 // Error implements error.
 func (e *ValidationError) Error() string {
 	if e == nil || len(e.Issues) == 0 {
@@ -98,8 +114,8 @@ func (s *validationState) validateIdentity() {
 	if s.definition.SchemaVersion != DefinitionSchemaV1 {
 		s.add("unsupported_schema_version", "schemaVersion", "schemaVersion must be v1")
 	}
-	if !idPattern.MatchString(s.definition.ID) {
-		s.add("invalid_id", "id", "workflow id must start with a letter or digit and contain only letters, digits, underscores, or hyphens")
+	if !ValidWorkflowID(s.definition.ID) {
+		s.issues = append(s.issues, InvalidWorkflowIDIssue())
 	}
 	if s.registry == nil {
 		s.add("registry_required", "nodes", "a node registry is required")

@@ -79,6 +79,23 @@ func (s *Service) toDefinition(document json.RawMessage, workflowID string) (wor
 	return definition, nil
 }
 
+// invalidWorkflowID rejects an id the compiler will always refuse, before it can be stored.
+//
+// workflow.ValidateDefinition requires an id that starts with a letter or digit and contains only
+// letters, digits, underscores, or hyphens. Without this check the write boundary accepted any
+// text: "my flow", "a/b", "-leading" all stored as drafts and then failed compile, dry-run, and
+// publish with invalid_id forever, so the unusable row accumulated and the caller only learned
+// about it one step later. The issue is reported exactly as the compiler reports it, so whichever
+// step rejects the id, the caller reads the same code, path, and wording.
+//
+// Deliberately not applied to DeleteDraft: drafts stored before this rule must stay removable.
+func invalidWorkflowID(workflowID string) error {
+	if workflow.ValidWorkflowID(workflowID) {
+		return nil
+	}
+	return &workflow.ValidationError{Issues: []workflow.ValidationIssue{workflow.InvalidWorkflowIDIssue()}}
+}
+
 // CreateDraft creates or idempotently replays a draft.
 func (s *Service) CreateDraft(ctx context.Context, organizationID string, command CreateDraftCommand) (Draft, error) {
 	result, err := s.CreateDraftWithResult(ctx, organizationID, command)
@@ -89,6 +106,9 @@ func (s *Service) CreateDraft(ctx context.Context, organizationID string, comman
 // persistence outcome for administrative import and observability callers.
 func (s *Service) CreateDraftWithResult(ctx context.Context, organizationID string, command CreateDraftCommand) (CreateDraftResult, error) {
 	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
+		return CreateDraftResult{}, err
+	}
+	if err := invalidWorkflowID(command.WorkflowID); err != nil {
 		return CreateDraftResult{}, err
 	}
 	if _, err := s.toDefinition(command.Document, command.WorkflowID); err != nil {
@@ -127,6 +147,9 @@ func (s *Service) ListDrafts(ctx context.Context, organizationID, cursor string,
 // UpdateDraft performs an optimistic autosave mutation.
 func (s *Service) UpdateDraft(ctx context.Context, organizationID string, command UpdateDraftCommand) (Draft, error) {
 	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
+		return Draft{}, err
+	}
+	if err := invalidWorkflowID(command.WorkflowID); err != nil {
 		return Draft{}, err
 	}
 	if command.ExpectedRevision == 0 {

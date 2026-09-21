@@ -133,6 +133,52 @@ func TestDraftWriteRejectsUnusableDocument(t *testing.T) {
 	}
 }
 
+// 验证写入边界拒绝编译器永远不接受的 workflow id：workflow.ValidateDefinition 只认「字母或
+// 数字开头、仅含字母数字下划线连字符」的 id，此前写入边界不校验，于是「建得出、永远编不过」的
+// 草稿永久堆在库里，调用方要到 compile / dry-run / publish 才知道。拒绝时上报的 code、path 与
+// message 必须与编译器逐字一致，否则同一条件在两步会读成两个不同的问题。
+func TestDraftWriteRejectsUncompilableWorkflowID(t *testing.T) {
+	service, store := newTestService(t)
+	for index, workflowID := range []string{"my flow", "nested/id", "-leading", "trailing.", "点"} {
+		document := mustJSON(t, definitionFor(workflowID))
+		_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
+			WorkflowID: workflowID, ActorID: "editor", IdempotencyKey: fmt.Sprintf("invalid-id-create-%02d", index), Document: document,
+		})
+		var validation *workflow.ValidationError
+		if !errors.As(err, &validation) || len(validation.Issues) != 1 {
+			t.Fatalf("%s create err=%v", workflowID, err)
+		}
+		compiled := workflow.ValidateDefinition(definitionFor(workflowID), workflow.BuiltinRegistry(), workflow.CompilePolicy{})
+		var expected *workflow.ValidationError
+		if !errors.As(compiled, &expected) || expected.Issues[0] != validation.Issues[0] {
+			t.Fatalf("%s write boundary issue=%+v compiler issue=%+v", workflowID, validation.Issues, expected)
+		}
+		if validation.Issues[0].Code != "invalid_id" || validation.Issues[0].Path != "id" {
+			t.Fatalf("%s issue=%+v", workflowID, validation.Issues[0])
+		}
+		if _, err = service.GetDraft(context.Background(), "organization-a", workflowID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s stored a draft the compiler will refuse: err=%v", workflowID, err)
+		}
+		// 更新路径同样在写库前拦住，不需要先写坏一次草稿。
+		_, err = service.UpdateDraft(context.Background(), "organization-a", UpdateDraftCommand{
+			WorkflowID: workflowID, ActorID: "editor", IdempotencyKey: fmt.Sprintf("invalid-id-update-%02d", index),
+			ExpectedRevision: 1, Document: document,
+		})
+		if !errors.As(err, &validation) {
+			t.Fatalf("%s update err=%v", workflowID, err)
+		}
+	}
+	// 对照组：合法 id 必须照常写下来，边界校验不能把能编译的草稿挡在门外。
+	if _, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
+		WorkflowID: "Flow-1_ok", ActorID: "editor", IdempotencyKey: "valid-id-create", Document: mustJSON(t, definitionFor("Flow-1_ok")),
+	}); err != nil {
+		t.Fatalf("valid id create err=%v", err)
+	}
+	if _, err := store.GetDraft(context.Background(), "organization-a", "Flow-1_ok"); err != nil {
+		t.Fatalf("valid id not stored: err=%v", err)
+	}
+}
+
 // 验证并发提交同一创建命令时，原子存储结果只允许一个调用计为创建。
 func TestConcurrentDraftCreateHasSingleCreator(t *testing.T) {
 	service, _ := newTestService(t)

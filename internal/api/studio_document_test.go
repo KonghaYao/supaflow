@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -55,6 +56,38 @@ func TestStudioRejectsUnusableDocumentAtWrite(t *testing.T) {
 	undecodable := requestJSON(t, handler, http.MethodPut, "/v1/workflows/unusable-flow", organizationAKey, "unusable-update-0001",
 		map[string]any{"document": json.RawMessage(`{"schemaVersion":"flowgram-v1","workflowId":"unusable-flow","nodes":[],"edges":[],"unexpected":true}`), "expectedRevision": 1})
 	assertProblemCode(t, undecodable, http.StatusBadRequest, "invalid_workflow")
+}
+
+// 验证 workflow id 形状在写入边界就被拒绝：workflow.ValidateDefinition 只认「字母或数字开头、
+// 仅含字母数字下划线连字符」，此前「my flow」「nested/id」「-leading」都能 201 建出来，之后每次
+// compile / dry-run / publish-draft 都以 invalid_id 失败，库里因此堆出永久编不过的草稿。响应
+// 与编译器同形：400 invalid_workflow + issues[0].code=invalid_id、path=id，调用方能直接定位字段。
+func TestStudioRejectsInvalidWorkflowIDAtWrite(t *testing.T) {
+	handler := studioHandler(t)
+	for index, workflowID := range []string{"draft id with spaces", "draft/nested", "-draft-leading"} {
+		response := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey,
+			fmt.Sprintf("invalid-id-create-%02d", index),
+			map[string]any{"workflowId": workflowID, "document": editorDocument(workflowID)})
+		assertProblemCode(t, response, http.StatusBadRequest, "invalid_workflow")
+		var problem struct {
+			Issues []struct {
+				Code string `json:"code"`
+				Path string `json:"path"`
+			} `json:"issues"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+			t.Fatal(err)
+		}
+		if len(problem.Issues) != 1 || problem.Issues[0].Code != "invalid_id" || problem.Issues[0].Path != "id" {
+			t.Fatalf("%s issues=%+v", workflowID, problem.Issues)
+		}
+	}
+	// 合法 id 与含下划线、连字符、大写字母的 id 必须照常创建，边界校验不能挡住能编译的草稿。
+	accepted := requestJSON(t, handler, http.MethodPost, "/v1/workflows", organizationAKey, "invalid-id-create-ok",
+		map[string]any{"workflowId": "Draft_Flow-1", "document": editorDocument("Draft_Flow-1")})
+	if accepted.Code != http.StatusCreated {
+		t.Fatalf("accepted status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
 }
 
 // 验证缺少 expectedRevision 的自动保存请求返回 400：这是调用方可以修正的请求形状问题。
