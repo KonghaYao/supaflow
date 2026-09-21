@@ -110,7 +110,7 @@ func (i *AdminImporter) ImportWorkflow(ctx context.Context, request ImportWorkfl
 	if err != nil {
 		return false, err
 	}
-	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, i.pool, request.OrganizationID)
 	if err != nil {
 		return false, fmt.Errorf("begin workflow import: %w", err)
 	}
@@ -179,7 +179,7 @@ func (i *AdminImporter) ImportTrigger(ctx context.Context, request ImportTrigger
 	if err != nil {
 		return Trigger{}, false, err
 	}
-	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, i.pool, request.OrganizationID)
 	if err != nil {
 		return Trigger{}, false, fmt.Errorf("begin trigger import: %w", err)
 	}
@@ -252,7 +252,7 @@ func (i *AdminImporter) ImportRunProjection(ctx context.Context, request ImportR
 	if err != nil {
 		return false, err
 	}
-	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, i.pool, request.OrganizationID)
 	if err != nil {
 		return false, fmt.Errorf("begin run projection import: %w", err)
 	}

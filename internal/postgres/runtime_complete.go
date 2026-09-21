@@ -11,7 +11,7 @@ import (
 // CompleteAttempt atomically commits output, snapshot, events, successors, and
 // the resulting run status behind the active fencing token.
 func (s *RuntimeStore) CompleteAttempt(ctx context.Context, request workflowruntime.CompleteAttemptRequest) (workflowruntime.Run, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not complete attempt", err)
 	}

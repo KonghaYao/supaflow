@@ -27,7 +27,7 @@ type approvalResponseSnapshot struct {
 // RequestCancel persists cancellation intent and immediately finalizes a run
 // when no attempt is executing.
 func (s *RuntimeStore) RequestCancel(ctx context.Context, organizationID workflowruntime.OrganizationID, runID string, now time.Time) (workflowruntime.CancelRunResult, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
 		return workflowruntime.CancelRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not request cancellation", err)
 	}
@@ -144,7 +144,7 @@ func (s *RuntimeStore) ResolveInterrupt(ctx context.Context, request workflowrun
 	if request.DecidedBy == "" || len(request.IdempotencyKey) < 8 || len(request.IdempotencyKey) > 128 {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeInvalidArgument, "approval actor and idempotency key are required", nil)
 	}
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.ResolveInterruptResult{}, runtimeError(workflowruntime.CodeConflict, "could not resolve approval", err)
 	}

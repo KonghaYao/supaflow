@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
 
 // FailAttempt atomically records an execution error and either schedules one
 // bounded retry attempt or finalizes the run.
 func (s *RuntimeStore) FailAttempt(ctx context.Context, request workflowruntime.FailAttemptRequest) (workflowruntime.Run, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.Run{}, runtimeError(workflowruntime.CodeConflict, "could not fail attempt", err)
 	}

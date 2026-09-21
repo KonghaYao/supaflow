@@ -58,22 +58,39 @@ func (s *PostgresTriggerStore) FireDueSchedules(ctx context.Context, options Sch
 	return firings, errors.Join(failures...)
 }
 
+// fireNextDueOrganization fires one schedule for one organization.
+//
+// It runs in two phases so the organization gate is taken before anything is locked. The candidate
+// is picked by a read that takes no lock and no gate; the candidate's own transaction then takes
+// that organization's gate as its first statement and re-selects under the lock. Taking the
+// organization row lock first — as the single-statement version did — would make this transaction
+// hold a schedule-state lock while it waited for the gate, and a run creation for the same
+// organization provisions that same schedule-state row while holding the gate.
 func (s *PostgresTriggerStore) fireNextDueOrganization(
 	ctx context.Context,
 	options ScheduleOptions,
 	excludedOrganizations, processedTriggerOrganizations, processedTriggerIDs []string,
 ) ([]Firing, string, string, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, "", "", false, triggerError("begin fair schedule poll", err)
-	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	item, err := selectFairDueSchedule(ctx, tx, excludedOrganizations, processedTriggerOrganizations, processedTriggerIDs)
+	candidate, err := s.selectDueScheduleCandidate(ctx, excludedOrganizations, processedTriggerOrganizations, processedTriggerIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", "", false, nil
 	}
 	if err != nil {
-		return nil, "", "", false, triggerError("select fair due schedule", err)
+		return nil, "", "", false, triggerError("select fair due schedule candidate", err)
+	}
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, candidate.organizationID)
+	if err != nil {
+		return nil, candidate.organizationID, candidate.id, false, triggerError("begin fair schedule poll", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	item, err := selectFairDueSchedule(ctx, tx, candidate.organizationID, candidate.id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Another scheduler already advanced this schedule, or it stopped being due. Nothing was
+		// written, so the caller moves on to the next candidate.
+		return nil, candidate.organizationID, candidate.id, false, nil
+	}
+	if err != nil {
+		return nil, candidate.organizationID, candidate.id, false, triggerError("select fair due schedule", err)
 	}
 	work, err := tx.Begin(ctx)
 	if err != nil {
@@ -95,13 +112,15 @@ func (s *PostgresTriggerStore) fireNextDueOrganization(
 	return firings, item.organizationID, item.id, true, workErr
 }
 
-func selectFairDueSchedule(
+// selectDueScheduleCandidate proposes one due schedule without taking a row lock or a gate. The
+// ordering is the fair-share cursor order the locked version used, so the proposal is the same
+// schedule the poll would have picked.
+func (s *PostgresTriggerStore) selectDueScheduleCandidate(
 	ctx context.Context,
-	tx pgx.Tx,
 	excludedOrganizations, processedTriggerOrganizations, processedTriggerIDs []string,
 ) (dueSchedule, error) {
 	var item dueSchedule
-	err := tx.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 		WITH database_clock AS MATERIALIZED (SELECT clock_timestamp() AS now)
 		SELECT trigger.organization_id,trigger.id,trigger.schedule_interval_seconds,
 		       trigger.misfire_policy,trigger.next_fire_at,database_clock.now
@@ -121,8 +140,32 @@ func selectFairDueSchedule(
 		  ON trigger.organization_id=selected.organization_id AND trigger.id=selected.id
 		WHERE NOT (organization.organization_id = ANY($1::text[]))
 		ORDER BY organization.last_served_at NULLS FIRST,trigger.next_fire_at,organization.organization_id
-		FOR UPDATE OF organization,trigger SKIP LOCKED LIMIT 1`, excludedOrganizations,
+		LIMIT 1`, excludedOrganizations,
 		processedTriggerOrganizations, processedTriggerIDs).Scan(
+		&item.organizationID, &item.id, &item.interval, &item.policy, &item.next, &item.dbNow)
+	return item, err
+}
+
+// selectFairDueSchedule re-selects one proposed schedule inside its organization's transaction and
+// locks it. The gate the transaction holds first means no other writer for this organization is
+// running, so the re-selection either finds the proposal unchanged or reports it gone.
+func selectFairDueSchedule(
+	ctx context.Context,
+	tx pgx.Tx,
+	organizationID, triggerID string,
+) (dueSchedule, error) {
+	var item dueSchedule
+	err := tx.QueryRow(ctx, `
+		WITH database_clock AS MATERIALIZED (SELECT clock_timestamp() AS now)
+		SELECT trigger.organization_id,trigger.id,trigger.schedule_interval_seconds,
+		       trigger.misfire_policy,trigger.next_fire_at,database_clock.now
+		FROM database_clock, trigger_schedule_organization_state organization
+		JOIN triggers trigger
+		  ON trigger.organization_id=organization.organization_id AND trigger.id=$2
+		WHERE organization.organization_id=$1
+		  AND trigger.kind='schedule' AND trigger.status='enabled'
+		  AND trigger.next_fire_at <= database_clock.now
+		FOR UPDATE OF organization,trigger`, organizationID, triggerID).Scan(
 		&item.organizationID, &item.id, &item.interval, &item.policy, &item.next, &item.dbNow)
 	return item, err
 }

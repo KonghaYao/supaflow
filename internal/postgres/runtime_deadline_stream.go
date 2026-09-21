@@ -28,7 +28,7 @@ func (s *RuntimeStore) ExpireRuns(ctx context.Context, organizationID workflowru
 		return 0, runtimeError(workflowruntime.CodeInvalidArgument, "expiry limit must be between 1 and 1000", nil)
 	}
 	now = timeOrNow(now)
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
 		return 0, runtimeError(workflowruntime.CodeConflict, "could not start run expiry", err)
 	}
@@ -182,7 +182,7 @@ func (s *RuntimeStore) ExpireRun(ctx context.Context, organizationID workflowrun
 		return false, runtimeError(workflowruntime.CodeInvalidArgument, "organization and run are required", nil)
 	}
 	now = timeOrNow(now)
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(organizationID))
 	if err != nil {
 		return false, runtimeError(workflowruntime.CodeConflict, "could not start targeted run expiry", err)
 	}
@@ -282,7 +282,7 @@ func (s *RuntimeStore) AppendStreamChunk(ctx context.Context, request workflowru
 		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeInvalidArgument, "stream chunk must be valid JSON and no larger than 64 KiB", nil)
 	}
 	request.Now = timeOrNow(request.Now)
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.Event{}, runtimeError(workflowruntime.CodeConflict, "could not start stream commit", err)
 	}

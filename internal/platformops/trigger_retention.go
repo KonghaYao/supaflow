@@ -3,8 +3,6 @@ package platformops
 import (
 	"context"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
 )
 
 const triggerIdempotencyRetentionDays = 7
@@ -21,7 +19,7 @@ func (s *PostgresTriggerStore) PurgeCompletedTriggerHistory(ctx context.Context,
 	if organizationID == "" || limit <= 0 || limit > 10000 {
 		return TriggerRetentionResult{}, ErrInvalidArgument
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, organizationID)
 	if err != nil {
 		return TriggerRetentionResult{}, fmt.Errorf("begin trigger history purge: %w", err)
 	}

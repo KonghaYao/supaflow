@@ -20,7 +20,7 @@ func (s *RuntimeStore) CreateSubworkflow(ctx context.Context, request workflowru
 	if link.OrganizationID == "" || link.ParentRunID == "" || link.ParentNodeID == "" || link.ParentAttemptID == "" || link.ParentExecutionID == "" || request.Run.OrganizationID != link.OrganizationID {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeInvalidArgument, "subworkflow lineage is incomplete", nil)
 	}
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.Run.OrganizationID))
 	if err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not start subworkflow", err)
 	}

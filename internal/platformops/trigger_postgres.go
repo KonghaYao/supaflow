@@ -22,7 +22,7 @@ func NewPostgresTriggerStore(pool *pgxpool.Pool) *PostgresTriggerStore {
 
 // CreateTrigger stores a validated trigger definition.
 func (s *PostgresTriggerStore) CreateTrigger(ctx context.Context, request CreateTriggerRequest) (Trigger, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, request.OrganizationID)
 	if err != nil {
 		return Trigger{}, triggerError("begin create trigger", err)
 	}
@@ -153,7 +153,7 @@ func (s *PostgresTriggerStore) SetTriggerEnabled(ctx context.Context, organizati
 
 // Fire atomically deduplicates and enqueues one trigger firing.
 func (s *PostgresTriggerStore) Fire(ctx context.Context, request FireRequest) (Firing, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, request.OrganizationID)
 	if err != nil {
 		return Firing{}, false, triggerError("begin firing", err)
 	}
@@ -180,7 +180,7 @@ func (s *PostgresTriggerStore) Fire(ctx context.Context, request FireRequest) (F
 
 // FireWebhook consumes replay identity and enqueues the firing in one transaction.
 func (s *PostgresTriggerStore) FireWebhook(ctx context.Context, request FireRequest, requestID string, digest [sha256.Size]byte, expiresAt time.Time) (Firing, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, request.OrganizationID)
 	if err != nil {
 		return Firing{}, false, triggerError("begin webhook firing", err)
 	}

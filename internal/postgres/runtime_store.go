@@ -81,7 +81,7 @@ func (s *RuntimeStore) CreateRun(ctx context.Context, request workflowruntime.Cr
 // so the retry wrapper only sees transient ones, and so nothing that already concluded something
 // about the request is retried on the strength of a wrapped cause.
 func (s *RuntimeStore) createRunTx(ctx context.Context, request workflowruntime.CreateRunRequest) (workflowruntime.CreateRunResult, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.Run.OrganizationID))
 	if err != nil {
 		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not start run", err)
 	}

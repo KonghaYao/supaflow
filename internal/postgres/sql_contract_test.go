@@ -54,11 +54,14 @@ func TestLeaseQueriesEnforceClaimAndFencingContracts(t *testing.T) {
 }
 
 // 验证完成事务源码同时写入 output、snapshot、event、outbox 并释放终态租约。
+//
+// 事务入口断言从 "BeginTx" 收紧为 "beginOrganizationRuntimeTx"：这些写入仍然必须在同一个事务里
+// 完成，而该事务现在只能由那个在首条语句取组织运行时门的共享 helper 打开。
 func TestCompletionSourceKeepsAtomicArtifactsTogether(t *testing.T) {
 	t.Parallel()
 	source := readSource(t, "runtime_complete.go") + readSource(t, "runtime_persist.go")
 	for _, contract := range []string{
-		"BeginTx", "persistRuntimeOutput", "persistRuntimeSnapshot", "appendRuntimeEvents",
+		"beginOrganizationRuntimeTx", "persistRuntimeOutput", "persistRuntimeSnapshot", "appendRuntimeEvents",
 		"insertOutboxTx", "output_id = CASE WHEN", "releaseTerminalLease", "tx.Commit",
 	} {
 		if !strings.Contains(source, contract) {
@@ -86,7 +89,7 @@ func TestRerunSourceKeepsAtomicLineageAndArtifacts(t *testing.T) {
 	t.Parallel()
 	source := readSource(t, "runtime_rerun.go")
 	for _, contract := range []string{
-		"BeginTx", "FOR SHARE", "IsTerminalRun", "node_attempts", "ORDER BY attempt_number DESC",
+		"beginOrganizationRuntimeTx", "FOR SHARE", "IsTerminalRun", "node_attempts", "ORDER BY attempt_number DESC",
 		"run_rerun_lineage", "seedRuntimeAttempt", "appendEventTx", "insertOutboxTx", "tx.Commit",
 	} {
 		if !strings.Contains(source, contract) {
@@ -104,7 +107,7 @@ func TestClaimSourceKeepsEventsAndOutboxAtomic(t *testing.T) {
 	claim := readSource(t, "runtime_claim.go")
 	source := claim + readSource(t, "runtime_persist.go")
 	for _, contract := range []string{
-		"BeginTx", `status = 'pending'`, `"run.started"`, `"attempt.claimed"`,
+		"beginOrganizationRuntimeTx", `status = 'pending'`, `"run.started"`, `"attempt.claimed"`,
 		`"attempt.lease_taken_over"`, "appendRuntimeEvents", "insertOutboxTx", "tx.Commit",
 	} {
 		if !strings.Contains(source, contract) {
@@ -219,6 +222,32 @@ func TestMigratorSourceKeepsMultiInstanceSafety(t *testing.T) {
 		if !strings.Contains(source, contract) {
 			t.Errorf("migration runner lacks %q", contract)
 		}
+	}
+}
+
+// 验证运行期写入只有一个事务入口。
+//
+// 组织运行时表（runs、admission_entries、node_attempts、worker_leases、outbox_messages、
+// organization_work_queue、organization_quotas、organization_quota_counters）的行锁顺序在不同入口
+// 之间并不一致，只有「事务的第一条语句先取该组织的门」才能把顺序固定下来。因此这里要求每个运行期
+// 事务源文件都不再直接打开 pgx 事务，并且共享 helper 仍然真的取门。
+func TestRuntimeWritesUseTheSingleGatedTransactionEntry(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"runtime_store.go", "runtime_subworkflow.go", "runtime_control.go", "runtime_complete.go",
+		"runtime_fail.go", "runtime_suspend.go", "runtime_rerun.go", "runtime_webhook_resume.go",
+		"runtime_deadline_stream.go", "runtime_claim.go", "runtime_claim_next.go",
+	} {
+		source := readSource(t, name)
+		if strings.Contains(source, "pool.BeginTx(") {
+			t.Errorf("%s opens a runtime transaction without taking the organization gate", name)
+		}
+		if !strings.Contains(source, "beginOrganizationRuntimeTx") {
+			t.Errorf("%s has no gated runtime transaction", name)
+		}
+	}
+	if !strings.Contains(readSource(t, "organization_runtime_tx.go"), "orggate.LockTx") {
+		t.Error("the shared runtime transaction entry no longer takes the organization gate")
 	}
 }
 

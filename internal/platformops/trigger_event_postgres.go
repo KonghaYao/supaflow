@@ -56,7 +56,7 @@ func (s *PostgresTriggerStore) fireEventPage(
 	cursorID string,
 	remaining int,
 ) ([]Firing, time.Time, string, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, organizationID)
 	if err != nil {
 		return nil, time.Time{}, "", false, triggerError("begin event firing page", err)
 	}

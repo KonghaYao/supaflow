@@ -61,7 +61,7 @@ func (a *Admission) ConfigureQuota(ctx context.Context, quota Quota) error {
 	if !validQuota(quota) {
 		return ErrInvalidArgument
 	}
-	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, a.pool, quota.OrganizationID)
 	if err != nil {
 		return fmt.Errorf("begin quota configuration: %w", err)
 	}
@@ -102,7 +102,7 @@ func (a *Admission) EnsureQuota(ctx context.Context, quota Quota) error {
 	if !validQuota(quota) {
 		return ErrInvalidArgument
 	}
-	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, a.pool, quota.OrganizationID)
 	if err != nil {
 		return fmt.Errorf("begin quota bootstrap: %w", err)
 	}
@@ -166,7 +166,7 @@ func (a *Admission) admit(ctx context.Context, organizationID, resourceType, res
 	if organizationID == "" || resourceID == "" || priority < -1000 || priority > 1000 {
 		return AdmissionDecision{}, ErrInvalidArgument
 	}
-	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, a.pool, organizationID)
 	if err != nil {
 		return AdmissionDecision{}, fmt.Errorf("begin admission: %w", err)
 	}
@@ -262,7 +262,7 @@ func (a *Admission) release(ctx context.Context, organizationID, resourceType, r
 	if organizationID == "" || resourceID == "" {
 		return ReleaseDecision{}, ErrInvalidArgument
 	}
-	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, a.pool, organizationID)
 	if err != nil {
 		return ReleaseDecision{}, fmt.Errorf("begin admission release: %w", err)
 	}

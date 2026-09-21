@@ -98,7 +98,7 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, organizationID, workerID
 	if organizationID == "" || workerID == "" || capacity <= 0 || active < 0 || active > capacity {
 		return ErrInvalidArgument
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, r.pool, organizationID)
 	if err != nil {
 		return fmt.Errorf("begin worker heartbeat: %w", err)
 	}
@@ -213,7 +213,7 @@ func (r *WorkerRegistry) ReapStale(ctx context.Context, organizationID string, m
 	if organizationID == "" || maxHeartbeatAge <= 0 || limit <= 0 || limit > 1000 {
 		return 0, ErrInvalidArgument
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, r.pool, organizationID)
 	if err != nil {
 		return 0, fmt.Errorf("begin reap stale workers: %w", err)
 	}

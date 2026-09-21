@@ -16,7 +16,7 @@ func (s *RuntimeStore) RerunRun(ctx context.Context, request workflowruntime.Rer
 	if err := s.repository.requirePool(); err != nil {
 		return workflowruntime.CreateRunResult{}, err
 	}
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.Run.OrganizationID))
 	if err != nil {
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not start rerun", err)
 	}

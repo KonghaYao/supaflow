@@ -284,7 +284,7 @@ func (s *PostgresDeliveryStore) FailDelivery(ctx context.Context, message Delive
 	if retryDelay < 0 {
 		retryDelay = 0
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, message.OrganizationID)
 	if err != nil {
 		return false, fmt.Errorf("begin outbox failure: %w", err)
 	}
@@ -365,7 +365,7 @@ func (s *PostgresDeliveryStore) ListDeadLetters(ctx context.Context, organizatio
 
 // RequeueDeadLetter creates a fresh delivery once and marks the DLQ record requeued atomically.
 func (s *PostgresDeliveryStore) RequeueDeadLetter(ctx context.Context, organizationID, deadLetterID string, now time.Time) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.pool, organizationID)
 	if err != nil {
 		return fmt.Errorf("begin dead letter requeue: %w", err)
 	}

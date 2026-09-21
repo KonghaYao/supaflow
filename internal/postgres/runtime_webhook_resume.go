@@ -23,7 +23,7 @@ func (s *RuntimeStore) ResumeWebhook(ctx context.Context, request workflowruntim
 		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeInvalidArgument, "webhook resume request is invalid", nil)
 	}
 	request.Now = timeOrNow(request.Now)
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.ResumeWebhookResult{}, runtimeError(workflowruntime.CodeConflict, "could not resume webhook", err)
 	}

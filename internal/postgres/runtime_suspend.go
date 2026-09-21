@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	workflowruntime "github.com/pazhou/supaflow/internal/runtime"
 )
 
 // SuspendAttempt atomically stores a single-use interrupt and snapshot while
 // retaining the lease row so the next claim increments its fencing token.
 func (s *RuntimeStore) SuspendAttempt(ctx context.Context, request workflowruntime.SuspendAttemptRequest) (workflowruntime.Interrupt, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return workflowruntime.Interrupt{}, runtimeError(workflowruntime.CodeConflict, "could not suspend attempt", err)
 	}

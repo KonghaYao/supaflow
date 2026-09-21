@@ -40,7 +40,7 @@ LIMIT 1`
 // told whoever read the log that two workers were racing for the same attempt when the server had
 // simply chosen this transaction as a deadlock victim.
 func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime.ClaimAttemptRequest) (*workflowruntime.WorkItem, error) {
-	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
 	if err != nil {
 		return nil, runtimePersistenceError("could not claim attempt", err)
 	}
@@ -201,7 +201,14 @@ func (s *RuntimeStore) RenewLease(ctx context.Context, request workflowruntime.R
 		OrganizationID: request.OrganizationID, RunID: request.RunID, AttemptID: request.AttemptID,
 		WorkerID: request.WorkerID, FencingToken: request.FencingToken,
 	}
-	err := s.repository.pool.QueryRow(ctx, `
+	// Renewal writes worker_leases, whose work-hint trigger writes organization_work_queue, so it
+	// takes the organization gate like every other runtime write even though it moves one row.
+	tx, err := beginOrganizationRuntimeTx(ctx, s.repository.pool, string(request.OrganizationID))
+	if err != nil {
+		return workflowruntime.Lease{}, runtimePersistenceError("could not start lease renewal", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	err = tx.QueryRow(ctx, `
 		WITH coordination_clock AS (SELECT clock_timestamp() AS current_time)
 		UPDATE worker_leases lease
 		SET expires_at = coordination_clock.current_time + $6 * interval '1 millisecond'
@@ -217,6 +224,9 @@ func (s *RuntimeStore) RenewLease(ctx context.Context, request workflowruntime.R
 			return workflowruntime.Lease{}, runtimeError(workflowruntime.CodeLeaseLost, "attempt lease was lost", ErrStaleLease)
 		}
 		return workflowruntime.Lease{}, runtimePersistenceError("could not renew lease", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return workflowruntime.Lease{}, runtimePersistenceError("could not commit lease renewal", workflowruntime.MarkCommitOutcomeUnknown(err))
 	}
 	return lease, nil
 }
