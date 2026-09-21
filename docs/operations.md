@@ -238,6 +238,23 @@ go test ./tests/e2e
 go test ./tests/deployment
 ```
 
+Several packages hold PostgreSQL integration suites that migrate the target database
+and then write their own fixtures. They are read-only with respect to the source tree,
+but not with respect to the database: point `SUPAFLOW_TEST_DATABASE_URL` at a throwaway
+database and recreate it between runs, never at a development or production one.
+
+- The suites register synthetic node types such as `test.registry.<id>@1.2.3` in the
+  append-only `node_type_versions` registry. The immutability trigger rejects every
+  `UPDATE` and `DELETE`, so those rows cannot be removed through the normal path, and
+  both the control plane and the worker refuse to start while the durable registry
+  holds a node version that no adapter serves. Recovering a polluted database needs a
+  transaction that disables `node_type_versions_immutable`, deletes the
+  `test.registry.%` rows, and re-enables it.
+- Some suites insert at hard-coded primary keys — `organization_work_queue` row `stale`,
+  `outbox_messages` row `clock-message` — and do not clean up when they fail, so a
+  second run against the same database fails on duplicate keys. A fresh database passes
+  every suite; the same database does not pass twice.
+
 The E2E suite covers immutable publish, organization-scoped idempotent start replay, `Start -> Human Approval -> End`, organization-authenticated token delivery, lost-response approval replay and conflicting-key rejection, bounded worker advancement, success, cancellation, Fenix authorization-boundary behavior, two-organization run/event/interrupt isolation, and SSE continuation through `Last-Event-ID` and `afterCursor`. It uses `httptest.ResponseRecorder` and a deadline-bound request context, so it is safe in sandboxes that prohibit binding network ports.
 
 Run the in-process authenticated API benchmark without any browser or listening socket:
