@@ -11,7 +11,11 @@ import (
 )
 
 // 验证未设置 opt-in 时 Darwin 降级 runner 保持 fail-closed，绝不静默降级执行用户代码。
+//
+// 开关必须在此显式清空：运维文档要求开发者在 shell 里导出它，若读取环境值，同一台机器上
+// 本断言会随开发者环境时红时绿，测的就不再是 fail-closed 而是当前环境。
 func TestLocalExecutionFailsClosedWithoutOptIn(t *testing.T) {
+	t.Setenv(allowUnsafeLocalExecutionEnv, "")
 	response := Run(context.Background(), capabilityRequest("local-no-opt-in", "shell", `printf null`))
 	if response.Code != "resource_limits_unavailable" {
 		t.Fatalf("response = %+v", response)
@@ -52,12 +56,13 @@ func TestLocalExecutionRunsLanguagesThroughRealLauncher(t *testing.T) {
 }
 
 // 验证 opt-in 后降级 runner 仍按请求超时终止，并移除本次 attempt 的临时 workspace。
+//
+// workspace root 指向本测试私有的临时目录，而不是宿主共享的临时目录：否则断言会被同机
+// 其他进程残留的 attempt-* 目录误判，且无法区分「本次运行真的创建并清理了工作区」。
 func TestLocalExecutionEnforcesTimeoutAndCleansWorkspace(t *testing.T) {
 	t.Setenv(allowUnsafeLocalExecutionEnv, "1")
-	root := strings.TrimSpace(os.Getenv(workspaceRootEnv))
-	if root == "" {
-		root = os.TempDir()
-	}
+	root := t.TempDir()
+	t.Setenv(workspaceRootEnv, root)
 	request := capabilityRequest("local-timeout", "shell", `sleep 30`)
 	request.Timeout = 200 * time.Millisecond
 	if response := Run(context.Background(), request); response.Code != "timeout" {

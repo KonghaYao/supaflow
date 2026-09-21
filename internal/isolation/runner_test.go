@@ -82,7 +82,11 @@ func TestRunShellInSandbox(t *testing.T) {
 }
 
 // 验证 sandbox 默认拒绝读取宿主文件系统。
+//
+// 降级本地执行按设计放弃文件系统隔离，因此这里显式清空开关：否则开发者按运维文档导出它之后，
+// 本断言会把「降级模式本就允许读取宿主文件」误报为 sandbox 失效。
 func TestRunRejectsHostFilesystemEscape(t *testing.T) {
+	t.Setenv(allowUnsafeLocalExecutionEnv, "")
 	if runtime.GOOS != "darwin" {
 		t.Skip("当前断言针对 macOS sandbox profile")
 	}
@@ -96,7 +100,11 @@ func TestRunRejectsHostFilesystemEscape(t *testing.T) {
 }
 
 // 验证无法提供 sandbox-local PID 限制的平台会拒绝执行，而不是只启用部分限制。
+//
+// 该断言的前提是操作者没有接受降级执行，所以开关必须显式清空而非读环境：导出了开关的机器上
+// 拒绝执行本就是被授权的行为，断言在这里只会变成开发者环境的函数。
 func TestRunFailsClosedWithoutCompleteResourceLimitCapability(t *testing.T) {
+	t.Setenv(allowUnsafeLocalExecutionEnv, "")
 	if runtime.GOOS != "darwin" {
 		t.Skip("当前断言针对 Darwin 缺少 per-sandbox PID limit 的能力边界")
 	}
