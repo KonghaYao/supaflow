@@ -114,8 +114,9 @@ func TestCredentialRouteNeverReturnsSecret(t *testing.T) {
 	}
 }
 
-// 验证 /ops 请求体里 jsonb / text 存不下的转义在解码边界返回 400 invalid_argument：
+// 验证 /ops 请求体里 jsonb / text 存不下的转义在解码边界返回 400 invalid_request：
 // 此前 Name 含 \u0000 会写进列时被 Postgres 以 22021 拒绝，respond 没有归类，调用方拿到 500。
+// 码名与这一面其余拒绝（守卫、respond 兜底）一致，调用方不需要为同一条件分辨两个码。
 func TestCredentialRouteRejectsUnstorableName(t *testing.T) {
 	provider, err := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{9}, 32))
 	if err != nil {
@@ -146,7 +147,7 @@ func TestCredentialRouteRejectsUnstorableName(t *testing.T) {
 	if err = json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Code != "invalid_argument" || store.creates != 0 {
+	if body.Code != "invalid_request" || store.creates != 0 {
 		t.Fatalf("code=%q creates=%d", body.Code, store.creates)
 	}
 }

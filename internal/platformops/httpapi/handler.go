@@ -313,8 +313,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	}
 	// 解码失败先于本校验返回，语法的 invalid_request 语义不变。这里拦的是语法合法、Postgres 却
 	// 存不下的字节：它们会写进 text 或 jsonb 列，以 22P05 / 22P02 的形式被 respond 报成 500。
+	// 码名跟这一面的其余拒绝保持一致（守卫、respond 的兜底都是 invalid_request）：调用方按面
+	// 解析码名，同一条件在同一面上出现两个码名会让人以为是两种错误。
 	if !platformops.StorableJSON(body) {
-		writeProblem(w, http.StatusBadRequest, "invalid_argument")
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	return true
