@@ -164,9 +164,18 @@ func (l *PostgresMutationLedger) Retry(ctx context.Context, organizationID, oper
 }
 
 // Complete stores the exact bounded HTTP result for deterministic replay.
+//
+// 空 body 在这里归一成非 nil 的空切片，且只在这一处归一。204 这类「成功且无内容」的响应本来就没有
+// body，而 HTTP 中间件的 bytes.Buffer 在从未写过时 Bytes() 返回 nil；账本的 completed 行却必须同时
+// 有 response_status 与 response_body（000015 的 CHECK），于是 NULL 违反约束、整个完成事务回滚，
+// 调用方收到 500，而业务删除已经提交。归一放在 store 层让每个写入者都得到同一结果，中间件因此不必
+// 知道任何存储细节，也不会有第二处悄悄改行为的地方。
 func (l *PostgresMutationLedger) Complete(ctx context.Context, organizationID, operation, key string, completion MutationCompletion) error {
 	if organizationID == "" || operation == "" || !validMutationKey(key) || completion.Owner == "" || completion.StatusCode < 100 || completion.StatusCode > 599 || len(completion.Body) > 2<<20 {
 		return ErrInvalidArgument
+	}
+	if completion.Body == nil {
+		completion.Body = []byte{}
 	}
 	tx, err := l.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
