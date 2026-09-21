@@ -124,6 +124,39 @@ func TestRetryOnTransientIsBoundedAndNeverRepeatsConclusions(t *testing.T) {
 	}
 }
 
+// deadlockDetectionLatency 是服务端把 40P01 交回客户端所需的最短时间：Postgres 默认
+// deadlock_timeout（1s）加一次往返开销。它比任何自造的瞬时错误都慢，正是重试预算必须覆盖的量。
+const deadlockDetectionLatency = 1100 * time.Millisecond
+
+// 验证重试预算覆盖得住一次死锁检测窗口，否则重试在它唯一要对准的场景里从不触发。
+//
+// 第六轮实测：并发建 run 时服务端返回 503 的耗时约 1.09s，与「等满 deadlock_timeout 才检测出
+// 死锁」吻合，而当时的 transientRetryBudget 只有 1s 且从第一次尝试之前起算——错误回来时预算已
+// 耗尽，包装器直接返回，第二次尝试根本没有发生（并发 6 发请求 5 发 503）。用瞬时注入的 PgError
+// 写的单测看不出这一点，所以这里如实模拟检测延迟。
+func TestRetryOnTransientOutlivesDeadlockDetection(t *testing.T) {
+	// 这条断言把常量之间的关系钉住：预算必须长于一个检测窗口，否则「有界重试」名存实亡。
+	if transientRetryBudget <= deadlockDetectionLatency {
+		t.Fatalf("transientRetryBudget=%v cannot outlast a %v deadlock detection window", transientRetryBudget, deadlockDetectionLatency)
+	}
+	calls := 0
+	err := retryOnTransient(context.Background(), func(ctx context.Context) error {
+		calls++
+		if calls > 1 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(deadlockDetectionLatency):
+		}
+		return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("calls=%d err=%v want a second attempt after the deadlock detection window", calls, err)
+	}
+}
+
 // 验证 pending outbox 容量耗尽时建 run 报 quota_exceeded（HTTP 429）而不是 conflict，并在容量释放
 // 后成功：容量门禁说的是「现在不行」，报 conflict 会让调用方以为幂等键冲突而放弃，实际稍后重试
 // 就能成功。此前 insertOutboxTx 撞到 53400 被 createRuntimeRunTx 包成 conflict。

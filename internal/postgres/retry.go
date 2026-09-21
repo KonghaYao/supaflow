@@ -32,9 +32,16 @@ const (
 	// enough to survive a lock cycle or a lost serialization race, which is what a deadlock storm
 	// actually produces; more attempts would hold an HTTP request open while the storm continues.
 	transientRetryAttempts = 3
-	// transientRetryBudget bounds the wall clock one retrying call may spend, so a request never
-	// waits noticeably longer than a single attempt would have taken.
-	transientRetryBudget = time.Second
+	// transientRetryBudget bounds how long one retrying call may keep deciding to try again.
+	//
+	// It has to outlast one deadlock-detection window. A 40P01 reaches the client only after the
+	// server has already waited deadlock_timeout (1s by default) on the contested lock, so a
+	// one-second budget is spent while the first attempt is still being unblocked and the wrapper
+	// returns that failure without calling fn a second time — the retry exists but never fires for
+	// the exact case it was written for. Four seconds covers two detection windows plus the backoff
+	// between them; with transientRetryAttempts at 3 the worst case is three unblock waits, so a
+	// request that keeps deadlocking gives up after roughly 3.5s instead of never retrying at all.
+	transientRetryBudget = 4 * time.Second
 	// transientRetryBaseDelay is the first backoff; it doubles per attempt and carries jitter so
 	// callers that collided once do not line up again.
 	transientRetryBaseDelay = 20 * time.Millisecond
@@ -56,6 +63,10 @@ const (
 // (isTransientDatabaseFailure). A semantic conclusion — a key reused for a different body, a missing
 // resource, exhausted capacity — is produced by the caller's own values and is returned unchanged:
 // retrying it would repeat a verdict that cannot change.
+//
+// The budget bounds the decision to retry, not an attempt already under way: the loop starts an
+// attempt before consulting the clock, so the worst case is transientRetryBudget plus the unblock
+// wait of whichever attempt was last.
 func retryOnTransient(ctx context.Context, fn func(context.Context) error) error {
 	deadline := time.Now().Add(transientRetryBudget)
 	var err error
