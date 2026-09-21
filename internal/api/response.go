@@ -66,12 +66,16 @@ func writeValidationProblem(w http.ResponseWriter, r *http.Request, status int, 
 }
 
 // writeInternalError answers an unexpected failure and records it server-side. The response
-// stays deliberately opaque, but without a log line the request id it carries named nothing:
-// an operator had no way to tell which request failed or why, and the only remaining evidence
-// was the caller's own report. The diagnostic is redacted before it is recorded and the
-// request is never logged, because bodies carry workflow definitions and credential
-// references. Only the routing identity is attached.
+// stays deliberately opaque, but without a log line the request id it carries named nothing.
 func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
+	writeLoggedProblem(w, r, http.StatusInternalServerError, "internal_error", "request could not be completed", err)
+}
+
+// writeLoggedProblem answers a classified server-side failure and records it under the same
+// request id the response carries, so an operator can find the request the caller reported from
+// the id alone. Callers that classify their own failure keep their own code and title; the
+// response never repeats the diagnostic, because the diagnostic is for the server.
+func writeLoggedProblem(w http.ResponseWriter, r *http.Request, status int, code, title string, err error) {
 	id := requestID(r)
 	// Pin the id on the request so the response repeats the value this line records:
 	// requestID mints a fresh random id whenever the caller did not supply one.
@@ -81,8 +85,8 @@ func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
 		diagnostic = platformops.RedactDiagnostic(err.Error())
 	}
 	slog.Error("request failed with an unexpected error",
-		"requestId", id, "method", r.Method, "path", r.URL.Path, "error", diagnostic)
-	writeProblem(w, r, http.StatusInternalServerError, "internal_error", "request could not be completed")
+		"requestId", id, "method", r.Method, "path", r.URL.Path, "code", code, "error", diagnostic)
+	writeProblem(w, r, status, code, title)
 }
 
 func writeProblemValue(w http.ResponseWriter, r *http.Request, value problem) {

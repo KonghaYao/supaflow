@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -86,16 +86,15 @@ func (h *Handler) auditMutations(next http.Handler) http.Handler {
 			return
 		}
 		if outcome == platformops.AuditAllowed && operation != nil {
-			slog.Error("API mutation returned without durable completion", "action", action, "operation_id", operation.ID)
-			writeProblem(w, r, http.StatusInternalServerError, "mutation_not_durable", "mutation completion could not be verified")
+			writeLoggedProblem(w, r, http.StatusInternalServerError, "mutation_not_durable", "mutation completion could not be verified",
+				fmt.Errorf("mutation %s returned without durable completion", operation.ID))
 			return
 		}
 		if _, err := h.audit.Record(r.Context(), platformops.AuditRecord{
 			OrganizationID: principal.OrganizationID, ActorID: principal.ActorID, Action: action,
 			ResourceType: resourceType, ResourceID: resourceID, Outcome: outcome, Metadata: metadata,
 		}); err != nil {
-			slog.Error("persist API audit failed", "action", action, "error", platformops.RedactDiagnostic(err.Error()))
-			writeProblem(w, r, http.StatusInternalServerError, "audit_unavailable", "mutation evidence could not be persisted")
+			writeLoggedProblem(w, r, http.StatusInternalServerError, "audit_unavailable", "mutation evidence could not be persisted", err)
 			return
 		}
 		copyAuditResponse(w, tracked, status)
