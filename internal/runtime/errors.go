@@ -22,6 +22,11 @@ const (
 	CodeApprovalConsumed    ErrorCode = "approval_consumed"
 	CodeExecutorFailed      ErrorCode = "executor_failed"
 	CodeQuotaExceeded       ErrorCode = "quota_exceeded"
+	// CodeUnavailable means the server could not complete the operation for a reason that is
+	// expected to pass: the transaction was rolled back as a deadlock victim or a serialization
+	// failure, the connection failed, or a commit's acknowledgement was lost. It is not a verdict
+	// about the request, so it must not be reported as a conflict.
+	CodeUnavailable ErrorCode = "service_unavailable"
 )
 
 // Error is a typed runtime error safe to map to an external protocol.

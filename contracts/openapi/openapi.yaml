@@ -291,6 +291,13 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: The transaction could not be completed, so no run was created; repeating the request with the same `Idempotency-Key` is safe after the `Retry-After` delay.
+          headers:
+            Retry-After: { schema: { type: integer, minimum: 1 } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /shadow-runs:
     post:
       operationId: startShadowRun

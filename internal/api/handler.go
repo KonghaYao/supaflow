@@ -404,21 +404,51 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, definition.ErrOrganizationDraftLimit), errors.Is(err, platform.ErrOrganizationVersionLimit), errors.Is(err, platform.ErrWorkflowVersionLimit):
 		writeProblem(w, r, http.StatusTooManyRequests, "resource_limit_exceeded", "organization workflow resource limit is exhausted")
 	case errors.As(err, &runtimeError):
-		status := http.StatusConflict
-		if runtimeError.Code == runtime.CodeInvalidArgument {
-			status = http.StatusBadRequest
-		} else if runtimeError.Code == runtime.CodeNotFound {
-			status = http.StatusNotFound
-		} else if runtimeError.Code == runtime.CodeQuotaExceeded {
-			status = http.StatusTooManyRequests
-			if runtimeError.RetryAfter > 0 {
-				w.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(runtimeError.RetryAfter/time.Second)), 10))
-			}
+		status, ok := runtimeErrorStatus(runtimeError)
+		if !ok {
+			// 未枚举的运行时码：不猜语义。此前所有未列出的码都落到 409，把「这一发 run 根本没建」
+			// 说成了幂等冲突，调用方因此不会重试一个本可以成功的请求。宁可报 500 并留下可按
+			// requestId 检索的日志，也不要把服务端故障说成客户端语义错误。
+			writeInternalError(w, r, err)
+			return
+		}
+		if runtimeError.RetryAfter > 0 && (status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests) {
+			w.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(runtimeError.RetryAfter/time.Second)), 10))
 		}
 		writeProblem(w, r, status, string(runtimeError.Code), runtimeError.Message)
 	default:
 		writeInternalError(w, r, err)
 	}
+}
+
+// runtimeErrorStatus maps one runtime error code to the status that describes it honestly, and
+// reports whether the code is one this transport knows how to answer.
+//
+// Codes that conclude something about the request stay conflicts; codes that describe the server's
+// own state become 429 or 503 with a Retry-After. A code outside this table is deliberately not
+// answered here: the caller above turns it into a logged 500, because guessing "conflict" is what
+// made a rolled-back run creation look like an idempotency problem.
+func runtimeErrorStatus(runtimeError *runtime.Error) (int, bool) {
+	switch runtimeError.Code {
+	case runtime.CodeInvalidArgument:
+		return http.StatusBadRequest, true
+	case runtime.CodeNotFound:
+		return http.StatusNotFound, true
+	case runtime.CodeInvalidTransition,
+		runtime.CodeIdempotencyConflict,
+		runtime.CodeConflict,
+		runtime.CodeLeaseLost,
+		runtime.CodeStaleFencingToken,
+		runtime.CodeApprovalInvalid,
+		runtime.CodeApprovalExpired,
+		runtime.CodeApprovalConsumed:
+		return http.StatusConflict, true
+	case runtime.CodeQuotaExceeded:
+		return http.StatusTooManyRequests, true
+	case runtime.CodeUnavailable:
+		return http.StatusServiceUnavailable, true
+	}
+	return 0, false
 }
 
 type interruptResponse struct {

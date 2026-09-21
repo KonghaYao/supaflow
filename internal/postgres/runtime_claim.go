@@ -34,22 +34,27 @@ FOR UPDATE OF a SKIP LOCKED
 LIMIT 1`
 
 // ClaimAttempt claims one ready attempt or takes over an expired lease.
+//
+// The worker retries this on its next tick rather than inside this call, so the attempt is not
+// repeated here; what matters is that a rolled-back transaction is not reported as a conflict, which
+// told whoever read the log that two workers were racing for the same attempt when the server had
+// simply chosen this transaction as a deadlock victim.
 func (s *RuntimeStore) ClaimAttempt(ctx context.Context, request workflowruntime.ClaimAttemptRequest) (*workflowruntime.WorkItem, error) {
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not claim attempt", err)
+		return nil, runtimePersistenceError("could not claim attempt", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var databaseNow time.Time
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not read database clock", err)
+		return nil, runtimePersistenceError("could not read database clock", err)
 	}
 	work, err := s.claimAttemptTx(ctx, tx, request, databaseNow)
 	if err != nil || work == nil {
 		return work, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not commit attempt claim", err)
+		return nil, runtimePersistenceError("could not commit attempt claim", workflowruntime.MarkCommitOutcomeUnknown(err))
 	}
 	return work, nil
 }
@@ -60,7 +65,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		return nil, runtimeError(workflowruntime.CodeInvalidArgument, "lease duration must be positive", nil)
 	}
 	if err := resumeDueTimer(ctx, tx, request.OrganizationID, databaseNow); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not resume due timer", err)
+		return nil, runtimePersistenceError("could not resume due timer", err)
 	}
 	var work workflowruntime.WorkItem
 	var organizationID, attemptStatus string
@@ -76,7 +81,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		return nil, nil
 	}
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not select claimable attempt", err)
+		return nil, runtimePersistenceError("could not select claimable attempt", err)
 	}
 	work.Attempt.OrganizationID = workflowruntime.OrganizationID(organizationID)
 	work.Attempt.Status = runtimeAttemptStatus(attemptStatus)
@@ -101,7 +106,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		request.WorkerID, databaseNow, work.Lease.ExpiresAt,
 	).Scan(&work.Lease.FencingToken)
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not acquire attempt lease", err)
+		return nil, runtimePersistenceError("could not acquire attempt lease", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_attempts
@@ -109,12 +114,12 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		    started_at = COALESCE(started_at, $5), updated_at = $5
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, work.Attempt.ID,
 		request.WorkerID, work.Lease.FencingToken, databaseNow); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark attempt running", err)
+		return nil, runtimePersistenceError("could not mark attempt running", err)
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE node_states SET status = 'running', updated_at = $3
 		WHERE organization_id = $1 AND id = $2`, request.OrganizationID, nodeStateID, databaseNow); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark node running", err)
+		return nil, runtimePersistenceError("could not mark node running", err)
 	}
 	var firstStart bool
 	err = tx.QueryRow(ctx, `
@@ -131,7 +136,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		WHERE r.organization_id = pending.organization_id AND r.id = pending.id
 		RETURNING pending.started_at IS NULL`, request.OrganizationID, work.Attempt.RunID, databaseNow).Scan(&firstStart)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not mark run running", err)
+		return nil, runtimePersistenceError("could not mark run running", err)
 	}
 	claimPayload, err := json.Marshal(map[string]any{
 		"attemptId": work.Attempt.ID, "workerId": request.WorkerID,
@@ -149,11 +154,11 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		claimEvents = append(claimEvents, workflowruntime.Event{Type: "attempt.lease_taken_over", Data: claimPayload})
 	}
 	if _, err = appendRuntimeEvents(ctx, tx, request.OrganizationID, work.Attempt.RunID, claimEvents); err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not persist claim events", err)
+		return nil, runtimePersistenceError("could not persist claim events", err)
 	}
 	work.Run, err = scanRuntimeRun(tx.QueryRow(ctx, runtimeRunByIDSQL, string(request.OrganizationID), work.Attempt.RunID))
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not read claimed run", err)
+		return nil, runtimePersistenceError("could not read claimed run", err)
 	}
 	err = tx.QueryRow(ctx, `
 		SELECT organization_id, run_id, node_id, status, attempt_count, latest_attempt_id, updated_at
@@ -162,7 +167,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		&work.Node.AttemptCount, &work.Node.LatestAttemptID, &work.Node.UpdatedAt,
 	)
 	if err != nil {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not read claimed node", err)
+		return nil, runtimePersistenceError("could not read claimed node", err)
 	}
 	work.Node.OrganizationID = workflowruntime.OrganizationID(organizationID)
 	work.Node.Status = runtimeNodeStatus(attemptStatus)
@@ -179,7 +184,7 @@ func (s *RuntimeStore) claimAttemptTx(ctx context.Context, tx pgx.Tx, request wo
 		snapshot.OrganizationID = workflowruntime.OrganizationID(snapshotOrganization)
 		work.Snapshot = &snapshot
 	} else if !errors.Is(snapshotErr, pgx.ErrNoRows) {
-		return nil, runtimeError(workflowruntime.CodeConflict, "could not read run snapshot", snapshotErr)
+		return nil, runtimePersistenceError("could not read run snapshot", snapshotErr)
 	}
 	work.Attempt.Status = workflowruntime.AttemptRunning
 	work.Attempt.StartedAt = timePointerRuntime(databaseNow)
@@ -211,7 +216,7 @@ func (s *RuntimeStore) RenewLease(ctx context.Context, request workflowruntime.R
 		if errors.Is(err, pgx.ErrNoRows) {
 			return workflowruntime.Lease{}, runtimeError(workflowruntime.CodeLeaseLost, "attempt lease was lost", ErrStaleLease)
 		}
-		return workflowruntime.Lease{}, runtimeError(workflowruntime.CodeConflict, "could not renew lease", err)
+		return workflowruntime.Lease{}, runtimePersistenceError("could not renew lease", err)
 	}
 	return lease, nil
 }
@@ -249,7 +254,7 @@ func validateRuntimeLease(ctx context.Context, tx pgx.Tx, organizationID workflo
 		return "", "", runtimeError(workflowruntime.CodeStaleFencingToken, "attempt lease is stale", ErrStaleLease)
 	}
 	if err != nil {
-		return "", "", runtimeError(workflowruntime.CodeConflict, "could not validate attempt lease", err)
+		return "", "", runtimePersistenceError("could not validate attempt lease", err)
 	}
 	return nodeStateID, nodeID, nil
 }

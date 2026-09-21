@@ -54,30 +54,57 @@ RETURNING id, organization_id, execution_plan_id, plan_hash, plan_entry_node_id,
           deadline_at, cancel_requested_at, created_at, updated_at, version`
 
 // CreateRun atomically enforces organization idempotency and seeds entry work.
+//
+// One attempt is the whole transaction; a deadlock or serialization failure rolls all of it back, so
+// the retry reopens the transaction instead of continuing on the aborted one. Run creation carries
+// the caller's idempotency key and its ledger entry, so repeating the attempt cannot create a second
+// run: whichever attempt commits is the run, and the rest replay it.
 func (s *RuntimeStore) CreateRun(ctx context.Context, request workflowruntime.CreateRunRequest) (workflowruntime.CreateRunResult, error) {
 	if err := s.repository.requirePool(); err != nil {
 		return workflowruntime.CreateRunResult{}, err
 	}
+	var result workflowruntime.CreateRunResult
+	err := retryOnTransient(ctx, func(ctx context.Context) error {
+		attempt, attemptErr := s.createRunTx(ctx, request)
+		if attemptErr == nil {
+			result = attempt
+		}
+		return attemptErr
+	})
+	if err != nil {
+		return workflowruntime.CreateRunResult{}, err
+	}
+	return result, nil
+}
+
+// createRunTx is one complete attempt of the run-creation transaction. It returns classified errors
+// so the retry wrapper only sees transient ones, and so nothing that already concluded something
+// about the request is retried on the strength of a wrapped cause.
+func (s *RuntimeStore) createRunTx(ctx context.Context, request workflowruntime.CreateRunRequest) (workflowruntime.CreateRunResult, error) {
 	tx, err := s.repository.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not start run", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not start run", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = LockAPIMutationTx(ctx, tx); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
 			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeIdempotencyConflict, "idempotency key was used for a different request", err)
 		}
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not lock run operation", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not lock run operation", err)
 	}
 	result, err := createRuntimeRunTx(ctx, tx, request.Run)
 	if err != nil {
 		return workflowruntime.CreateRunResult{}, err
 	}
 	if err = CompleteAPIMutationTx(ctx, tx, result.Run.ID, map[string]any{"runId": result.Run.ID}); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete run operation", err)
+		if errors.Is(err, ErrIdempotencyConflict) {
+			// 幂等键被另一个 body 用过：这是语义结论，重试不会改变它，也仍然报 conflict。
+			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not complete run operation", err)
+		}
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not complete run operation", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not commit run", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not commit run", workflowruntime.MarkCommitOutcomeUnknown(err))
 	}
 	apimutation.MarkCommitted(ctx)
 	return result, nil
@@ -106,7 +133,7 @@ func createRuntimeRunTx(ctx context.Context, tx pgx.Tx, run workflowruntime.Run)
 		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeNotFound, "execution plan not found", err)
 	}
 	if err != nil {
-		return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist run", err)
+		return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist run", err)
 	}
 	if created {
 		admission, admissionErr := admitRunTx(ctx, tx, run)
@@ -115,25 +142,25 @@ func createRuntimeRunTx(ctx context.Context, tx pgx.Tx, run workflowruntime.Run)
 			if errors.As(admissionErr, &runtimeAdmissionErr) {
 				return workflowruntime.CreateRunResult{}, admissionErr
 			}
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not admit run", admissionErr)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not admit run", admissionErr)
 		}
 		if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, "run.created", json.RawMessage(`{}`)); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist run event", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist run event", err)
 		}
 		if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, "run.created", json.RawMessage(`{}`)); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist run delivery", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist run delivery", err)
 		}
 		admissionPayload, _ := json.Marshal(map[string]any{"priority": run.Priority, "status": admission.status})
 		admissionEvent := runtimeAdmissionEvent(admission.status)
 		if _, err = appendEventTx(ctx, tx, string(run.OrganizationID), run.ID, admissionEvent, admissionPayload); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist admission event", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist admission event", err)
 		}
 		if err = insertOutboxTx(ctx, tx, string(run.OrganizationID), "run", run.ID, admissionEvent, admissionPayload); err != nil {
-			return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not persist admission delivery", err)
+			return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not persist admission delivery", err)
 		}
 		if run.Plan.EntryNodeID != "" {
 			if err = seedRuntimeAttempt(ctx, tx, run); err != nil {
-				return workflowruntime.CreateRunResult{}, runtimeError(workflowruntime.CodeConflict, "could not seed entry attempt", err)
+				return workflowruntime.CreateRunResult{}, runtimePersistenceError("could not seed entry attempt", err)
 			}
 		}
 	}
