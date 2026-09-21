@@ -695,6 +695,7 @@ paths:
       responses:
         '201': { description: Safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '409': { description: A credential with this name already exists in the organization; recreate with a different name, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
   /ops/credentials/{credentialId}/rotate:
     servers: [{ url: / }]
     post:

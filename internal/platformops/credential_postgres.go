@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,6 +50,14 @@ func (s *PostgresCredentialStore) CreateCredential(ctx context.Context, encrypte
 		return credential, nil
 	}
 	if err != nil {
+		// credential_refs 上有 UNIQUE (organization_id, name)：同名重复创建在这里以 23505 失败。
+		// 名字由调用方给定，重名是他能自己修正的输入冲突，报 500 只会让他重试一个永远不会成功
+		// 的请求。这条 INSERT 上的 23505 只可能来自名字约束——主键冲突（organization_id, id）
+		// 已被 ON CONFLICT DO NOTHING 吞掉，外键与 CHECK 用的是别的 SQLSTATE。
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+			return Credential{}, ErrConflict
+		}
 		return Credential{}, credentialError("create credential reference", err)
 	}
 	if err = insertCredentialVersion(ctx, tx, encrypted, actorID); err != nil {
