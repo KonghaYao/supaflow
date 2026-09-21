@@ -94,6 +94,13 @@ func (h *Handler) auditMutations(next http.Handler) http.Handler {
 			OrganizationID: principal.OrganizationID, ActorID: principal.ActorID, Action: action,
 			ResourceType: resourceType, ResourceID: resourceID, Outcome: outcome, Metadata: metadata,
 		}); err != nil {
+			// 审计记录的每一个字段都来自请求：组织、主体、资源标识、元数据。字节存不进去是调用方
+			// 输入的问题，不是审计系统的问题。报 500 audit_unavailable 既误导运维去查审计写入，
+			// 也把一个调用方本可修正的错误说成服务端故障，让他重试一个永远不会成功的请求。
+			if platformops.IsUnstorableText(err) {
+				writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "request contains characters that cannot be stored")
+				return
+			}
 			writeLoggedProblem(w, r, http.StatusInternalServerError, "audit_unavailable", "mutation evidence could not be persisted", err)
 			return
 		}

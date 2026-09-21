@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pazhou/supaflow/internal/platformops"
 	"github.com/pazhou/supaflow/internal/workflow"
 )
@@ -52,4 +54,16 @@ func TestAuditFailureLogsTheSameRequestID(t *testing.T) {
 	if strings.Contains(response.Body.String(), "connection refused") {
 		t.Fatalf("response leaked the diagnostic: %s", response.Body.String())
 	}
+}
+
+// 验证审计写入因调用方字节失败时返回 400 而不是 500 audit_unavailable：审计记录的每个字段
+// 都来自请求，字节存不进 column 是调用方可改的输入问题。报成「审计不可用」会让运维去查
+// 审计系统，也让调用方重试一个永远不会成功的请求。
+func TestAuditUnstorableBytesAreAClientError(t *testing.T) {
+	rejected := workflow.WorkflowDefinition{SchemaVersion: workflow.DefinitionSchemaV1, ID: "flow-audit-bytes"}
+	unstorable := fmt.Errorf("append audit record: %w",
+		&pgconn.PgError{Code: "22021", Message: `invalid byte sequence for encoding "UTF8": 0xff`})
+	handler := testHandlerWithAudit(t, failingAuditRecorder{err: unstorable}).Routes()
+	response := requestJSON(t, handler, http.MethodPost, "/v1/workflows/flow-audit-bytes/publish", organizationAKey, "audit-bytes-key-1", rejected)
+	assertProblemCode(t, response, http.StatusBadRequest, "invalid_argument")
 }

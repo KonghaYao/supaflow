@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/pazhou/supaflow/internal/organization"
+	"github.com/pazhou/supaflow/internal/platformops"
 )
 
 const (
@@ -58,6 +59,14 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		organizationID := r.Header.Get(organizationHeader)
 		if !validOrganizationID(organizationID) {
 			writeProblem(w, r, http.StatusBadRequest, "invalid_organization", organizationHeader+" is required and must be valid")
+			return
+		}
+		// 组织标识会写进每一条审计记录，也是所有查询的过滤条件。非法 UTF-8 能通过上面的形状
+		// 校验（range 把它们读成 U+FFFD），Postgres 则直接拒收（22021）：变更请求因此在审计
+		// 分支被渲染成 500 audit_unavailable，只读端点走 writeError 却是 400。同一个根因两种
+		// 结局，所以在边缘统一挡住。/v1 与 /ops 共用这一层，两边一起覆盖。
+		if !platformops.StorableText(organizationID) {
+			writeProblem(w, r, http.StatusBadRequest, "invalid_argument", organizationHeader+" must be valid UTF-8 without NUL bytes")
 			return
 		}
 		principal := Principal{OrganizationID: organizationID, ActorID: "fenix"}

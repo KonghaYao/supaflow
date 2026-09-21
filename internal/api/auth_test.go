@@ -82,6 +82,18 @@ func TestAuthenticatorRejectsInvalidOrganization(t *testing.T) {
 	}
 }
 
+// 验证组织 header 里的非法 UTF-8 在鉴权层就被拒：它能通过形状校验（range 把它读成 U+FFFD），
+// 却是 Postgres 存不下的字节（22021）。此前它只会在写审计时失败，变更请求被渲染成
+// 500 audit_unavailable，而同一个请求的只读端点却是 400。
+func TestAuthenticatorRejectsUnstorableOrganization(t *testing.T) {
+	handler := testAuthenticator(t).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unstorable organization reached handler")
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest("organization-a\xff"))
+	assertProblemCode(t, response, http.StatusBadRequest, "invalid_argument")
+}
+
 // 验证 current/previous 重叠轮换期间两把 master key 均可认证。
 func TestAuthenticatorAcceptsCurrentAndPreviousKeys(t *testing.T) {
 	previous := "previous-platform-master-key-at-least-32-bytes"
