@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -461,6 +462,23 @@ func (o *Orchestrator) fail(ctx context.Context, work *WorkItem, executeErr erro
 	})
 	if err != nil {
 		return AdvanceResult{Worked: true}, err
+	}
+	// Without this the worker reports nothing at all about a failed attempt: the durable
+	// record and the API keep only the coarse public error code, so an operator has no
+	// local signal that a run failed or why. The cause carries the adapter's own reason
+	// (see executor.invokeAdapter); it is logged rather than returned because the public
+	// contract stays deliberately coarse. Only identifiers and the error are attached —
+	// never node input, output, source or resolved environment. The default logger is the
+	// redacting handler installed by cmd/worker, so the cause is scrubbed on the way out.
+	attributes := []any{
+		"organizationId", string(work.Run.OrganizationID), "runId", work.Run.ID,
+		"attemptId", work.Attempt.ID, "nodeId", work.Attempt.NodeID, "attempt", work.Attempt.Number,
+		"errorCode", executionCode, "error", executeErr,
+	}
+	if retryAt != nil {
+		slog.Warn("attempt failed, retry scheduled", append(attributes, "retryAt", retryAt, "runStatus", run.Status)...)
+	} else {
+		slog.Error("attempt failed", append(attributes, "runStatus", run.Status)...)
 	}
 	return AdvanceResult{Worked: true, Run: &run}, nil
 }

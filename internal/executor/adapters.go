@@ -158,7 +158,12 @@ func executeTool(ctx context.Context, registry ToolRegistry, req workflowruntime
 func invokeAdapter(call func() (json.RawMessage, error)) (json.RawMessage, error) {
 	output, err := call()
 	if err != nil {
-		return nil, executionError("adapter_failed", true, errors.New("external adapter invocation failed"))
+		// Keep the adapter's own error in the cause chain. The public error code stays
+		// deliberately coarse, so the cause is the only place the real reason survives:
+		// dropping it (as this did) makes "script exited 3", "output exceeded the limit"
+		// and "provider is not configured" indistinguishable in every log and every API
+		// response. Persistent callers render it; nothing outside this process sees it.
+		return nil, executionError("adapter_failed", true, fmt.Errorf("external adapter invocation failed: %w", err))
 	}
 	if !json.Valid(output) {
 		return nil, executionError("invalid_adapter_output", false, errors.New("adapter returned invalid JSON"))
@@ -184,7 +189,7 @@ func executeSubworkflow(ctx context.Context, runner SubworkflowRunner, req workf
 		PlanID: cfg.PlanID, PlanHash: cfg.PlanHash, Input: cloneJSON(req.Input),
 	})
 	if err != nil {
-		return SubworkflowOutput{}, executionError("adapter_failed", true, errors.New("external adapter invocation failed"))
+		return SubworkflowOutput{}, executionError("adapter_failed", true, fmt.Errorf("external adapter invocation failed: %w", err))
 	}
 	if !json.Valid(output.Value) {
 		return SubworkflowOutput{}, executionError("invalid_adapter_output", false, errors.New("adapter returned invalid JSON"))
