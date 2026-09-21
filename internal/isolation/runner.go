@@ -51,6 +51,16 @@ const (
 	defaultWorkspaceInodes   = 1024
 )
 
+// TerminationGrace is how long the helper waits after signalling one attempt's process
+// group with SIGTERM before it escalates to SIGKILL and removes the workspace. It is
+// exported because whoever supervises the helper has to outwait this whole sequence when
+// it cancels an attempt: the helper signals the child group, and only after this window
+// does it escalate. A supervisor that waits exactly this long (or less) sends its own
+// SIGKILL first, the helper dies before it can finish, and a child that ignores SIGTERM
+// is left running with its workspace still on disk. internal/executor derives its cancel
+// grace from this constant for that reason.
+const TerminationGrace = 1500 * time.Millisecond
+
 // Run executes one request with OS-enforced filesystem, network, CPU, address
 // space, process, file-size, and open-file limits. It fails closed when the
 // host cannot enforce every boundary.
@@ -125,7 +135,7 @@ func runWithBoundary(ctx context.Context, request Request, build commandBuilder,
 	if err = boundary.configure(cmd); err != nil {
 		return Response{Code: "resource_limits_unavailable"}
 	}
-	err = runCommand(executionCtx, cmd, boundary.monitor, 1500*time.Millisecond)
+	err = runCommand(executionCtx, cmd, boundary.monitor, TerminationGrace)
 	if err == nil && boundary.verify != nil {
 		err = boundary.verify()
 	}

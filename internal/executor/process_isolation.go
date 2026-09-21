@@ -54,7 +54,15 @@ func NewProcessIsolationRunner(cfg ProcessIsolationConfig) (*ProcessIsolationRun
 		return nil, fmt.Errorf("executor: isolation binary must be an executable regular file")
 	}
 	if cfg.CancelGrace <= 0 {
-		cfg.CancelGrace = 1500 * time.Millisecond
+		// This supervisor cancels an attempt by signalling the helper's process group and
+		// escalating to SIGKILL. The helper owns the child process group, so on that
+		// SIGTERM it forwards the signal and only escalates itself once
+		// isolation.TerminationGrace has passed — and its workspace cleanup runs after
+		// that. Waiting exactly that long (as this default did) lets the SIGKILL below
+		// land first: the helper dies mid-grace, a child that ignores SIGTERM keeps
+		// running as an unconstrained orphan, and its workspace directory is never
+		// removed. Add a margin so the helper always gets to finish its own teardown.
+		cfg.CancelGrace = isolation.TerminationGrace + time.Second
 	}
 	probe := cfg.CapabilityProbe
 	if probe == nil {
