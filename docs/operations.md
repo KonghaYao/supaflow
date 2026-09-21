@@ -109,12 +109,16 @@ Each abandoned boundary has a recorded reason in `internal/isolation`:
 | Mount, PID, IPC, UTS namespaces and read-only system binds | macOS has no bubblewrap equivalent. |
 | Network namespace | The same: `--unshare-all` is a Linux feature, so user code reaches the host network stack directly. |
 | Workspace byte and inode quotas | Quotas are a Linux mount/cgroup feature. |
-| Death of the attempt when its launcher dies | Linux sets `Pdeathsig` and passes `--die-with-parent`; Darwin's `SysProcAttr` has no equivalent, so a helper killed with `SIGKILL` leaves the attempt running. |
+| Death of the attempt when its launcher dies | Linux sets `Pdeathsig` and passes `--die-with-parent`; Darwin's `SysProcAttr` has no equivalent, so a helper killed with `SIGKILL` leaves the attempt running and its workspace directory behind. |
 | Address-space ceiling (`RLIMIT_AS`) | The Darwin kernel rejects it with `EINVAL`. |
 | Per-invocation process ceiling (`RLIMIT_NPROC`) | It is a per-host-user counter on Darwin, not a per-invocation boundary. |
 | File-size ceiling (`RLIMIT_FSIZE`) | macOS `/usr/bin/python3` links `libxcselect.dylib`, which rebuilds a ~1.4 MB `xcrun_db` cache whenever the interpreter's `HOME` changes. Every attempt gets a fresh `HOME`, so this happens on every attempt, and the write lands in the Darwin per-user temp directory rather than the attempt workspace because `libxcselect` ignores `TMPDIR`. Any lower ceiling kills the interpreter with `SIGXFSZ` before user code runs, and the interpreter's own `-B`, `-S`, `-E`, `-I` and `-s` flags do not prevent the write. |
 
+The worker's own cancellation path does not walk into that last gap. It signals the helper, and it waits `isolation.TerminationGrace` plus a margin before it escalates to `SIGKILL`, so the helper always gets to finish signalling the child group and removing the workspace. Waiting no longer than the helper does — which the default used to — means the worker's `SIGKILL` lands first, the helper dies mid-teardown, and a script that ignores `SIGTERM` keeps running as an orphan with its workspace still on disk. A helper killed by something outside the worker, such as an OOM kill or an operator's `kill -9`, still leaks both.
+
 Two further consequences are worth stating explicitly, because both escape the per-attempt workspace: that interpreter cache is rebuilt outside it, and a rebuild killed by a file-size ceiling leaves its partially written temp file behind (the measured residue of one investigation was 79 `xcrun_db-*` orphans totalling ~20 MB). Disk exhaustion is therefore not defended against on a degraded host.
+
+Neither the plan nor the run record states that a boundary was abandoned. The immutable plan keeps the node type's declared permissions — a shell node still reads `{"compute":true,"network":false,"filesystem":false}` — because those describe the production boundary the node type is entitled to, not what the host actually enforced. On a degraded host the effective authority is the worker's own user, so any decision that depends on "this run could not touch the filesystem or the network" must come from knowing where the worker ran and whether the opt-in was set, not from the run record.
 
 Generate the checked-in node contract and build the Studio plus all production binaries from a clean checkout:
 
@@ -150,7 +154,12 @@ The control plane also mounts authenticated operations APIs at `/ops/*` and the 
 
 Every `/ops` mutation requires `Idempotency-Key`. The durable ledger stores a stable
 `operation_id`, lease owner/expiry, request hash, audit evidence, and the exact completed HTTP
-response. An expired owner may be replaced, while an old owner is fenced from completion.
+response. An expired owner may be replaced, while an old owner is fenced from completion. The
+request hash covers the method, the escaped path, and the exact body bytes, with no JSON
+normalization, so a replay that re-serializes the same document with different whitespace or key
+order is rejected as `idempotency_conflict` rather than accepted as the same request. Clients that
+retry must resend the original bytes; `/v1` reports that conflict as RFC 7807 `application/problem+json`
+while `/ops` reports it as `{"code":"conflict","status":409}`.
 The crash-window recovery contract for each mutation family is:
 
 | Mutation | Durable side-effect recovery |
@@ -414,6 +423,10 @@ For a rolling upgrade, apply only backward-compatible expand migrations first, t
 Keep `SUPAFLOW_RESUME_TOKEN_SECRET` identical across control-plane and worker replicas for the full lifetime of pending approvals. Rotating it immediately invalidates their reconstructable tokens. Drain or resolve pending approvals before a coordinated rotation, or retain the old issuer through an explicitly designed multi-key rotation release.
 
 On `SIGTERM`, stop routing new control-plane requests and allow its bounded graceful-shutdown window to finish in-flight requests. The worker stops its polling loop when its signal context is cancelled; any active executor receives the cancellation signal. Give the process enough termination grace to persist that outcome. During execution the orchestrator renews its 30-second lease every 10 seconds. If renewal fails, it cancels the executor and does not commit with the stale fencing token. If the process is forcibly terminated, the lease must expire before another worker takes over; fencing prevents the old worker from committing after takeover.
+
+`POST /runs/{runId}/cancel` is durable and acknowledged immediately with `202` and `CANCELLING`; it is not an immediate kill. A running attempt observes cancellation on its next renewal tick, so the transition to `CANCELLED` lands within one `LeaseDuration/3` interval (10 seconds by default) and the measured end-to-end latency is on that order. Alerting on cancel latency below one tick would page on the design rather than on a fault.
+
+While an attempt is executing, the same ticker that renews its lease is what bounds cancellation latency, and it also means a long-running node is never taken over mid-flight: the attempt's window keeps being extended, so a node that outlives one lease ends through its own node timeout (`node_timeout`) rather than through a second worker claiming it.
 
 ## Rollback
 
