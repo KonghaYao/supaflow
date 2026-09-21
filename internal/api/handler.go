@@ -151,9 +151,11 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	// A body id that disagrees with the path is a client mistake, so it has to come back as
 	// one. It used to fall through to the catalog's own guard, whose plain error reaches
 	// writeError's default branch and became a 500 internal_error: the caller could not
-	// tell a mistyped path from an outage. An absent or malformed id is left to definition
-	// validation, which reports it against the id field with its own message.
-	if definition.ID != "" && definition.ID != r.PathValue("workflowID") {
+	// tell a mistyped path from an outage. The path always carries a workflow id, so an
+	// absent body id is the same mismatch — leaving that case to definition validation does
+	// not work, because the catalog guard rejects an empty id before compilation runs and
+	// the caller is back to a 500.
+	if definition.ID != r.PathValue("workflowID") {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "definition id must match the workflow id in the path")
 		return
 	}
@@ -383,7 +385,7 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		}
 		writeProblem(w, r, status, string(runtimeError.Code), runtimeError.Message)
 	default:
-		writeProblem(w, r, http.StatusInternalServerError, "internal_error", "request could not be completed")
+		writeInternalError(w, r, err)
 	}
 }
 
