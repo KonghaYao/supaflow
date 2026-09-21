@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
+	"github.com/pazhou/supaflow/internal/platformops"
 	"github.com/pazhou/supaflow/internal/workflow"
 )
 
@@ -61,6 +63,26 @@ func writeValidationProblem(w http.ResponseWriter, r *http.Request, status int, 
 		Code:   code,
 		Issues: wire,
 	})
+}
+
+// writeInternalError answers an unexpected failure and records it server-side. The response
+// stays deliberately opaque, but without a log line the request id it carries named nothing:
+// an operator had no way to tell which request failed or why, and the only remaining evidence
+// was the caller's own report. The diagnostic is redacted before it is recorded and the
+// request is never logged, because bodies carry workflow definitions and credential
+// references. Only the routing identity is attached.
+func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
+	id := requestID(r)
+	// Pin the id on the request so the response repeats the value this line records:
+	// requestID mints a fresh random id whenever the caller did not supply one.
+	r.Header.Set("X-Request-ID", id)
+	diagnostic := "unknown"
+	if err != nil {
+		diagnostic = platformops.RedactDiagnostic(err.Error())
+	}
+	slog.Error("request failed with an unexpected error",
+		"requestId", id, "method", r.Method, "path", r.URL.Path, "error", diagnostic)
+	writeProblem(w, r, http.StatusInternalServerError, "internal_error", "request could not be completed")
 }
 
 func writeProblemValue(w http.ResponseWriter, r *http.Request, value problem) {
