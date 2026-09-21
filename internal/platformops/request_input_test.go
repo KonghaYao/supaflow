@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -32,17 +33,65 @@ func TestValidRequestTargetRefusesUnstorableBytes(t *testing.T) {
 	}
 }
 
-// 验证只有 Postgres 的「无法存储字符」错误被归类为调用方问题，其他存储错误仍属服务端故障。
-func TestIsUnstorableTextOnlyMatchesUntranslatableCharacter(t *testing.T) {
-	unstorable := fmt.Errorf("append audit record: %w", &pgconn.PgError{Code: "22021", Message: "invalid byte sequence for encoding \"UTF8\": 0x00"})
-	if !IsUnstorableText(unstorable) {
-		t.Fatal("expected 22021 to be classified as unstorable text")
+// 验证请求体里「JSON 语法合法、jsonb 却存不下」的转义被识别：\u0000 与孤立代理拒绝，
+// 合法代理对与字面量 \\u0000 放行。放宽这一格会让调用方拿到 500，收紧则会把能存的文档挡在门外。
+func TestStorableJSONMatchesOnlyEscapesJSONBRejects(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		storable bool
+	}{
+		{name: "转义形式的 NUL 被拒", body: `{"label":"\u0000"}`, storable: false},
+		{name: "字符串中间的 NUL 被拒", body: `{"label":"a\u0000b"}`, storable: false},
+		{name: "键名里的 NUL 被拒", body: `{"\u0000":1}`, storable: false},
+		{name: "孤立高位代理被拒", body: `{"label":"\ud800"}`, storable: false},
+		{name: "孤立低位代理被拒", body: `{"label":"\udc00"}`, storable: false},
+		{name: "两个高位代理相连被拒", body: `{"label":"\ud800\ud800"}`, storable: false},
+		{name: "高位代理后跟普通转义被拒", body: `{"label":"\ud800\n"}`, storable: false},
+		{name: "代理对在字符串末尾截断被拒", body: `{"label":"\ud83d"}`, storable: false},
+		{name: "合法代理对放行", body: `{"label":"\ud83d\ude00"}`, storable: true},
+		{name: "大写十六进制的代理对放行", body: `{"label":"\uD83D\uDE00"}`, storable: true},
+		{name: "双写反斜杠是字面量 u0000，放行", body: `{"label":"\\u0000"}`, storable: true},
+		{name: "控制字符转义放行", body: `{"label":"\u001f"}`, storable: true},
+		{name: "非字符 U+FFFF 放行", body: `{"label":"\uffff"}`, storable: true},
+		{name: "引号与换行等普通转义放行", body: `{"label":"\"quoted\"\n\t\\"}`, storable: true},
+		{name: "字符串以转义反斜杠结尾放行", body: `{"label":"ends with \\"}`, storable: true},
+		{name: "非 ASCII 与 emoji 原文放行", body: `{"label":"流程 🚀"}`, storable: true},
+		{name: "不含转义的大 body 放行", body: `{"document":{` + strings.Repeat(`"node":"value",`, 4096) + `"end":1}}`, storable: true},
+		{name: "字符串外的转义不由本函数判定，语法错误交给解码器", body: `{"label": \u0000}`, storable: true},
 	}
-	other := &pgconn.PgError{Code: "23505", Message: "duplicate key value"}
-	if IsUnstorableText(other) {
-		t.Fatal("expected unique violation to stay a server-side failure")
+	for _, testCase := range cases {
+		if got := StorableJSON([]byte(testCase.body)); got != testCase.storable {
+			t.Fatalf("%s StorableJSON=%v want=%v", testCase.name, got, testCase.storable)
+		}
 	}
-	if IsUnstorableText(fmt.Errorf("dial tcp: connection refused")) {
-		t.Fatal("expected a non-postgres error to stay a server-side failure")
+}
+
+// 验证「Postgres 说这些字节存不下」只对调用方输入成立：22021（text 编码）、22P05（jsonb
+// 转义）与指向 json 的 22P02 归调用方，其余存储故障仍属服务端，否则内部 bug 会被说成 400。
+func TestIsUnstorableTextMatchesOnlyUnstorableInput(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "text 无法编码 22021", err: &pgconn.PgError{Code: "22021", Message: `invalid byte sequence for encoding "UTF8": 0xff`}, want: true},
+		{name: "jsonb 转义无法转换 22P05", err: &pgconn.PgError{Code: "22P05", Message: "unsupported Unicode escape sequence"}, want: true},
+		{name: "json 语法错误 22P02", err: &pgconn.PgError{Code: "22P02", Message: "invalid input syntax for type json"}, want: true},
+		{name: "整数输入错误 22P02 不算调用方字节问题", err: &pgconn.PgError{Code: "22P02", Message: `invalid input syntax for type integer: "x"`}, want: false},
+		{name: "22P02 无消息时保守判为服务端故障", err: &pgconn.PgError{Code: "22P02"}, want: false},
+		{name: "唯一约束冲突仍是服务端故障", err: &pgconn.PgError{Code: "23505", Message: "duplicate key value"}, want: false},
+		{name: "数据库启动中仍是服务端故障", err: &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, want: false},
+		{name: "非 Postgres 错误仍是服务端故障", err: fmt.Errorf("dial tcp: connection refused"), want: false},
+	}
+	for _, testCase := range cases {
+		if got := IsUnstorableText(testCase.err); got != testCase.want {
+			t.Fatalf("%s IsUnstorableText=%v want=%v", testCase.name, got, testCase.want)
+		}
+	}
+	// 服务层用 %w 包过再返回的错误同样要能识别，否则归类防线在真实调用链上失效。
+	wrapped := fmt.Errorf("append audit record: %w", &pgconn.PgError{Code: "22021", Message: "invalid byte sequence for encoding \"UTF8\": 0xff"})
+	if !IsUnstorableText(wrapped) {
+		t.Fatal("expected a wrapped unstorable-text error to stay classified")
 	}
 }

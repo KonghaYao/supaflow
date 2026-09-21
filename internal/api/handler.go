@@ -329,8 +329,14 @@ func (h *Handler) require(next http.Handler) http.Handler {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	decoder := json.NewDecoder(r.Body)
+	// 请求体先读进内存再解码：jsonb 拒绝的转义（\u0000、孤立代理）在解码后仍原样保留在
+	// json.RawMessage 里，只有拿到原始字节才能判定，而流式解码会把它们直接交给处理器。
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_json", "request body is invalid")
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
@@ -340,6 +346,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid_json", "request body must contain one JSON value")
 		return errors.New("request contains trailing JSON")
+	}
+	// 解码失败先于本校验返回，语法的 invalid_json 语义不变。这里拦的是语法合法、Postgres 却
+	// 存不下的字节：它们会一路写进 jsonb 列，以 22P05 / 22P02 的形式被报成 500。
+	if !platformops.StorableJSON(body) {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "request body must be valid UTF-8 without NUL or unpaired surrogate escapes")
+		return errors.New("request body carries characters that cannot be stored")
 	}
 	return nil
 }
