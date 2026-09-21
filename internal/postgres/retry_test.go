@@ -139,6 +139,14 @@ func TestCreateRunReportsCapacityExhaustionAsQuotaExceeded(t *testing.T) {
 		MaxActiveWorkers: 10, MaxQueueDepth: 100, MaxTriggers: 100, MaxPendingTriggerFirings: 100, MaxPendingOutboxMessages: 2}); err != nil {
 		t.Fatal(err)
 	}
+	// 这个组织被压到容量上限，且用例结束时仍留着可领的 pending attempt；共享集成库里别的用例
+	// 通过 ClaimNext（跨组织取活）会领到它，撞上这里制造的容量门禁而失败。
+	t.Cleanup(func() {
+		if _, execErr := pool.Exec(context.WithoutCancel(ctx),
+			`UPDATE organization_quotas SET max_pending_outbox_messages=20000 WHERE organization_id=$1`, organizationID); execErr != nil {
+			t.Errorf("restore organization quota: %v", execErr)
+		}
+	})
 	startAdmissionRun(t, ctx, service, organizationID, plan, "capacity-fill-0001", 0)
 	overflow := workflowruntime.StartRunRequest{Plan: plan, Input: []byte(`{}`), IdempotencyKey: "capacity-overflow-0001"}
 	if _, err = service.StartRun(ctx, workflowruntime.OrganizationID(organizationID), overflow); !workflowruntime.IsCode(err, workflowruntime.CodeQuotaExceeded) {
