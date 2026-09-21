@@ -311,6 +311,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		writeProblem(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
+	// 解码失败先于本校验返回，语法的 invalid_request 语义不变。这里拦的是语法合法、Postgres 却
+	// 存不下的字节：它们会写进 text 或 jsonb 列，以 22P05 / 22P02 的形式被 respond 报成 500。
+	if !platformops.StorableJSON(body) {
+		writeProblem(w, http.StatusBadRequest, "invalid_argument")
+		return false
+	}
 	return true
 }
 
@@ -339,6 +345,11 @@ func respond(w http.ResponseWriter, value any, err error, success int) {
 		if errors.As(err, &limited) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(limited.RetryAfter.Seconds()))))
 		}
+	case platformops.IsUnstorableText(err):
+		// 调用方送来的字节 Postgres 存不下（text 的 22021、jsonb 的 22P05 / 22P02）：这是请求的
+		// 问题，报 500 会让调用方去重试一个永远不会成功的请求。放在最后的领域错误判断里，语义
+		// 明确的 Err* 优先，未枚举的入口则靠这一格兜住。
+		status, code = http.StatusBadRequest, "invalid_request"
 	}
 	writeProblem(w, status, code)
 }

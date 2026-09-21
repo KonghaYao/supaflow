@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pazhou/supaflow/internal/api"
 	"github.com/pazhou/supaflow/internal/organization"
 	"github.com/pazhou/supaflow/internal/platformops"
@@ -113,6 +114,43 @@ func TestCredentialRouteNeverReturnsSecret(t *testing.T) {
 	}
 }
 
+// 验证 /ops 请求体里 jsonb / text 存不下的转义在解码边界返回 400 invalid_argument：
+// 此前 Name 含 \u0000 会写进列时被 Postgres 以 22021 拒绝，respond 没有归类，调用方拿到 500。
+func TestCredentialRouteRejectsUnstorableName(t *testing.T) {
+	provider, err := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &httpCredentialStore{}
+	credentials, err := platformops.NewCredentialService(store, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{services: Services{Credentials: credentials, Mutations: newHTTPMutationLedger()}}
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/ops/credentials", strings.NewReader(`{"name":"nul\u0000name","purpose":"webhook_signing","secret":"never-return-this"}`))
+	request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+	request.Header.Set("X-Fenix-Organization-Id", "organization_auth")
+	request.Header.Set("Idempotency-Key", "credential-nul-name-1")
+	response := httptest.NewRecorder()
+	auth.Middleware(handler.Routes()).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "invalid_argument" || store.creates != 0 {
+		t.Fatalf("code=%q creates=%d", body.Code, store.creates)
+	}
+}
+
 // 验证所有 ops mutation 共用持久幂等语义：同指纹重放，异指纹冲突且不再执行。
 func TestCredentialMutationReplaysAndRejectsFingerprintConflict(t *testing.T) {
 	provider, _ := platformops.NewLocalAESProvider("key-1", bytes.Repeat([]byte{7}, 32))
@@ -195,7 +233,30 @@ func TestRateLimitResponseIncludesRetryAfter(t *testing.T) {
 	}
 }
 
-// 验证 Run 准入只能由 Runtime 生命周期推进，运维面不暴露可绕过原子计数的修改入口。
+// 验证 /ops 的存储错误归类：调用方送来的字节 Postgres 存不下（22021 / 22P05 / json 的 22P02）
+// 返回 400，而真正的存储故障仍是 500——把服务端故障说成 400 会掩盖运维需要看到的信号。
+func TestRespondClassifiesUnstorableInputAsClientError(t *testing.T) {
+	for _, code := range []string{"22021", "22P05"} {
+		response := httptest.NewRecorder()
+		respond(response, nil, &pgconn.PgError{Code: code, Message: "stored bytes rejected"}, http.StatusOK)
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusBadRequest || body.Code != "invalid_request" {
+			t.Fatalf("sqlstate=%s status=%d code=%q", code, response.Code, body.Code)
+		}
+	}
+	outage := httptest.NewRecorder()
+	respond(outage, nil, &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, http.StatusOK)
+	if outage.Code != http.StatusInternalServerError {
+		t.Fatalf("outage status=%d body=%s", outage.Code, outage.Body.String())
+	}
+}
+
+// 验证 Runs admission 只能由 Runtime 生命周期推进，运维面不暴露可绕过原子计数的修改入口。
 func TestRunAdmissionMutationRoutesAreNotExposed(t *testing.T) {
 	handler := (&Handler{}).Routes()
 	for _, method := range []string{http.MethodPost, http.MethodDelete} {

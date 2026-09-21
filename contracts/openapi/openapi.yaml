@@ -557,6 +557,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/CreateTrigger' } } }
       responses:
         '201': { description: Created trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
   /ops/triggers/{triggerId}:
     servers: [{ url: / }]
     get:
@@ -575,6 +576,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/UpdateTrigger' } } }
       responses:
         '200': { description: Updated trigger or identical replay, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
     delete:
       operationId: deleteTrigger
@@ -605,6 +607,7 @@ paths:
                 expectedUpdatedAt: { type: string, format: date-time }
       responses:
         '200': { description: Trigger state changed or identical replay, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
   /ops/triggers/{triggerId}/fire:
     servers: [{ url: / }]
@@ -626,6 +629,7 @@ paths:
                 payload: { type: object }
       responses:
         '200': { description: Idempotent trigger firing within the seven-day firing history window }
+        '400': { $ref: '#/components/responses/Problem' }
   /hooks/{publicHash}:
     servers: [{ url: / }]
     post:
@@ -665,6 +669,7 @@ paths:
                 payload: { type: object }
       responses:
         '202': { description: Event accepted and matching firings committed }
+        '400': { $ref: '#/components/responses/Problem' }
         '429':
           description: >-
             Organization trigger-ingress capacity is exhausted and a bounded prefix of matching
@@ -689,6 +694,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/WriteCredential' } } }
       responses:
         '201': { description: Safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
   /ops/credentials/{credentialId}/rotate:
     servers: [{ url: / }]
     post:
@@ -708,6 +714,7 @@ paths:
                 secret: { type: string, minLength: 1, writeOnly: true }
       responses:
         '200': { description: Rotated safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Credential' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
   /ops/credentials/{credentialId}/revoke:
     servers: [{ url: / }]
     post:
@@ -727,6 +734,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/Quota' } } }
       responses:
         '200': { description: Quota configured }
+        '400': { $ref: '#/components/responses/Problem' }
   /ops/audit:
     servers: [{ url: / }]
     get:
@@ -743,6 +751,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } }
       responses:
         '200': { description: Retention policy configured }
+        '400': { $ref: '#/components/responses/Problem' }
   /ops/exports:
     servers: [{ url: / }]
     post:
