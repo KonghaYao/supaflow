@@ -101,7 +101,22 @@ func (h *Handler) Routes() http.Handler {
 	protected.Handle("GET /v1/runs/{runID}/interrupts", h.require(http.HandlerFunc(h.interrupts)))
 	protected.Handle("POST /v1/interrupts/{interruptID}/resolve", h.require(http.HandlerFunc(h.resolveInterrupt)))
 	root.Handle("/v1/", privateNoStore(h.auth.Middleware(h.auditMutations(protected))))
-	return root
+	return rejectUnstorableTarget(root)
+}
+
+// rejectUnstorableTarget refuses a request target no stored record could match before any
+// handler runs. A path identifier reaches the audit record write, and the audit failure used to
+// replace the handler's own answer: a malformed path came back as 500 audit_unavailable, which
+// both hid the client error and claimed the mutation evidence was lost. Checking the target up
+// front keeps every later stage operating on storable text.
+func rejectUnstorableTarget(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !platformops.ValidRequestTarget(r) {
+			writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "request path and query must be valid UTF-8 without NUL bytes")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func privateNoStore(next http.Handler) http.Handler {
@@ -356,9 +371,14 @@ func isTerminalEvent(kind string) bool {
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var validation *workflow.ValidationError
 	var runtimeError *runtime.Error
+	var requestError *definition.RequestError
 	switch {
 	case errors.Is(err, definition.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "not_found", "resource not found")
+	case errors.As(err, &requestError):
+		writeProblem(w, r, http.StatusBadRequest, requestError.Code, requestError.Reason)
+	case platformops.IsUnstorableText(err):
+		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "request contains characters that cannot be stored")
 	case errors.Is(err, definition.ErrRevisionConflict):
 		writeProblem(w, r, http.StatusConflict, "revision_conflict", "draft revision does not match")
 	case errors.Is(err, definition.ErrIdempotencyConflict):
