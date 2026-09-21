@@ -72,7 +72,8 @@ func (Adapter) ToDefinition(raw json.RawMessage) (workflow.WorkflowDefinition, e
 	decoder.DisallowUnknownFields()
 	var source document
 	if err := decoder.Decode(&source); err != nil {
-		return workflow.WorkflowDefinition{}, fmt.Errorf("decode FlowGram document: %w", err)
+		// 形状错误上报给调用方，所以交给 workflow.JSONTypeError 去掉 Go 结构体名与类型名。
+		return workflow.WorkflowDefinition{}, fmt.Errorf("decode FlowGram document: %w", workflow.JSONTypeError(err))
 	}
 	if err := ensureEOF(decoder); err != nil {
 		return workflow.WorkflowDefinition{}, err

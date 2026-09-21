@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -56,9 +57,28 @@ func decodeStrict(input json.RawMessage, target any) error {
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
-		return err
+		return JSONTypeError(err)
 	}
 	return ensureJSONEOF(decoder)
+}
+
+// JSONTypeError rewrites encoding/json's type mismatch into the form a caller may see.
+//
+// The standard library names the Go type it could not fill in — "json: cannot unmarshal object
+// into Go struct field document.viewport of type flowgram.viewport" — and these messages end up
+// in the published validation issues, which the contract forbids leaking internals through. The
+// JSON kind and the field name are exactly what the caller has to fix, so they stay and the Go
+// names go. Every other decode error (syntax, unknown field, trailing value) already reads in
+// JSON terms and passes through unchanged.
+func JSONTypeError(err error) error {
+	var typeError *json.UnmarshalTypeError
+	if !errors.As(err, &typeError) {
+		return err
+	}
+	if typeError.Field == "" {
+		return fmt.Errorf("json: cannot unmarshal %s into the top-level value", typeError.Value)
+	}
+	return fmt.Errorf("json: cannot unmarshal %s into field %s", typeError.Value, typeError.Field)
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -164,6 +165,32 @@ func TestCompilePreservesValidTypedBinding(t *testing.T) {
 	if !ok || node.Inputs["body"].Source == nil || node.Inputs["body"].Source.NodeID != "begin" {
 		t.Fatalf("Node(request) binding = %#v", node.Inputs["body"])
 	}
+}
+
+// 验证节点配置类型不匹配时只描述 JSON 形状与字段：这些 message 会原样进入对外的校验问题，
+// 不能带上 Go 结构体名与类型名（"Go struct field .select of type string"）。
+func TestInvalidConfigMessageDescribesJSONShapeOnly(t *testing.T) {
+	definition := WorkflowDefinition{SchemaVersion: DefinitionSchemaV1, ID: "config_message",
+		Nodes: []NodeDefinition{
+			{ID: "start", Type: NodeTypeStart, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+			{ID: "transform", Type: NodeTypeTransform, Version: BuiltinNodeVersion, Config: json.RawMessage(`{"select":{"a":{"b":1}}}`)},
+			{ID: "end", Type: NodeTypeEnd, Version: BuiltinNodeVersion, Config: json.RawMessage(`{}`)},
+		}}
+	err := ValidateDefinition(definition, BuiltinRegistry(), builtinPolicy())
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("ValidateDefinition() error = %v, want *ValidationError", err)
+	}
+	for _, issue := range validationErr.Issues {
+		if issue.Code != "invalid_config" {
+			continue
+		}
+		if !strings.Contains(issue.Message, "select") || strings.Contains(issue.Message, "Go struct field") || strings.Contains(issue.Message, "of type") {
+			t.Fatalf("invalid_config message = %q", issue.Message)
+		}
+		return
+	}
+	t.Fatalf("issues = %#v, want invalid_config", validationErr.Issues)
 }
 
 func assertDefinitionCode(t *testing.T, definition WorkflowDefinition, policy CompilePolicy, code string) {

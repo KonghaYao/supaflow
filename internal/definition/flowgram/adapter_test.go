@@ -2,6 +2,7 @@ package flowgram
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/pazhou/supaflow/internal/workflow"
@@ -33,6 +34,32 @@ func TestAdapterSeparatesEditorAndCanonicalModels(t *testing.T) {
 	for _, forbidden := range []string{"position", "groupId", "viewport", "collapsed"} {
 		if json.Valid(encoded) && containsJSONKey(encoded, forbidden) {
 			t.Fatalf("canonical definition leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+// 验证文档形状错误只描述 JSON 形状与字段：message 会原样进入对外的校验问题，
+// 不能带上 Go 包名与类型名（"flowgram.document"、"of type flowgram.viewport"）。
+func TestAdapterReportsDocumentShapeWithoutGoTypeNames(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		field string
+	}{
+		{name: "顶层不是对象", body: `[1,2]`, field: ""},
+		{name: "viewport 形状错误", body: `{"schemaVersion":"flowgram-v1","workflowId":"flow","nodes":[],"edges":[],"viewport":[]}`, field: "viewport"},
+	}
+	for _, testCase := range cases {
+		_, err := (Adapter{}).ToDefinition(json.RawMessage(testCase.body))
+		if err == nil {
+			t.Fatalf("%s: expected an error", testCase.name)
+		}
+		message := err.Error()
+		if strings.Contains(message, "Go struct field") || strings.Contains(message, "of type") {
+			t.Fatalf("%s leaked Go internals: %s", testCase.name, message)
+		}
+		if testCase.field != "" && !strings.Contains(message, testCase.field) {
+			t.Fatalf("%s lost the offending field: %s", testCase.name, message)
 		}
 	}
 }
