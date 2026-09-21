@@ -31,6 +31,7 @@ The production processes use these environment variables:
 | `SUPAFLOW_EINO_TOOLS_JSON` | worker | no | Trusted built-in tool bindings (`name`, `kind`). Supported kinds are `json.project` and `json.merge`; workflow definitions cannot upload tool code. |
 | `SUPAFLOW_EINO_AGENTS_JSON` | worker | no | Fixed bounded agents (`name`, `model`, `tools`, `system`, `maxSteps`); every reference is validated before the worker claims attempts. |
 | `SUPAFLOW_ISOLATION_BINARY` | worker | yes | Absolute path to the separately built `cmd/isolation` helper; worker startup fails closed without it. |
+| `SUPAFLOW_ISOLATION_ALLOW_UNSAFE_LOCAL_EXECUTION` | worker, isolation helper | no | Set to exactly `1` or `true` to run user code without the Linux sandbox on a host that cannot provide one. Ignored on Linux, which always takes the bwrap plus cgroup path. Leave unset on every shared or production host: an unset, empty, or misspelled value keeps the fail-closed startup probe. See "Local execution without the Linux sandbox". |
 | `SUPAFLOW_ISOLATION_CGROUP_ROOT` | isolation helper | yes | Absolute delegated cgroup-v2 subtree below `/sys/fs/cgroup`; it must expose enabled `pids` and `memory` controllers. One child cgroup is created per fenced attempt. |
 | `SUPAFLOW_ISOLATION_WORKSPACE_ROOT` | isolation helper | yes | Absolute scratch root used only for the bounded source file; production code writes inside a private bwrap tmpfs. |
 | `SUPAFLOW_ISOLATION_MAX_PIDS` | worker | no | Per-attempt `pids.max`; defaults to 32 and cannot exceed 32. This deliberately does not use UID-global `RLIMIT_NPROC`. |
@@ -90,6 +91,24 @@ The published Dockerfile has separate `control-plane`, `worker-runtime`, and `mi
 Before starting `docker-compose.prod.yml`, create a dedicated cgroup-v2 subtree on the host and delegate only that subtree to UID 65532. The parent must have `memory` and `pids` in `cgroup.subtree_control`; do not bind the host cgroup root or run the worker privileged. Set `SUPAFLOW_CGROUP_HOST_PATH` to that exact directory. In a systemd deployment, use a delegated service/slice (`Delegate=memory pids`) and point the bind mount at the resulting empty child subtree. The compose file mounts only this subtree read-write at `/sys/fs/cgroup/supaflow`, drops every container capability, enables `no-new-privileges`, keeps the root filesystem read-only, and provides a bounded scratch tmpfs.
 
 Each attempt is atomically born into its own cgroup using `CLONE_INTO_CGROUP`, so it cannot fork before `pids.max` applies. `memory.max`, `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, and `RLIMIT_FSIZE` provide the remaining hard ceilings. bwrap creates a private PID/network/mount namespace, a read-only `/usr` and `/bin`, and a byte-bounded tmpfs workspace. Inode use is sampled every 10 ms through the sandbox mount namespace; this is a kill-on-violation guard rather than a filesystem project quota, so production must also alert on the worker scratch filesystem and keep its compose tmpfs bound. Cancellation sends `SIGTERM` to the helper and sandbox process groups, waits 1.5 seconds for cleanup, then sends `SIGKILL`; the attempt cgroup is killed and removed before the request returns.
+
+## Local execution without the Linux sandbox
+
+Production has a single supported user-code boundary: the `worker-runtime` image on Linux, where bwrap, cgroup v2, and unprivileged namespaces are all present. The helper refuses to start anywhere it cannot enforce that complete boundary, and it exits `125` from its startup capability probe rather than degrade silently.
+
+macOS and other non-Linux hosts cannot provide that boundary at all: there is no bubblewrap equivalent, no cgroup v2, no mount/PID/IPC namespace, and no filesystem confinement. Setting `SUPAFLOW_ISOLATION_ALLOW_UNSAFE_LOCAL_EXECUTION=1` lets the helper run there anyway, for local development on a disposable machine. Because the variable is read by both the worker and the helper, export it for both processes; the Studio and control plane do not need it.
+
+The degraded runner keeps every boundary the host can still enforce — request timeout, bounded output, per-attempt temporary workspace, the process group that cancellation kills, the environment allowlist, `RLIMIT_CPU`, and `RLIMIT_NOFILE` — and abandons the rest. In particular, user code runs **as the worker's own user with the worker's full filesystem and network reach**: it can read and write every file that user can, including credentials and the repository, and it can open sockets. Treat an enabled variable as equivalent to running the script yourself.
+
+Each abandoned boundary has a recorded reason in `internal/isolation`:
+
+| Missing boundary | Why the host cannot provide it |
+| ---------------- | ------------------------------ |
+| Mount, PID, IPC, UTS namespaces and read-only system binds | macOS has no bubblewrap equivalent. |
+| Workspace byte and inode quotas | Quotas are a Linux mount/cgroup feature. |
+| Address-space ceiling (`RLIMIT_AS`) | The Darwin kernel rejects it with `EINVAL`. |
+| Per-invocation process ceiling (`RLIMIT_NPROC`) | It is a per-host-user counter on Darwin, not a per-invocation boundary. |
+| File-size ceiling (`RLIMIT_FSIZE`) | macOS `/usr/bin/python3` links `libxcselect.dylib`, which rewrites a ~1.4 MB `xcrun_db` into `TMPDIR` on every invocation; any lower ceiling kills the interpreter with `SIGXFSZ` before user code runs. |
 
 Generate the checked-in node contract and build the Studio plus all production binaries from a clean checkout:
 

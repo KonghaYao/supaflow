@@ -18,6 +18,27 @@ import (
 
 const maxSourceBytes = 1 << 20
 
+// workspaceRootEnv bounds where attempt workspaces are created on every platform.
+const workspaceRootEnv = "SUPAFLOW_ISOLATION_WORKSPACE_ROOT"
+
+// allowUnsafeLocalExecutionEnv authorizes the degraded darwin runner. It only
+// affects hosts that cannot provide the production sandbox at all; Linux always
+// takes the bwrap plus cgroup path regardless of this value. See
+// local_execution_darwin.go for the exact boundaries that survive the trade.
+const allowUnsafeLocalExecutionEnv = "SUPAFLOW_ISOLATION_ALLOW_UNSAFE_LOCAL_EXECUTION"
+
+// allowUnsafeLocalExecution reports whether the operator explicitly accepted the
+// degraded runner. Only the exact opt-in values enable it, so an unset, empty or
+// misspelled value keeps the fail-closed startup probe.
+func allowUnsafeLocalExecution() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(allowUnsafeLocalExecutionEnv))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
+}
+
 const (
 	defaultCPUTime           = 30 * time.Second
 	defaultAddressSpaceBytes = 256 << 20
@@ -337,8 +358,13 @@ func sandboxCommand(workspace, interpreter string, args []string, limits resolve
 	switch runtime.GOOS {
 	case "darwin":
 		// RLIMIT_NPROC is per-host-user on Darwin, so it cannot safely express a
-		// per-invocation process limit. Running without that boundary is forbidden.
-		return nil, errResourceLimitsUnavailable
+		// per-invocation process limit. Running without that boundary is forbidden
+		// unless the operator opts into the degraded local runner, which keeps every
+		// boundary Darwin can still enforce and abandons the ones it cannot.
+		if !allowUnsafeLocalExecution() {
+			return nil, errResourceLimitsUnavailable
+		}
+		return localSandboxCommand(interpreter, args, limits)
 	case "linux":
 		path, err := exec.LookPath("bwrap")
 		if err != nil {
@@ -375,6 +401,28 @@ func sandboxCommand(workspace, interpreter string, args []string, limits resolve
 }
 
 var errResourceLimitsUnavailable = errors.New("resource limits unavailable")
+
+// localSandboxCommand builds the degraded command used only where the host cannot
+// provide the production sandbox and the operator explicitly authorized the trade.
+// The helper re-executes itself in launcher mode, so the interpreter still inherits
+// every ceiling resourceLimitsToApply reports for this platform. Unlike the production
+// path it gets no mount, PID, IPC or UTS namespace, no filesystem confinement, no
+// workspace byte or inode quota, and no per-invocation process ceiling: user code
+// runs as the worker's own user and can read or write anything that user can.
+func localSandboxCommand(interpreter string, args []string, limits resolvedLimits) ([]string, error) {
+	if len(args) == 0 {
+		return nil, errResourceLimitsUnavailable
+	}
+	launcher, err := os.Executable()
+	if err != nil {
+		return nil, errResourceLimitsUnavailable
+	}
+	launcher, err = filepath.EvalSymlinks(launcher)
+	if err != nil {
+		return nil, errResourceLimitsUnavailable
+	}
+	return append([]string{launcher}, resourceLimitLauncherArgs(limits, interpreter, args)...), nil
+}
 
 var errOutputLimit = errors.New("output limit exceeded")
 

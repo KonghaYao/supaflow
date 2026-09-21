@@ -17,10 +17,7 @@ import (
 	"time"
 )
 
-const (
-	cgroupRootEnv    = "SUPAFLOW_ISOLATION_CGROUP_ROOT"
-	workspaceRootEnv = "SUPAFLOW_ISOLATION_WORKSPACE_ROOT"
-)
+const cgroupRootEnv = "SUPAFLOW_ISOLATION_CGROUP_ROOT"
 
 type attemptCgroup struct {
 	path string
