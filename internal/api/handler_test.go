@@ -22,6 +22,13 @@ const (
 
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
+	return testHandlerWithAudit(t, nil).Routes()
+}
+
+// testHandlerWithAudit 构造处理器并注入审计写入器；audit 为 nil 时中间件不介入，
+// 与生产环境的装配差异只在「审计是否可用」这一点上。
+func testHandlerWithAudit(t *testing.T, audit AuditRecorder) *Handler {
+	t.Helper()
 	auth, err := NewMasterKeyAuthenticator(organizationAKey)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +46,8 @@ func testHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handler.Routes()
+	handler.SetAudit(audit)
+	return handler
 }
 
 func minimalDefinition(id string) workflow.WorkflowDefinition {
