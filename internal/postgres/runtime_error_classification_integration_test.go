@@ -110,6 +110,31 @@ func TestWorkerAdvanceReportsCapacityRejectionAsQuotaNotConflict(t *testing.T) {
 	}
 }
 
+// 验证取消一个不存在的 run 报「找不到」。
+//
+// 这是 /runs/{runId}/cancel 契约里此前缺失、但实测存在的 404：取消路径在锁 run 时得到无行，
+// 返回 CodeNotFound 而不是 conflict。
+func TestCancelUnknownRunReportsNotFound(t *testing.T) {
+	ctx, pool := admissionTestPool(t)
+	organizationID, service, _ := admissionTestOrganization(t, ctx, pool, "cancel-notfound")
+	missingRunID := "run_missing_" + organizationID
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE organization_id=$1 AND id=$2)`,
+		organizationID, missingRunID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("用例前提不成立：目标 run 已存在")
+	}
+	_, err := service.CancelRun(ctx, workflowruntime.OrganizationID(organizationID), missingRunID)
+	if err == nil {
+		t.Fatal("取消不存在的 run 竟然成功")
+	}
+	if !workflowruntime.IsCode(err, workflowruntime.CodeNotFound) {
+		t.Fatalf("取消不存在的 run 得到 %v", err)
+	}
+}
+
 func pendingOutboxCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, organizationID string) int {
 	t.Helper()
 	var pending int
