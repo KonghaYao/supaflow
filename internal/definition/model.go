@@ -22,6 +22,33 @@ var (
 	ErrOrganizationDraftLimit = errors.New("organization workflow draft limit exceeded")
 )
 
+// RequestError is a caller-correctable rejection: the request is wrong, not the server. Code
+// selects the wire problem code, Reason is expressed in terms of the public document schema
+// and identifiers so it is safe to return to the caller, and Cause keeps the internal detail
+// for the server log. The definition service used to return bare errors for these, which
+// landed in the API's generic branch and answered 500: a client mistake that a retry cannot
+// fix looked like an outage, and the caller had no field to correct.
+type RequestError struct {
+	Code   string
+	Reason string
+	Cause  error
+}
+
+func (e *RequestError) Error() string { return e.Reason }
+
+// Unwrap exposes the underlying failure to errors.Is and errors.As.
+func (e *RequestError) Unwrap() error { return e.Cause }
+
+// invalidRequest reports a request whose shape is wrong: missing revision, no identifier.
+func invalidRequest(reason string) error {
+	return &RequestError{Code: "invalid_argument", Reason: reason}
+}
+
+// invalidDocument reports a document that cannot be read as a workflow definition.
+func invalidDocument(reason string, cause error) error {
+	return &RequestError{Code: "invalid_workflow", Reason: reason, Cause: cause}
+}
+
 const (
 	// DefaultPageLimit bounds Studio list responses when callers omit a limit.
 	DefaultPageLimit = 50

@@ -67,7 +67,7 @@ type NodeTestResult struct {
 // DryRun compiles and simulates all nodes without invoking external executors.
 func (s *Service) DryRun(ctx context.Context, organizationID, workflowID string, sampleInput json.RawMessage) (DryRunResult, error) {
 	if !json.Valid(sampleInput) {
-		return DryRunResult{}, errors.New("sample input must be valid JSON")
+		return DryRunResult{}, invalidRequest("sample input must be valid JSON")
 	}
 	plan, err := s.CompileDraft(ctx, organizationID, workflowID)
 	if err != nil {
@@ -96,7 +96,7 @@ func (s *Service) DryRun(ctx context.Context, organizationID, workflowID string,
 // TestNode compiles and simulates a selected node without external side effects.
 func (s *Service) TestNode(ctx context.Context, organizationID, workflowID, nodeID string, sampleInput json.RawMessage) (NodeTestResult, error) {
 	if nodeID == "" || !json.Valid(sampleInput) {
-		return NodeTestResult{}, errors.New("node and valid sample input are required")
+		return NodeTestResult{}, invalidRequest("node and valid sample input are required")
 	}
 	plan, err := s.CompileDraft(ctx, organizationID, workflowID)
 	if err != nil {

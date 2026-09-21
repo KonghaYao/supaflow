@@ -27,9 +27,15 @@ type document struct {
 }
 
 type node struct {
-	ID       string                     `json:"id"`
-	Type     string                     `json:"type"`
-	Version  string                     `json:"version"`
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Version string `json:"version"`
+	// Label is the canvas caption the editor always writes. Like position and ui it is
+	// presentation metadata with no execution meaning, so the converter drops it. Decoding
+	// is strict, so an unlisted field here is not tolerated: omitting Label made every
+	// document the editor saved undecodable and every compile, dry-run, and publish-draft
+	// of it fail.
+	Label    string                     `json:"label,omitempty"`
 	Config   json.RawMessage            `json:"config"`
 	Inputs   map[string]inputBinding    `json:"inputs,omitempty"`
 	Position position                   `json:"position"`

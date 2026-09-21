@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/pazhou/supaflow/internal/definition"
 )
@@ -299,6 +300,13 @@ func (h *Handler) dryRun(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
+	// sampleInput is required by the contract. Decoding alone accepts an absent field, and the
+	// empty value then failed inside the service as an unclassified error: the caller saw 500
+	// for a request the contract already rejected.
+	if len(body.SampleInput) == 0 {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "sampleInput is required")
+		return
+	}
 	result, err := h.definitions.DryRun(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), body.SampleInput)
 	if err != nil {
 		h.writeError(w, r, err)
@@ -314,6 +322,10 @@ func (h *Handler) nodeTest(w http.ResponseWriter, r *http.Request) {
 		SampleInput json.RawMessage `json:"sampleInput"`
 	}
 	if decodeJSON(w, r, &body) != nil {
+		return
+	}
+	if strings.TrimSpace(body.NodeID) == "" || len(body.SampleInput) == 0 {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "nodeId and sampleInput are required")
 		return
 	}
 	result, err := h.definitions.TestNode(r.Context(), principal.OrganizationID, r.PathValue("workflowID"), body.NodeID, body.SampleInput)

@@ -37,6 +37,34 @@ func TestAdapterSeparatesEditorAndCanonicalModels(t *testing.T) {
 	}
 }
 
+// 验证转换器接受编辑器实际保存的文档形状，label 作为展示字段被丢弃。
+// 这里的文档逐字对应当前端的 web/src/domain/default-document.ts，改动前端默认文档时
+// 必须同步本用例：严格解码下未声明的字段会让编辑器保存的每一份草稿都无法编译、
+// 试运行或发布。
+func TestAdapterAcceptsEditorDefaultDocument(t *testing.T) {
+	document := json.RawMessage(`{
+		"schemaVersion":"flowgram-v1","workflowId":"flow",
+		"nodes":[
+			{"id":"start","type":"start","version":"1.0.0","label":"Start","config":{},"inputs":{},"position":{"x":80,"y":180}},
+			{"id":"end","type":"end","version":"1.0.0","label":"End","config":{},"inputs":{},"position":{"x":520,"y":180}}
+		],
+		"edges":[{"id":"start-end","sourceNodeId":"start","sourcePortId":"input","targetNodeId":"end","targetPortId":"result"}],
+		"groups":[],
+		"viewport":{"x":0,"y":0,"zoom":1}
+	}`)
+	definition, err := (Adapter{}).ToDefinition(document)
+	if err != nil {
+		t.Fatalf("editor document was rejected: %v", err)
+	}
+	if len(definition.Nodes) != 2 || definition.Nodes[0].ID != "start" {
+		t.Fatalf("nodes=%+v", definition.Nodes)
+	}
+	encoded, _ := json.Marshal(definition)
+	if containsJSONKey(encoded, "label") {
+		t.Fatalf("canonical definition leaked label: %s", encoded)
+	}
+}
+
 // 验证转换器拒绝未知字段，防止前后端 schema 漂移被静默吞掉。
 func TestAdapterRejectsUnknownFields(t *testing.T) {
 	_, err := (Adapter{}).ToDefinition(json.RawMessage(`{"schemaVersion":"flowgram-v1","workflowId":"flow","nodes":[],"edges":[],"unexpected":true}`))

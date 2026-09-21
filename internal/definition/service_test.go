@@ -99,8 +99,37 @@ func TestDraftMutationIdempotency(t *testing.T) {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
 	command.WorkflowID = "other"
+	// 复用同一个键提交另一份合法文档：文档必须与新的 workflow id 一致，否则会先被文档校验拦下，
+	// 这条用例要断言的幂等键冲突就测不到了。
+	command.Document = mustJSON(t, definitionFor("other"))
 	if _, err := service.CreateDraftWithResult(context.Background(), "organization-a", command); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("key reuse err=%v", err)
+	}
+}
+
+// 验证草稿在写入时就校验文档：无法解码、或文档 id 与资源不一致的文档不会落库，
+// 否则它会先存下来，再让之后每次编译、试运行和发布草稿都失败。
+func TestDraftWriteRejectsUnusableDocument(t *testing.T) {
+	service, _ := newTestService(t)
+	cases := []struct {
+		name     string
+		document json.RawMessage
+	}{
+		{name: "workflow id mismatch", document: mustJSON(t, definitionFor("other"))},
+		{name: "unknown field", document: json.RawMessage(`{"schemaVersion":"v1","id":"flow","nodes":[],"edges":[],"unexpected":true}`)},
+		{name: "unknown node field", document: json.RawMessage(`{"schemaVersion":"v1","id":"flow","nodes":[{"id":"start","type":"start","version":"1.0.0","config":{},"bogus":true}],"edges":[]}`)},
+	}
+	for index, testCase := range cases {
+		_, err := service.CreateDraft(context.Background(), "organization-a", CreateDraftCommand{
+			WorkflowID: "flow", ActorID: "editor", IdempotencyKey: fmt.Sprintf("unusable-create-%02d", index), Document: testCase.document,
+		})
+		var requestError *RequestError
+		if !errors.As(err, &requestError) || requestError.Code != "invalid_workflow" {
+			t.Fatalf("%s create err=%v", testCase.name, err)
+		}
+		if _, err := service.GetDraft(context.Background(), "organization-a", "flow"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s stored a rejected document: err=%v", testCase.name, err)
+		}
 	}
 }
 

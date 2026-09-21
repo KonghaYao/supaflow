@@ -63,6 +63,22 @@ func (CanonicalAdapter) ToDefinition(document json.RawMessage) (workflow.Workflo
 	return definition, nil
 }
 
+// toDefinition converts a draft document and classifies every failure as a caller-correctable
+// request error. The document id must name the resource that stores it: a mismatch is stored
+// happily and then breaks compilation, dry-run, and publication of that draft, so it is
+// rejected at the write boundary instead of being discovered later.
+func (s *Service) toDefinition(document json.RawMessage, workflowID string) (workflow.WorkflowDefinition, error) {
+	definition, err := s.adapter.ToDefinition(document)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, invalidDocument(err.Error(), err)
+	}
+	if definition.ID != workflowID {
+		return workflow.WorkflowDefinition{}, invalidDocument(
+			fmt.Sprintf("document workflowId %q does not match %q", definition.ID, workflowID), nil)
+	}
+	return definition, nil
+}
+
 // CreateDraft creates or idempotently replays a draft.
 func (s *Service) CreateDraft(ctx context.Context, organizationID string, command CreateDraftCommand) (Draft, error) {
 	result, err := s.CreateDraftWithResult(ctx, organizationID, command)
@@ -73,6 +89,9 @@ func (s *Service) CreateDraft(ctx context.Context, organizationID string, comman
 // persistence outcome for administrative import and observability callers.
 func (s *Service) CreateDraftWithResult(ctx context.Context, organizationID string, command CreateDraftCommand) (CreateDraftResult, error) {
 	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
+		return CreateDraftResult{}, err
+	}
+	if _, err := s.toDefinition(command.Document, command.WorkflowID); err != nil {
 		return CreateDraftResult{}, err
 	}
 	id, err := randomID("draft")
@@ -107,11 +126,14 @@ func (s *Service) ListDrafts(ctx context.Context, organizationID, cursor string,
 
 // UpdateDraft performs an optimistic autosave mutation.
 func (s *Service) UpdateDraft(ctx context.Context, organizationID string, command UpdateDraftCommand) (Draft, error) {
-	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil || command.ExpectedRevision == 0 {
-		if err != nil {
-			return Draft{}, err
-		}
-		return Draft{}, errors.New("expected revision is required")
+	if err := validateMutation(organizationID, command.WorkflowID, command.ActorID, command.IdempotencyKey, command.Document); err != nil {
+		return Draft{}, err
+	}
+	if command.ExpectedRevision == 0 {
+		return Draft{}, invalidRequest("expected revision is required")
+	}
+	if _, err := s.toDefinition(command.Document, command.WorkflowID); err != nil {
+		return Draft{}, err
 	}
 	request := MutationRequest{Draft: Draft{OrganizationID: organizationID, WorkflowID: command.WorkflowID, Document: cloneJSON(command.Document), UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("update", command.WorkflowID, command.ActorID, command.ExpectedRevision, command.Document)
@@ -125,7 +147,7 @@ func (s *Service) UpdateDraft(ctx context.Context, organizationID string, comman
 // DeleteDraft performs an optimistic idempotent deletion.
 func (s *Service) DeleteDraft(ctx context.Context, organizationID string, command DeleteDraftCommand) error {
 	if organizationID == "" || command.WorkflowID == "" || command.ActorID == "" || len(command.IdempotencyKey) < 8 || command.ExpectedRevision == 0 {
-		return errors.New("valid delete command is required")
+		return invalidRequest("valid delete command is required")
 	}
 	request := MutationRequest{Draft: Draft{OrganizationID: organizationID, WorkflowID: command.WorkflowID, UpdatedBy: command.ActorID, UpdatedAt: time.Now().UTC()}, ExpectedRevision: command.ExpectedRevision, IdempotencyKey: command.IdempotencyKey}
 	request.RequestHash = mutationHash("delete", command.WorkflowID, command.ActorID, command.ExpectedRevision, nil)
@@ -138,12 +160,9 @@ func (s *Service) CompileDraft(ctx context.Context, organizationID, workflowID s
 	if err != nil {
 		return nil, err
 	}
-	definition, err := s.adapter.ToDefinition(draft.Document)
+	definition, err := s.toDefinition(draft.Document, workflowID)
 	if err != nil {
 		return nil, err
-	}
-	if definition.ID != workflowID {
-		return nil, errors.New("draft workflow id does not match resource")
 	}
 	return workflow.Compile(definition, s.registry, s.policy)
 }
@@ -163,7 +182,7 @@ func (s *Service) Publish(ctx context.Context, organizationID, workflowID string
 // PublishDraft publishes the current editor document.
 func (s *Service) PublishDraft(ctx context.Context, organizationID, workflowID, key string) (platform.PublishedPlan, bool, error) {
 	if organizationID == "" || workflowID == "" || len(key) < 8 || len(key) > 128 {
-		return platform.PublishedPlan{}, false, errors.New("organization, workflow, and valid idempotency key are required")
+		return platform.PublishedPlan{}, false, invalidRequest("organization, workflow, and valid idempotency key are required")
 	}
 	if replayer, ok := s.publisher.(publicationReplayer); ok {
 		published, found, err := replayer.ReplayPublication(ctx, organizationID, workflowID, key)
@@ -175,7 +194,7 @@ func (s *Service) PublishDraft(ctx context.Context, organizationID, workflowID, 
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
-	definition, err := s.adapter.ToDefinition(draft.Document)
+	definition, err := s.toDefinition(draft.Document, workflowID)
 	if err != nil {
 		return platform.PublishedPlan{}, false, err
 	}
@@ -308,7 +327,7 @@ func diffDefinitions(left, right workflow.WorkflowDefinition) ([]VersionChange, 
 
 func validateMutation(organization, workflowID, actor, key string, document json.RawMessage) error {
 	if organization == "" || workflowID == "" || actor == "" || len(key) < 8 || len(key) > 128 || !json.Valid(document) {
-		return errors.New("valid organization, workflow, actor, idempotency key, and JSON document are required")
+		return invalidRequest("valid organization, workflow, actor, idempotency key, and JSON document are required")
 	}
 	return nil
 }
