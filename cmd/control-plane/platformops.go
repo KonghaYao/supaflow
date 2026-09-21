@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -261,9 +262,66 @@ func mountHandlers(core http.Handler, ops *platformhttp.Handler, auth *api.Authe
 	if telemetry != nil {
 		webhookRoutes = platformops.NewDeferredOrganizationTelemetryHTTPMiddleware(telemetry, webhookRoutes)
 	}
-	root.Handle("/hooks/", webhookRoutes)
-	root.Handle("/ops/", auth.Middleware(ops.Routes()))
+	root.Handle("/hooks/", guardOperationsSurface(webhookRoutes))
+	root.Handle("/ops/", auth.Middleware(guardOperationsSurface(logOperationsFailures(ops.Routes()))))
 	root.Handle("/v1/", core)
 	root.Handle("/", public(core))
 	return root
+}
+
+// guardOperationsSurface refuses a request target no stored record could match before the
+// operations or webhook surface looks it up. The core API rejects the same targets in its own
+// edge; these two surfaces are mounted beside it, so they need the check as well. The problem
+// shape matches the one both surfaces already answer with.
+func guardOperationsSurface(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if platformops.ValidRequestTarget(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": http.StatusBadRequest, "code": "invalid_request"})
+	})
+}
+
+// logOperationsFailures records an operations response that failed on the server side.
+// Operations responses carry no request id, so the path and status are the only correlation an
+// operator gets; without this line a 500 internal_error left no server-side trace at all.
+func logOperationsFailures(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracked := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(tracked, r)
+		if status := tracked.statusOr(http.StatusOK); status >= http.StatusInternalServerError {
+			slog.Error("operations request failed", "method", r.Method, "path", r.URL.Path, "status", status)
+		}
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusRecorder) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(value)
+}
+
+func (w *statusRecorder) statusOr(fallback int) int {
+	if w.status == 0 {
+		return fallback
+	}
+	return w.status
 }
