@@ -148,6 +148,15 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &definition); err != nil {
 		return
 	}
+	// A body id that disagrees with the path is a client mistake, so it has to come back as
+	// one. It used to fall through to the catalog's own guard, whose plain error reaches
+	// writeError's default branch and became a 500 internal_error: the caller could not
+	// tell a mistyped path from an outage. An absent or malformed id is left to definition
+	// validation, which reports it against the id field with its own message.
+	if definition.ID != "" && definition.ID != r.PathValue("workflowID") {
+		writeProblem(w, r, http.StatusBadRequest, "invalid_argument", "definition id must match the workflow id in the path")
+		return
+	}
 	var published platform.PublishedPlan
 	var created bool
 	var err error
@@ -353,7 +362,7 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, definition.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "idempotency_conflict", "idempotency key conflicts with an earlier request")
 	case errors.As(err, &validation):
-		writeProblem(w, r, http.StatusBadRequest, "invalid_workflow", validation.Error())
+		writeValidationProblem(w, r, http.StatusBadRequest, "invalid_workflow", validation.Error(), validation.Issues)
 	case errors.Is(err, platform.ErrPlanNotFound):
 		writeProblem(w, r, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, platform.ErrPublicationConflict):

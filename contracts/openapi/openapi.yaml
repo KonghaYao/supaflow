@@ -1318,3 +1318,16 @@ components:
         status: { type: integer }
         code: { type: string }
         requestId: { type: string }
+        issues:
+          description: >-
+            Every independently detected definition problem, present on invalid_workflow
+            responses. title keeps only the first issue for compatibility.
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, path, message]
+            properties:
+              code: { type: string }
+              path: { type: string }
+              message: { type: string }

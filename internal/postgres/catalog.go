@@ -41,6 +41,10 @@ func (c *PlanCatalog) Compile(_ context.Context, organizationID string, definiti
 // Publish atomically allocates a workflow-local version and stores immutable
 // definition and plan records under organization-scoped idempotency.
 func (c *PlanCatalog) Publish(ctx context.Context, organizationID, workflowID string, definition workflow.WorkflowDefinition, idempotencyKey string) (platform.PublishedPlan, bool, error) {
+	// The HTTP layer classifies a path/body id mismatch as a client error before it gets
+	// here; this guard is what non-HTTP callers rely on, so it stays deliberately plain.
+	// Anything reaching it through writeError's default branch would surface as
+	// internal_error, which is why the API checks the same invariant itself.
 	if c == nil || c.pool == nil || organizationID == "" || workflowID == "" ||
 		idempotencyKey == "" || definition.ID != workflowID {
 		return platform.PublishedPlan{}, false, errors.New("organization, matching workflow id, and idempotency key are required")
