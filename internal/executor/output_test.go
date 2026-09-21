@@ -225,5 +225,45 @@ func TestManagedOutputStoreBoundsCompensation(t *testing.T) {
 	}
 }
 
+// claimingStore implements the optional DynamicStore capability the worker relies on.
+type claimingStore struct {
+	failingCompletionStore
+	calls int
+}
+
+func (s *claimingStore) ClaimNext(_ context.Context, _ workflowruntime.ClaimNextAttemptRequest) (*workflowruntime.WorkItem, error) {
+	s.calls++
+	return &workflowruntime.WorkItem{Attempt: workflowruntime.Attempt{ID: "attempt_1"}}, nil
+}
+
+// 验证装饰器保留 DynamicStore 能力：Orchestrator.AdvanceNext 依赖该类型断言，丢失即 worker 永远领不到工作。
+func TestManagedOutputStoreForwardsDynamicClaiming(t *testing.T) {
+	inner := &claimingStore{}
+	store, err := NewManagedOutputStore(inner, &recordingOutputManager{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic, ok := workflowruntime.Store(store).(workflowruntime.DynamicStore)
+	if !ok {
+		t.Fatal("decorated store lost the DynamicStore capability")
+	}
+	work, err := dynamic.ClaimNext(context.Background(), workflowruntime.ClaimNextAttemptRequest{WorkerID: "worker_1"})
+	if err != nil || work == nil || work.Attempt.ID != "attempt_1" || inner.calls != 1 {
+		t.Fatalf("work=%+v err=%v calls=%d", work, err, inner.calls)
+	}
+}
+
+// 验证被装饰的 store 不支持动态领取时显式报错，而不是伪装成一次空领取并让 worker 空转。
+func TestManagedOutputStoreRejectsUndecoratedDynamicClaiming(t *testing.T) {
+	store, err := NewManagedOutputStore(failingCompletionStore{}, &recordingOutputManager{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ClaimNext(context.Background(), workflowruntime.ClaimNextAttemptRequest{WorkerID: "worker_1"}); err == nil {
+		t.Fatal("expected an explicit error for a store without dynamic claiming")
+	}
+}
+
 var _ workflowruntime.Store = failingCompletionStore{}
+var _ workflowruntime.DynamicStore = (*claimingStore)(nil)
 var _ OutputManager = (*recordingOutputManager)(nil)

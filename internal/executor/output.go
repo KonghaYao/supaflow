@@ -91,6 +91,21 @@ func NewManagedOutputStore(store workflowruntime.Store, outputs OutputManager) (
 	return &ManagedOutputStore{Store: store, outputs: outputs, cleanupWait: defaultOutputCleanupTimeout}, nil
 }
 
+// ClaimNext forwards dynamic claiming to the decorated store.
+//
+// workflowruntime.Store does not declare ClaimNext: dynamic claiming is the optional
+// DynamicStore capability. Because this decorator embeds the interface rather than a
+// concrete store, without this method ClaimNext would drop out of the wrapper's method
+// set, Orchestrator.AdvanceNext would fail its DynamicStore type assertion on every
+// iteration, and the worker would never claim work.
+func (s *ManagedOutputStore) ClaimNext(ctx context.Context, req workflowruntime.ClaimNextAttemptRequest) (*workflowruntime.WorkItem, error) {
+	dynamic, ok := s.Store.(workflowruntime.DynamicStore)
+	if !ok {
+		return nil, errors.New("executor: decorated runtime store does not support dynamic claiming")
+	}
+	return dynamic.ClaimNext(ctx, req)
+}
+
 // CompleteAttempt delegates the atomic runtime commit and removes any object
 // which the commit rejected or discarded because cancellation won the race.
 func (s *ManagedOutputStore) CompleteAttempt(ctx context.Context, req workflowruntime.CompleteAttemptRequest) (workflowruntime.Run, error) {
