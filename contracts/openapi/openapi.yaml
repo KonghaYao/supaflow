@@ -41,6 +41,7 @@ paths:
                 document: { $ref: '#/components/schemas/FlowGramDocument' }
       responses:
         '201': { description: Created or idempotently replayed draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
   /workflows/{workflowId}:
@@ -69,6 +70,7 @@ paths:
                 expectedRevision: { type: integer, format: int64, minimum: 1 }
       responses:
         '200': { description: Saved draft, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDraft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
     delete:
       operationId: deleteWorkflowDraft
@@ -86,6 +88,7 @@ paths:
               properties: { expectedRevision: { type: integer, format: int64, minimum: 1 } }
       responses:
         '204': { description: Deleted or idempotently replayed }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
   /workflows/{workflowId}/compile:
     post:
@@ -166,6 +169,7 @@ paths:
         content: { application/json: { schema: { type: object, additionalProperties: false, required: [sampleInput], properties: { sampleInput: {} } } } }
       responses:
         '200': { description: Side-effect-free topological simulation, content: { application/json: { schema: { $ref: '#/components/schemas/DryRun' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
   /workflows/{workflowId}/node-test:
     post:
       operationId: testWorkflowNode
@@ -182,6 +186,7 @@ paths:
               properties: { nodeId: { type: string }, sampleInput: {} }
       responses:
         '200': { description: Side-effect-free node simulation, content: { application/json: { schema: { $ref: '#/components/schemas/NodeTest' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /node-types:
     get:
@@ -477,6 +482,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Run' }
+        '400': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
   /hooks/resume/{interruptId}:
     servers: [{ url: / }]
@@ -647,6 +653,7 @@ paths:
         content: { application/json: { schema: { type: object } } }
       responses:
         '202': { description: Webhook accepted exactly once }
+        '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
   /ops/events/{eventType}:
@@ -1006,7 +1013,10 @@ components:
             node configuration instead of the type, so an empty or absent list here does not
             mean that node never retries: it declares retrySafeErrors only for GET, HEAD, PUT,
             DELETE, or when the configuration sets retrySafe, and the compiled plan carries the
-            resolved list for each node.
+            resolved list for each node. For every other node type the type-level list is the
+            whole answer and an empty or absent list means no retry at all, because a code the
+            executor did not declare retry-safe cannot be repeated without risking a duplicate
+            side effect.
         defaultTimeoutMs: { type: integer, format: int64 }
         maximumOutputBytes: { type: integer, format: int64 }
         permissions: { type: object }
@@ -1027,8 +1037,11 @@ components:
             wider here than that decoder: switch.cases and transform.select are published as
             an unconstrained object while both decode as a map of strings. A nested value
             there is rejected even though this schema accepts it, with one exception: a null
-            value publishes, because the Go decoder stores null as an empty string. Correcting
-            a published ConfigSchema takes a new node version, because the registry row is
+            value is accepted and behaves as an empty string, because decoding null into a Go
+            string yields "". That exception rewrites nothing: the stored draft document and
+            the immutable plan still hold the null the author wrote, so a reader of either
+            never sees the empty string the validator compared. Correcting a published
+            ConfigSchema takes a new node version, because the registry row is
             immutable and startup compares it against the running binary.
         sensitiveFields:
           type: array
