@@ -85,7 +85,7 @@ func (h *Handler) auditMutation(next http.Handler) http.Handler {
 		}
 		if record := mutationAuditRecord(r, status); record != nil && h.services.Audit != nil {
 			if _, err := h.services.Audit.Record(r.Context(), *record); err != nil {
-				writeProblem(w, http.StatusServiceUnavailable, "audit_unavailable")
+				writeProblem(w, r, http.StatusServiceUnavailable, "audit_unavailable")
 				return
 			}
 		}

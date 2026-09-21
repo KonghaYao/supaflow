@@ -76,9 +76,9 @@ func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
 // the id alone. Callers that classify their own failure keep their own code and title; the
 // response never repeats the diagnostic, because the diagnostic is for the server.
 func writeLoggedProblem(w http.ResponseWriter, r *http.Request, status int, code, title string, err error) {
-	id := requestID(r)
+	id := RequestID(r)
 	// Pin the id on the request so the response repeats the value this line records:
-	// requestID mints a fresh random id whenever the caller did not supply one.
+	// RequestID mints a fresh random id whenever the caller did not supply one.
 	r.Header.Set("X-Request-ID", id)
 	diagnostic := "unknown"
 	if err != nil {
@@ -94,11 +94,20 @@ func writeProblemValue(w http.ResponseWriter, r *http.Request, value problem) {
 	if w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	value.RequestID = requestID(r)
+	value.RequestID = RequestID(r)
 	writeJSON(w, value.Status, value)
 }
 
-func requestID(r *http.Request) string {
+// RequestID is the one request correlation identifier this service uses: the caller's
+// X-Request-ID when it supplies a usable one, otherwise a freshly minted random value. Both the
+// /v1 surface and the platform-operations surface answer with it and log it, so an operator can
+// find the request a caller reports from the id alone — a second scheme (another header, another
+// generator) would leave the two surfaces unable to correlate anything with each other.
+//
+// The value is returned rather than written to a response header, because the surfaces put it in
+// their problem bodies. Callers that log it later in the request should pin it on the request with
+// r.Header.Set("X-Request-ID", id) so every later reader sees the value the response carried.
+func RequestID(r *http.Request) string {
 	if value := r.Header.Get("X-Request-ID"); value != "" && len(value) <= 128 {
 		return value
 	}

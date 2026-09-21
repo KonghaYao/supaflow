@@ -265,10 +265,49 @@ func TestMutationResponseSnapshotIsBoundedAndReplayable(t *testing.T) {
 	}
 }
 
+// opsRequest 构造一个 /ops 请求，供直接调用 respond 的用例使用。
+func opsRequest() *http.Request {
+	return httptest.NewRequest(http.MethodPost, "/ops/triggers", nil)
+}
+
+// 验证 /ops 的 problem 响应复用 /v1 的请求标识机制：调用方自带 X-Request-ID 时原样回带，
+// 未携带时生成一个并在请求上固定下来（5xx 日志读到的就是同一个值）。此前 /ops 的响应体只有
+// {code,status}，运维只能按时间与路径猜是哪一次请求，无法把调用方的报障对上日志。
+func TestOperationsProblemCarriesRequestID(t *testing.T) {
+	request := opsRequest()
+	request.Header.Set("X-Request-ID", "caller-supplied-ops-id")
+	response := httptest.NewRecorder()
+	writeProblem(response, request, http.StatusBadRequest, "invalid_request")
+	var body struct {
+		Code      string `json:"code"`
+		RequestID string `json:"requestId"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.RequestID != "caller-supplied-ops-id" || body.Code != "invalid_request" {
+		t.Fatalf("body=%+v", body)
+	}
+	if request.Header.Get("X-Request-ID") != "caller-supplied-ops-id" {
+		t.Fatalf("pinned id=%q", request.Header.Get("X-Request-ID"))
+	}
+
+	minted := opsRequest()
+	mintedResponse := httptest.NewRecorder()
+	writeProblem(mintedResponse, minted, http.StatusInternalServerError, "internal_error")
+	if err := json.NewDecoder(mintedResponse.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.RequestID) != 24 || body.RequestID != minted.Header.Get("X-Request-ID") {
+		t.Fatalf("minted body=%q pinned=%q", body.RequestID, minted.Header.Get("X-Request-ID"))
+	}
+}
+
 // 验证 quota 拒绝映射为 429 并携带秒级 Retry-After。
 func TestRateLimitResponseIncludesRetryAfter(t *testing.T) {
 	response := httptest.NewRecorder()
-	respond(response, nil, &platformops.RateLimitError{RetryAfter: 3 * time.Second, Reason: "full"}, http.StatusOK)
+	respond(response, httptest.NewRequest(http.MethodPost, "/ops/triggers", nil), nil,
+		&platformops.RateLimitError{RetryAfter: 3 * time.Second, Reason: "full"}, http.StatusOK)
 	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "3" {
 		t.Fatalf("status=%d retry-after=%q", response.Code, response.Header().Get("Retry-After"))
 	}
@@ -279,7 +318,7 @@ func TestRateLimitResponseIncludesRetryAfter(t *testing.T) {
 func TestRespondClassifiesUnstorableInputAsClientError(t *testing.T) {
 	for _, code := range []string{"22021", "22P05"} {
 		response := httptest.NewRecorder()
-		respond(response, nil, &pgconn.PgError{Code: code, Message: "stored bytes rejected"}, http.StatusOK)
+		respond(response, opsRequest(), nil, &pgconn.PgError{Code: code, Message: "stored bytes rejected"}, http.StatusOK)
 		var body struct {
 			Code string `json:"code"`
 		}
@@ -291,7 +330,7 @@ func TestRespondClassifiesUnstorableInputAsClientError(t *testing.T) {
 		}
 	}
 	outage := httptest.NewRecorder()
-	respond(outage, nil, &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, http.StatusOK)
+	respond(outage, opsRequest(), nil, &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, http.StatusOK)
 	if outage.Code != http.StatusInternalServerError {
 		t.Fatalf("outage status=%d body=%s", outage.Code, outage.Body.String())
 	}

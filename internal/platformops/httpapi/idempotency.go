@@ -24,24 +24,24 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 		}
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		if len(key) < 8 || len(key) > 128 {
-			writeProblem(w, http.StatusBadRequest, "invalid_idempotency_key")
+			writeProblem(w, r, http.StatusBadRequest, "invalid_idempotency_key")
 			return
 		}
 		principal, ok := api.PrincipalFromContext(r.Context())
 		if !ok {
-			writeProblem(w, http.StatusUnauthorized, "unauthorized")
+			writeProblem(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, maximumMutationRequestBytes+1))
 		if err != nil || int64(len(body)) > maximumMutationRequestBytes {
-			writeProblem(w, http.StatusBadRequest, "invalid_request")
+			writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		fingerprint := sha256.Sum256(append([]byte(r.Method+"\n"+r.URL.RequestURI()+"\n"), body...))
 		record, err := h.services.Mutations.Claim(r.Context(), principal.OrganizationID, operation, key, fingerprint[:])
 		if err != nil {
-			respond(w, nil, err, http.StatusOK)
+			respond(w, r, nil, err, http.StatusOK)
 			return
 		}
 		if record.Replay {
@@ -87,17 +87,17 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 		cancelHandler()
 		if renewalDone != nil {
 			if renewalErr := <-renewalDone; renewalErr != nil {
-				respond(w, nil, renewalErr, http.StatusOK)
+				respond(w, r, nil, renewalErr, http.StatusOK)
 				return
 			}
 			if err = h.services.Mutations.Renew(requestContext, principal.OrganizationID, operation, key, record.Owner); err != nil {
-				respond(w, nil, err, http.StatusOK)
+				respond(w, r, nil, err, http.StatusOK)
 				return
 			}
 		}
 		if operation == "trigger.event.receive" && status == http.StatusTooManyRequests {
 			if err = h.services.Mutations.Retry(requestContext, principal.OrganizationID, operation, key, record.Owner); err != nil {
-				respond(w, nil, err, http.StatusOK)
+				respond(w, r, nil, err, http.StatusOK)
 				return
 			}
 			for name, values := range captured.header {
@@ -108,7 +108,7 @@ func (h *Handler) idempotentMutations(next http.Handler) http.Handler {
 			return
 		}
 		if err = h.services.Mutations.Complete(requestContext, principal.OrganizationID, operation, key, completion); err != nil {
-			respond(w, nil, err, http.StatusOK)
+			respond(w, r, nil, err, http.StatusOK)
 			return
 		}
 		for name, values := range captured.header {

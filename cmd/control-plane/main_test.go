@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,5 +50,46 @@ func TestDecodeKey(t *testing.T) {
 	}
 	if _, err := decodeKey("too-short"); err == nil {
 		t.Fatal("expected invalid master key rejection")
+	}
+}
+
+// 验证 /ops 的 5xx 日志行带的是响应里那个 requestId：中间件在调用处理器之前先把标识固定到
+// 请求上（调用方自带就沿用，否则生成一个），处理器写 problem 时读到的就是同一个值。此前日志行
+// 只有 path 与 status，调用方拿着响应里的 id 也检索不到任何东西。
+func TestOperationsFailureLogCarriesResponseRequestID(t *testing.T) {
+	logs := &bytes.Buffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	defer slog.SetDefault(previous)
+
+	// 处理器模拟 /ops 的 problem 响应：读固定下来的标识并回带，与 httpapi.writeProblem 同形。
+	var written string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		written = r.Header.Get("X-Request-ID")
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"status":500,"code":"internal_error","requestId":"` + written + `"}`))
+	})
+	request := httptest.NewRequest(http.MethodPost, "/ops/triggers", nil)
+	response := httptest.NewRecorder()
+	logOperationsFailures(next).ServeHTTP(response, request)
+	if written == "" || !strings.Contains(response.Body.String(), written) {
+		t.Fatalf("requestId=%q body=%s", written, response.Body.String())
+	}
+	if !strings.Contains(logs.String(), written) || !strings.Contains(logs.String(), "operations request failed") {
+		t.Fatalf("log=%s missing requestId=%s", logs.String(), written)
+	}
+
+	// 调用方自带标识时响应与日志沿用该值，不另行生成。
+	var echoed string
+	callerRequest := httptest.NewRequest(http.MethodPost, "/ops/triggers", nil)
+	callerRequest.Header.Set("X-Request-ID", "caller-supplied-ops-id")
+	callerNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		echoed = r.Header.Get("X-Request-ID")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	logOperationsFailures(callerNext).ServeHTTP(httptest.NewRecorder(), callerRequest)
+	if echoed != "caller-supplied-ops-id" || !strings.Contains(logs.String(), "caller-supplied-ops-id") {
+		t.Fatalf("echoed=%q log=%s", echoed, logs.String())
 	}
 }

@@ -38,7 +38,7 @@ func TestMutationMiddlewareRenewsLeaseUntilHandlerCompletes(t *testing.T) {
 		case <-release:
 			writeJSON(w, http.StatusOK, map[string]bool{"configured": true})
 		case <-r.Context().Done():
-			writeProblem(w, http.StatusConflict, "lease_lost")
+			writeProblem(w, r, http.StatusConflict, "lease_lost")
 		}
 	}))
 	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)

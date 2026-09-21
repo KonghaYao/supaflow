@@ -106,17 +106,17 @@ func (h *Handler) WebhookRoutes() http.Handler {
 func (h *Handler) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	timestampSeconds, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-Supaflow-Timestamp")), 10, 64)
 	if err != nil {
-		writeProblem(w, http.StatusUnauthorized, "invalid_signature")
+		writeProblem(w, r, http.StatusUnauthorized, "invalid_signature")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
 	if err != nil || len(body) > 1<<20 {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	trigger, err := h.services.Triggers.ResolvePublicWebhook(r.Context(), r.PathValue("publicHash"))
 	if err != nil {
-		respond(w, nil, err, http.StatusAccepted)
+		respond(w, r, nil, err, http.StatusAccepted)
 		return
 	}
 	platformops.AttributeTelemetryOrganization(r.Context(), trigger.OrganizationID)
@@ -125,7 +125,7 @@ func (h *Handler) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Unix(timestampSeconds, 0).UTC(), Signature: r.Header.Get("X-Supaflow-Signature"),
 		Body: body, Now: time.Now().UTC(),
 	})
-	respond(w, map[string]any{"firingId": firing.ID, "created": created}, err, http.StatusAccepted)
+	respond(w, r, map[string]any{"firingId": firing.ID, "created": created}, err, http.StatusAccepted)
 }
 
 func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +146,7 @@ func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot, err := h.services.Capacity.Snapshot(r.Context(), p.OrganizationID, time.Now().UTC())
-	respond(w, snapshot, err, http.StatusOK)
+	respond(w, r, snapshot, err, http.StatusOK)
 }
 
 func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +159,7 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 		OrganizationID: p.OrganizationID, CanViewAudit: true, ResourceType: r.URL.Query().Get("resourceType"),
 		ResourceID: r.URL.Query().Get("resourceId"), Limit: limit,
 	})
-	respond(w, records, err, http.StatusOK)
+	respond(w, r, records, err, http.StatusOK)
 }
 
 func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,7 @@ func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	letters, err := h.services.Delivery.ListDeadLetters(r.Context(), p.OrganizationID, queryLimit(r, 100))
-	respond(w, letters, err, http.StatusOK)
+	respond(w, r, letters, err, http.StatusOK)
 }
 
 func (h *Handler) requeueDeadLetter(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +177,7 @@ func (h *Handler) requeueDeadLetter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.services.Delivery.RequeueDeadLetter(r.Context(), p.OrganizationID, r.PathValue("id"), time.Now().UTC())
-	respond(w, map[string]bool{"requeued": err == nil}, err, http.StatusOK)
+	respond(w, r, map[string]bool{"requeued": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) drainWorker(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +186,7 @@ func (h *Handler) drainWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.services.Workers.BeginDrain(r.Context(), p.OrganizationID, r.PathValue("id"))
-	respond(w, map[string]bool{"draining": err == nil}, err, http.StatusOK)
+	respond(w, r, map[string]bool{"draining": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +211,7 @@ func (h *Handler) configureQuota(w http.ResponseWriter, r *http.Request) {
 		MaxTriggers: body.MaxTriggers, MaxPendingTriggerFirings: body.MaxPendingTriggerFirings,
 		MaxPendingOutboxMessages: body.MaxPendingOutboxMessages,
 	})
-	respond(w, map[string]bool{"configured": err == nil}, err, http.StatusOK)
+	respond(w, r, map[string]bool{"configured": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) createCredential(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +228,7 @@ func (h *Handler) createCredential(w http.ResponseWriter, r *http.Request) {
 	credential, err := h.services.Credentials.Create(r.Context(), platformops.CreateCredentialRequest{
 		OrganizationID: p.OrganizationID, ActorID: p.ActorID, Name: body.Name, Purpose: body.Purpose, Secret: secret,
 	})
-	respond(w, credential, err, http.StatusCreated)
+	respond(w, r, credential, err, http.StatusCreated)
 }
 
 func (h *Handler) rotateCredential(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +246,7 @@ func (h *Handler) rotateCredential(w http.ResponseWriter, r *http.Request) {
 	secret := []byte(body.Secret)
 	body.Secret = ""
 	credential, err := h.services.Credentials.Rotate(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, body.Version, secret)
-	respond(w, credential, err, http.StatusOK)
+	respond(w, r, credential, err, http.StatusOK)
 }
 
 func (h *Handler) revokeCredential(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +255,7 @@ func (h *Handler) revokeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	credential, err := h.services.Credentials.Revoke(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, time.Now().UTC())
-	respond(w, credential, err, http.StatusOK)
+	respond(w, r, credential, err, http.StatusOK)
 }
 
 func (h *Handler) setRetention(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +274,7 @@ func (h *Handler) setRetention(w http.ResponseWriter, r *http.Request) {
 		OrganizationID: p.OrganizationID, EventDays: body.EventDays, OutputDays: body.OutputDays,
 		ArchiveBeforeDelete: body.ArchiveBeforeDelete,
 	})
-	respond(w, map[string]bool{"configured": err == nil}, err, http.StatusOK)
+	respond(w, r, map[string]bool{"configured": err == nil}, err, http.StatusOK)
 }
 
 func (h *Handler) exportOrganization(w http.ResponseWriter, r *http.Request) {
@@ -283,13 +283,13 @@ func (h *Handler) exportOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.services.Retention.ExportOrganization(r.Context(), p.OrganizationID, p.ActorID, time.Now().UTC().Add(24*time.Hour))
-	respond(w, result, err, http.StatusAccepted)
+	respond(w, r, result, err, http.StatusAccepted)
 }
 
 func principal(w http.ResponseWriter, r *http.Request) (api.Principal, bool) {
 	p, ok := api.PrincipalFromContext(r.Context())
 	if !ok || p.OrganizationID == "" || p.ActorID == "" {
-		writeProblem(w, http.StatusUnauthorized, "unauthorized")
+		writeProblem(w, r, http.StatusUnauthorized, "unauthorized")
 		return api.Principal{}, false
 	}
 	return p, true
@@ -298,17 +298,17 @@ func principal(w http.ResponseWriter, r *http.Request) (api.Principal, bool) {
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
 	if err != nil || len(body) > 1<<20 {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(target); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	// 解码失败先于本校验返回，语法的 invalid_request 语义不变。这里拦的是语法合法、Postgres 却
@@ -316,13 +316,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	// 码名跟这一面的其余拒绝保持一致（守卫、respond 的兜底都是 invalid_request）：调用方按面
 	// 解析码名，同一条件在同一面上出现两个码名会让人以为是两种错误。
 	if !platformops.StorableJSON(body) {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	return true
 }
 
-func respond(w http.ResponseWriter, value any, err error, success int) {
+func respond(w http.ResponseWriter, r *http.Request, value any, err error, success int) {
 	if err == nil {
 		writeJSON(w, success, value)
 		return
@@ -353,7 +353,7 @@ func respond(w http.ResponseWriter, value any, err error, success int) {
 		// 明确的 Err* 优先，未枚举的入口则靠这一格兜住。
 		status, code = http.StatusBadRequest, "invalid_request"
 	}
-	writeProblem(w, status, code)
+	writeProblem(w, r, status, code)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -362,10 +362,16 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func writeProblem(w http.ResponseWriter, status int, code string) {
+// writeProblem answers one operations rejection. The problem body carries the request correlation
+// identifier every surface of this service uses, and the id is pinned on the request so the
+// middleware that records a 5xx logs the same value the caller was given: without it the operator
+// saw only a path and a status and could not match a report to a log line.
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, code string) {
+	id := api.RequestID(r)
+	r.Header.Set("X-Request-ID", id)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, status, map[string]any{"status": status, "code": code})
+	writeJSON(w, status, map[string]any{"status": status, "code": code, "requestId": id})
 }
 
 func queryLimit(r *http.Request, fallback int) int {
@@ -383,7 +389,7 @@ func queryLimit(r *http.Request, fallback int) int {
 func mutationKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(key) < 8 || len(key) > 128 {
-		writeProblem(w, http.StatusBadRequest, "invalid_idempotency_key")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_idempotency_key")
 		return "", false
 	}
 	return key, true

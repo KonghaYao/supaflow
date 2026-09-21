@@ -28,7 +28,7 @@ func (h *Handler) createTrigger(w http.ResponseWriter, r *http.Request) {
 		Name: body.Name, Config: body.Config, ScheduleInterval: time.Duration(body.ScheduleIntervalSeconds) * time.Second,
 		MisfirePolicy: body.MisfirePolicy, FirstFireAt: body.FirstFireAt, SigningCredentialID: body.SigningCredentialID,
 		EventType: body.EventType, IdempotencyKey: key})
-	respond(w, trigger, err, http.StatusCreated)
+	respond(w, r, trigger, err, http.StatusCreated)
 }
 
 func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +40,7 @@ func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
 	if raw := strings.TrimSpace(r.URL.Query().Get("enabled")); raw != "" {
 		value, err := strconv.ParseBool(raw)
 		if err != nil {
-			writeProblem(w, http.StatusBadRequest, "invalid_request")
+			writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 			return
 		}
 		enabled = &value
@@ -48,7 +48,7 @@ func (h *Handler) listTriggers(w http.ResponseWriter, r *http.Request) {
 	items, err := h.services.Triggers.List(r.Context(), platformops.ListTriggersRequest{OrganizationID: p.OrganizationID,
 		WorkflowID: strings.TrimSpace(r.URL.Query().Get("workflowId")), Kind: platformops.TriggerKind(strings.TrimSpace(r.URL.Query().Get("kind"))),
 		Enabled: enabled, Limit: queryLimit(r, 100)})
-	respond(w, items, err, http.StatusOK)
+	respond(w, r, items, err, http.StatusOK)
 }
 
 func (h *Handler) getTrigger(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +57,7 @@ func (h *Handler) getTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trigger, err := h.services.Triggers.Get(r.Context(), p.OrganizationID, r.PathValue("id"))
-	respond(w, trigger, err, http.StatusOK)
+	respond(w, r, trigger, err, http.StatusOK)
 }
 
 func (h *Handler) updateTrigger(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +78,7 @@ func (h *Handler) updateTrigger(w http.ResponseWriter, r *http.Request) {
 		ScheduleInterval: time.Duration(body.ScheduleIntervalSeconds) * time.Second, MisfirePolicy: body.MisfirePolicy,
 		FirstFireAt: body.FirstFireAt, SigningCredentialID: body.SigningCredentialID, EventType: body.EventType,
 		ExpectedUpdatedAt: body.ExpectedUpdatedAt, IdempotencyKey: key})
-	respond(w, trigger, err, http.StatusOK)
+	respond(w, r, trigger, err, http.StatusOK)
 }
 
 func (h *Handler) changeTriggerState(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +100,7 @@ func (h *Handler) changeTriggerState(w http.ResponseWriter, r *http.Request) {
 	trigger, err := h.services.Triggers.ChangeState(r.Context(), platformops.ChangeTriggerStateRequest{OrganizationID: p.OrganizationID,
 		ActorID: p.ActorID, TriggerID: r.PathValue("id"), Enabled: body.Enabled,
 		ExpectedUpdatedAt: body.ExpectedUpdatedAt, IdempotencyKey: key, Now: time.Now().UTC()})
-	respond(w, trigger, err, http.StatusOK)
+	respond(w, r, trigger, err, http.StatusOK)
 }
 
 func (h *Handler) deleteTrigger(w http.ResponseWriter, r *http.Request) {
@@ -114,13 +114,13 @@ func (h *Handler) deleteTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	expected, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(r.URL.Query().Get("expectedUpdatedAt")))
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		writeProblem(w, r, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	err = h.services.Triggers.Delete(r.Context(), platformops.DeleteTriggerRequest{OrganizationID: p.OrganizationID, ActorID: p.ActorID,
 		TriggerID: r.PathValue("id"), ExpectedUpdatedAt: expected, IdempotencyKey: key})
 	if err != nil {
-		respond(w, nil, err, http.StatusNoContent)
+		respond(w, r, nil, err, http.StatusNoContent)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -164,7 +164,7 @@ func (h *Handler) fireTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	firing, created, err := h.services.Triggers.Fire(r.Context(), platformops.FireRequest{OrganizationID: p.OrganizationID,
 		TriggerID: r.PathValue("id"), ExpectedKind: body.Kind, DeduplicationKey: body.IdempotencyKey, Payload: body.Payload})
-	respond(w, map[string]any{"firing": firing, "created": created}, err, http.StatusOK)
+	respond(w, r, map[string]any{"firing": firing, "created": created}, err, http.StatusOK)
 }
 
 func (h *Handler) receiveEvent(w http.ResponseWriter, r *http.Request) {
@@ -180,5 +180,5 @@ func (h *Handler) receiveEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	firings, err := h.services.Triggers.ReceiveEvent(r.Context(), p.OrganizationID, r.PathValue("eventType"), body.EventID, body.Payload, time.Now().UTC())
-	respond(w, map[string]any{"firings": firings}, err, http.StatusAccepted)
+	respond(w, r, map[string]any{"firings": firings}, err, http.StatusAccepted)
 }

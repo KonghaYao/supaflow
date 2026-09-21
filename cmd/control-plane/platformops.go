@@ -279,22 +279,29 @@ func guardOperationsSurface(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		id := api.RequestID(r)
+		r.Header.Set("X-Request-ID", id)
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": http.StatusBadRequest, "code": "invalid_request"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": http.StatusBadRequest, "code": "invalid_request", "requestId": id})
 	})
 }
 
-// logOperationsFailures records an operations response that failed on the server side.
-// Operations responses carry no request id, so the path and status are the only correlation an
-// operator gets; without this line a 500 internal_error left no server-side trace at all.
+// logOperationsFailures records an operations response that failed on the server side, under the
+// same request id the operations problem body carries. It reuses the /v1 identifier — the caller's
+// X-Request-ID when it supplies one, otherwise a freshly minted value — and pins it on the request
+// before the handlers run, so a handler that answers with a problem body reports the very id this
+// line records. A second scheme would make both surfaces unable to correlate anything with the
+// other, which is what left an operator with only a path and a status to search by.
 func logOperationsFailures(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := api.RequestID(r)
+		r.Header.Set("X-Request-ID", id)
 		tracked := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(tracked, r)
 		if status := tracked.statusOr(http.StatusOK); status >= http.StatusInternalServerError {
-			slog.Error("operations request failed", "method", r.Method, "path", r.URL.Path, "status", status)
+			slog.Error("operations request failed", "requestId", id, "method", r.Method, "path", r.URL.Path, "status", status)
 		}
 	})
 }

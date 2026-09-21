@@ -13,7 +13,7 @@ func (h *Handler) listWebhookSubscriptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	items, err := h.services.Webhooks.List(r.Context(), p.OrganizationID, queryLimit(r, 100))
-	respond(w, items, err, http.StatusOK)
+	respond(w, r, items, err, http.StatusOK)
 }
 
 func (h *Handler) createWebhookSubscription(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +36,7 @@ func (h *Handler) createWebhookSubscription(w http.ResponseWriter, r *http.Reque
 		EventTypes: body.EventTypes, SigningCredentialID: body.SigningCredentialID,
 		Timeout: time.Duration(body.TimeoutMS) * time.Millisecond,
 	})
-	respond(w, item, err, http.StatusCreated)
+	respond(w, r, item, err, http.StatusCreated)
 }
 
 func (h *Handler) enableWebhookSubscription(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func (h *Handler) setWebhookSubscriptionEnabled(w http.ResponseWriter, r *http.R
 		return
 	}
 	item, err := h.services.Webhooks.SetEnabled(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, enabled, time.Now().UTC())
-	respond(w, item, err, http.StatusOK)
+	respond(w, r, item, err, http.StatusOK)
 }
 
 func (h *Handler) deleteWebhookSubscription(w http.ResponseWriter, r *http.Request) {
@@ -62,5 +62,5 @@ func (h *Handler) deleteWebhookSubscription(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	err := h.services.Webhooks.Delete(r.Context(), p.OrganizationID, r.PathValue("id"), p.ActorID, time.Now().UTC())
-	respond(w, map[string]bool{"deleted": err == nil}, err, http.StatusOK)
+	respond(w, r, map[string]bool{"deleted": err == nil}, err, http.StatusOK)
 }

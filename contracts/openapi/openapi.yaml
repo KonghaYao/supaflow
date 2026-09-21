@@ -1367,7 +1367,13 @@ components:
         title: { type: string }
         status: { type: integer }
         code: { type: string }
-        requestId: { type: string }
+        requestId:
+          description: |
+            Correlation identifier of the request, also recorded on the server for any 5xx: the
+            caller's `X-Request-ID` when it supplies one, otherwise a generated value. Both the /v1
+            and the /ops surfaces carry it, so an operator can find the request a caller reports
+            from the id alone.
+          type: string
         issues:
           description: >-
             Every independently detected definition problem, present on invalid_workflow
