@@ -17,10 +17,14 @@ import { useAutosave } from "./state/use-autosave";
 type UtilityTab = "test" | "versions" | "monitor";
 type WorkspaceTab = "designer" | "operator";
 
+/** Fenix rejects platform master keys shorter than 32 bytes, so the form fails before the round trip. */
+const MASTER_KEY_MIN_LENGTH = 32;
+
 const StudioCanvas = lazy(async () => ({ default: (await import("./flowgram/adapter")).StudioCanvas }));
 
 export function App() {
-  const [apiKey, setAPIKey] = useState("");
+  const [masterKey, setMasterKey] = useState("");
+  const [organizationId, setOrganizationId] = useState("");
   const [client, setClient] = useState<StudioClient>();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [nodeTypes, setNodeTypes] = useState<NodeType[]>([]);
@@ -48,8 +52,8 @@ export function App() {
   }, []);
 
   const connect = () => {
-    if (apiKey.trim().length < 24) return;
-    const nextClient = new StudioClient(apiKey.trim());
+    if (masterKey.trim().length < MASTER_KEY_MIN_LENGTH || organizationId.trim().length === 0) return;
+    const nextClient = new StudioClient(masterKey.trim(), organizationId.trim());
     setClient(nextClient);
     void loadWorkspace(nextClient);
   };
@@ -122,20 +126,39 @@ export function App() {
           <span className="brand-mark">S</span>
           <p className="eyebrow">Supaflow control plane</p>
           <h1>Design durable work.</h1>
-          <p>Connect with a tenant API key. Credentials stay in memory and are never persisted by Studio.</p>
+          <p>
+            Connect with the Fenix platform master key. Supaflow trusts Fenix for identity and takes the
+            organization as its only isolation scope. Both stay in memory and are never persisted by Studio.
+          </p>
           <label>
-            API key
+            Platform master key
             <input
               type="password"
               autoComplete="off"
-              value={apiKey}
-              onChange={(event) => setAPIKey(event.target.value)}
+              value={masterKey}
+              onChange={(event) => setMasterKey(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") connect();
               }}
             />
           </label>
-          <button className="button-primary" disabled={apiKey.trim().length < 24} onClick={connect}>
+          <label>
+            Organization
+            <input
+              type="text"
+              autoComplete="off"
+              value={organizationId}
+              onChange={(event) => setOrganizationId(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") connect();
+              }}
+            />
+          </label>
+          <button
+            className="button-primary"
+            disabled={masterKey.trim().length < MASTER_KEY_MIN_LENGTH || organizationId.trim().length === 0}
+            onClick={connect}
+          >
             Open Studio
           </button>
         </section>
@@ -185,7 +208,8 @@ export function App() {
           className="quiet"
           onClick={() => {
             setClient(undefined);
-            setAPIKey("");
+            setMasterKey("");
+            setOrganizationId("");
           }}
         >
           Disconnect

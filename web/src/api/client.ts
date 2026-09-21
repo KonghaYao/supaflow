@@ -39,12 +39,24 @@ interface Problem {
   title?: string;
 }
 
-/** Authenticated client for the stable tenant-scoped Studio API. */
+/** Authenticated client for the stable organization-scoped Studio API. */
 export class StudioClient {
+  /**
+   * Supaflow trusts only the Fenix platform master key: it authenticates the trusted backend,
+   * and the organization header is the sole storage, execution, credential, and audit isolation
+   * scope. The browser never selects its own identity and cannot override the organization
+   * through a request body, a query parameter, or a self-declared header.
+   */
   constructor(
-    private readonly apiKey: string,
+    private readonly masterKey: string,
+    private readonly organizationId: string,
     private readonly baseURL = "",
   ) {}
+
+  /** Platform auth headers. Missing the key yields 401; missing the organization yields 400. */
+  private authHeaders(): Record<string, string> {
+    return { Authorization: `Bearer ${this.masterKey}`, "X-Fenix-Organization-Id": this.organizationId };
+  }
 
   listDrafts(signal?: AbortSignal): Promise<Draft[]> {
     return this.request("/v1/workflows", { signal });
@@ -293,7 +305,7 @@ export class StudioClient {
     const response = await fetch(
       `${this.baseURL}/v1/runs/${encodeURIComponent(runId)}/events?afterCursor=${afterCursor}`,
       {
-        headers: { Accept: "text/event-stream", "X-API-Key": this.apiKey },
+        headers: { Accept: "text/event-stream", ...this.authHeaders() },
         signal,
       },
     );
@@ -323,7 +335,7 @@ export class StudioClient {
     } = {},
     acceptUnavailable = false,
   ): Promise<T> {
-    const headers: Record<string, string> = { Accept: "application/json", "X-API-Key": this.apiKey };
+    const headers: Record<string, string> = { Accept: "application/json", ...this.authHeaders() };
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
     if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
     const response = await fetch(this.baseURL + path, {

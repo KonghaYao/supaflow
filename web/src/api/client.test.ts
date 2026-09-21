@@ -26,17 +26,20 @@ describe("SSE protocol", () => {
 
 describe("Run monitor API", () => {
   // 验证监控从 workflow 过滤后的 Run 列表选择，不再要求用户输入 Run ID。
-  it("lists workflow runs with authenticated tenant context only", async () => {
+  it("lists workflow runs with authenticated organization context only", async () => {
     const fetchMock = vi.fn((..._arguments: Parameters<typeof fetch>) =>
       Promise.resolve(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const client = new StudioClient("tenant-api-key");
+    const client = new StudioClient("platform-master-key", "organization-a");
     await client.listRuns("flow/a");
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/v1/runs?workflowId=flow%2Fa&limit=100");
-    expect(init.headers).toMatchObject({ "X-API-Key": "tenant-api-key" });
-    expect(path).not.toContain("tenantId");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer platform-master-key",
+      "X-Fenix-Organization-Id": "organization-a",
+    });
+    expect(path).not.toContain("organizationId");
   });
 
   // 验证选择 Run 后读取安全节点详情并正确转义标识符。
@@ -61,7 +64,7 @@ describe("Run monitor API", () => {
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const result = await new StudioClient("tenant-api-key").getRunDetails("run/1");
+    const result = await new StudioClient("platform-master-key", "organization-a").getRunDetails("run/1");
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/v1/runs/run%2F1/details");
     expect(result.lastEventCursor).toBe(2);
   });
@@ -83,7 +86,7 @@ describe("Run monitor API", () => {
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const client = new StudioClient("operator-key");
+    const client = new StudioClient("platform-master-key", "organization-a");
 
     await client.cancelRun("run/1", "cancel-key");
     await client.rerunRun("run/1", { fromNodeId: "node-2", priority: 4, timeoutMs: 30_000 }, "rerun-key");
@@ -91,7 +94,11 @@ describe("Run monitor API", () => {
     const [cancelPath, cancelInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(cancelPath).toBe("/v1/runs/run%2F1/cancel");
     expect(cancelInit).toMatchObject({ method: "POST", body: undefined });
-    expect(cancelInit.headers).toMatchObject({ "X-API-Key": "operator-key", "Idempotency-Key": "cancel-key" });
+    expect(cancelInit.headers).toMatchObject({
+      Authorization: "Bearer platform-master-key",
+      "X-Fenix-Organization-Id": "organization-a",
+      "Idempotency-Key": "cancel-key",
+    });
     const [rerunPath, rerunInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
     expect(rerunPath).toBe("/v1/runs/run%2F1/rerun");
     expect(rerunInit).toMatchObject({ method: "POST" });
@@ -99,19 +106,22 @@ describe("Run monitor API", () => {
     expect(JSON.parse(String(rerunInit.body))).toEqual({ fromNodeId: "node-2", priority: 4, timeoutMs: 30_000 });
   });
 
-  // 验证中断列表由已认证租户作用域读取，前端不能注入 tenant。
-  it("lists run interrupts without a caller-selected tenant", async () => {
+  // 验证中断列表由已认证组织作用域读取，前端不能注入 organization。
+  it("lists run interrupts without a caller-selected organization", async () => {
     const fetchMock = vi.fn((..._arguments: Parameters<typeof fetch>) =>
       Promise.resolve(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await new StudioClient("viewer-key").listRunInterrupts("run/1");
+    await new StudioClient("platform-master-key", "organization-a").listRunInterrupts("run/1");
 
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/v1/runs/run%2F1/interrupts");
-    expect(init.headers).toMatchObject({ "X-API-Key": "viewer-key" });
-    expect(path).not.toContain("tenant");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer platform-master-key",
+      "X-Fenix-Organization-Id": "organization-a",
+    });
+    expect(path).not.toContain("organization");
   });
 
   // 验证批准和拒绝都携带服务端签发的恢复令牌及稳定幂等键。
@@ -132,7 +142,7 @@ describe("Run monitor API", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await new StudioClient("approver-key").resolveApproval(
+    await new StudioClient("platform-master-key", "organization-a").resolveApproval(
       "interrupt/1",
       { resumeToken: "server-issued-token", decision: "rejected", comment: "Needs revision" },
       "approval-key",
@@ -151,13 +161,13 @@ describe("Run monitor API", () => {
 });
 
 describe("Operator API", () => {
-  // 验证运维读取只携带认证 key，tenant 不会由前端 query 选择。
-  it("loads tenant-scoped operational projections", async () => {
+  // 验证运维读取只携带平台认证头，organization 不会由前端 query 选择。
+  it("loads organization-scoped operational projections", async () => {
     const fetchMock = vi.fn((..._arguments: Parameters<typeof fetch>) =>
       Promise.resolve(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const client = new StudioClient("tenant-api-key");
+    const client = new StudioClient("platform-master-key", "organization-a");
     await Promise.all([
       client.listTriggers(),
       client.listDeadLetters(),
@@ -167,7 +177,7 @@ describe("Operator API", () => {
     expect(paths).toContain("/ops/triggers?limit=100");
     expect(paths).toContain("/ops/dlq?limit=100");
     expect(paths).toContain("/ops/audit?limit=100&resourceType=run&resourceId=run%2F1");
-    expect(paths.join("")).not.toContain("tenantId");
+    expect(paths.join("")).not.toContain("organizationId");
   });
 
   // 验证 Trigger 更新携带乐观锁版本与幂等键，避免控制台竞态覆盖。
@@ -190,7 +200,7 @@ describe("Operator API", () => {
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
-    await new StudioClient("tenant-api-key").setTriggerEnabled(trigger, false, "trigger-state-123");
+    await new StudioClient("platform-master-key", "organization-a").setTriggerEnabled(trigger, false, "trigger-state-123");
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/ops/triggers/trigger%2F1/state");
     expect(init.headers).toMatchObject({ "Idempotency-Key": "trigger-state-123" });
@@ -211,7 +221,7 @@ describe("Operator API", () => {
       ),
     );
     await expect(
-      new StudioClient("viewer-key").configureQuota({ maxActiveRuns: 1, maxActiveWorkers: 1, maxQueueDepth: 1 }),
+      new StudioClient("platform-master-key", "organization-a").configureQuota({ maxActiveRuns: 1, maxActiveWorkers: 1, maxQueueDepth: 1 }),
     ).rejects.toMatchObject({
       status: 403,
       code: "forbidden",
@@ -238,7 +248,7 @@ describe("Operator API", () => {
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const result = await new StudioClient("admin-key").createCredential({
+    const result = await new StudioClient("platform-master-key", "organization-a").createCredential({
       name: "signer",
       purpose: "webhook_signing",
       secret: "one-use-value",
