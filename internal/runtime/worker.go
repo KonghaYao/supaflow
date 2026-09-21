@@ -465,15 +465,13 @@ func (o *Orchestrator) fail(ctx context.Context, work *WorkItem, executeErr erro
 	}
 	// Without this the worker reports nothing at all about a failed attempt: the durable
 	// record and the API keep only the coarse public error code, so an operator has no
-	// local signal that a run failed or why. The cause carries the adapter's own reason
-	// (see executor.invokeAdapter); it is logged rather than returned because the public
-	// contract stays deliberately coarse. Only identifiers and the error are attached —
+	// local signal that a run failed or why. Only identifiers and the error are attached —
 	// never node input, output, source or resolved environment. The default logger is the
 	// redacting handler installed by cmd/worker, so the cause is scrubbed on the way out.
 	attributes := []any{
 		"organizationId", string(work.Run.OrganizationID), "runId", work.Run.ID,
 		"attemptId", work.Attempt.ID, "nodeId", work.Attempt.NodeID, "attempt", work.Attempt.Number,
-		"errorCode", executionCode, "error", executeErr,
+		"errorCode", executionCode, "error", executeErr, "cause", failureCause(executeErr),
 	}
 	if retryAt != nil {
 		slog.Warn("attempt failed, retry scheduled", append(attributes, "retryAt", retryAt, "runStatus", run.Status)...)
@@ -481,6 +479,52 @@ func (o *Orchestrator) fail(ctx context.Context, work *WorkItem, executeErr erro
 		slog.Error("attempt failed", append(attributes, "runStatus", run.Status)...)
 	}
 	return AdvanceResult{Worked: true, Run: &run}, nil
+}
+
+// failureCause returns the diagnostic reason behind an execution error for the failure log.
+// ExecutionError.Error deliberately renders only the code, so logging the error itself loses
+// the adapter's own reason: a script that exited non-zero and one whose output exceeded the
+// limit both logged as "executor failed: adapter_failed", which left the real cause
+// recoverable from nowhere — not the API, not the events, not the log. The cause is logged
+// and never returned to a caller; the public error code stays coarse.
+func failureCause(err error) error {
+	causes := failureCauses(err, nil)
+	switch len(causes) {
+	case 0:
+		return err
+	case 1:
+		return causes[0]
+	default:
+		return errors.Join(causes...)
+	}
+}
+
+// failureCauses walks the whole error tree and returns its diagnostic leaves. A single-level
+// errors.Unwrap is not enough: the audited executor returns errors.Join(err, auditErr), and
+// errors.Join wraps even one non-nil error in a joinError, which exposes its parts only
+// through Unwrap() []error. Unwrapping once therefore stopped at the wrapper and the log
+// repeated the coarse code verbatim. ExecutionError nodes are descended past instead of
+// reported, because the log already carries their code in errorCode.
+func failureCauses(err error, causes []error) []error {
+	switch current := err.(type) {
+	case *ExecutionError:
+		if current == nil || current.Cause == nil {
+			return causes
+		}
+		return failureCauses(current.Cause, causes)
+	case interface{ Unwrap() []error }:
+		for _, nested := range current.Unwrap() {
+			causes = failureCauses(nested, causes)
+		}
+		return causes
+	case interface{ Unwrap() error }:
+		if nested := current.Unwrap(); nested != nil {
+			return failureCauses(nested, causes)
+		}
+		return append(causes, err)
+	default:
+		return append(causes, err)
+	}
 }
 
 func (o *Orchestrator) suspend(ctx context.Context, work *WorkItem, result ExecutionResult) (AdvanceResult, error) {
