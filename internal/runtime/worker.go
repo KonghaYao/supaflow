@@ -382,11 +382,27 @@ func (o *Orchestrator) renewLeaseUntilDone(ctx context.Context, cancelExecution 
 			})
 			if err != nil {
 				cancelExecution()
+				// stopRenewal() cancels this loop's context the moment execution ends, which
+				// can abort a renewal that is already in flight. That abort is self-inflicted
+				// and says nothing about lease ownership, so surfacing it would make the
+				// caller discard a finished result and leave the attempt to expire: a clean
+				// node timeout would reappear a full lease duration later as
+				// unsafe_lease_takeover instead of its true failure code. A genuinely lost
+				// lease still fails closed, because CompleteAttempt revalidates the fencing
+				// token against the durable row before it commits anything.
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 			run, err := o.store.GetRun(ctx, work.Run.OrganizationID, work.Run.ID)
 			if err != nil {
 				cancelExecution()
+				// Same self-inflicted cancellation as above: this read runs under the very
+				// context stopRenewal() cancels at the end of execution.
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 			if run.Status == RunCancelling || run.CancelRequestedAt != nil {

@@ -363,6 +363,68 @@ func TestOrchestratorCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	}
 }
 
+// abortedRenewalStore renews normally until blockAt, then holds that renewal open until
+// its caller cancels the context and reports the same conflict code the PostgreSQL
+// adapter returns for an aborted query (see internal/postgres/runtime_claim.go). It
+// models the production sequence: earlier renewals succeed and keep the lease valid,
+// while the one in flight when execution ends is interrupted by stopRenewal().
+type abortedRenewalStore struct {
+	Store
+	calls   atomic.Int64
+	blockAt int64
+}
+
+func (s *abortedRenewalStore) RenewLease(ctx context.Context, req RenewLeaseRequest) (Lease, error) {
+	if s.calls.Add(1) < s.blockAt {
+		return s.Store.RenewLease(ctx, req)
+	}
+	<-ctx.Done()
+	return Lease{}, errorf(CodeConflict, "could not renew lease")
+}
+
+// 验证停机自身中断在途续租时不会丢弃已经算完的执行结果。
+//
+// stopRenewal() 会在执行结束时取消续租上下文，这可以中止一次已经在途的 RenewLease。该中止由
+// 本进程造成，说明不了租约归属；若与真正的租约丢失走同一条丢弃分支，一次干净的节点超时会被
+// 推迟一整个 leaseDuration，并以误导性的 unsafe_lease_takeover 收场。
+func TestOrchestratorKeepsResultWhenRenewalIsAbortedByShutdown(t *testing.T) {
+	base := NewMemoryStore()
+	service := NewService(base, nil, &sequenceIDs{})
+	created, err := service.StartRun(context.Background(), "organization_a", startRequest("renewal-aborted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first renewal keeps the lease valid past the end of execution; the second is
+	// the in-flight one stopRenewal() aborts.
+	store := &abortedRenewalStore{Store: base, blockAt: 2}
+	executor := executorFunc{execute: func(context.Context, ExecutionRequest) (ExecutionResult, error) {
+		time.Sleep(50 * time.Millisecond)
+		return ExecutionResult{Final: true}, nil
+	}}
+	orchestrator, err := NewOrchestrator(store, executor, nil, &sequenceIDs{}, OrchestratorConfig{
+		WorkerID: "worker_renewal_aborted", LeaseDuration: 60 * time.Millisecond,
+		RetryPolicy:  RetryPolicy{MaxAttempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+		ResumeTokens: testResumeTokens(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := orchestrator.Advance(context.Background(), "organization_a")
+	if store.calls.Load() < 2 {
+		t.Fatalf("renew calls=%d, no renewal was in flight so the assertion would be vacuous", store.calls.Load())
+	}
+	if err != nil || result.Run == nil || result.Run.Status != RunSuccess {
+		t.Fatalf("advance=%+v err=%v", result, err)
+	}
+	run, getErr := service.GetRun(context.Background(), "organization_a", created.Run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if run.Status != RunSuccess {
+		t.Fatalf("run status=%s, a finished result was discarded", run.Status)
+	}
+}
+
 // 验证不遵守 context 的 Cancel adapter 也不能永久占住单线程 worker。
 func TestOrchestratorBoundsNonCompliantCancelAdapter(t *testing.T) {
 	executor := executorFunc{
