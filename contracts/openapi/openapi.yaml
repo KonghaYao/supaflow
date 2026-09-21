@@ -986,7 +986,15 @@ components:
       properties:
         type: { type: string }
         version: { type: string }
-        capabilities: { type: object }
+        capabilities:
+          type: object
+          description: |
+            Execution guarantees of the node type. retrySafeErrors lists the error codes the
+            runtime may retry for a node of this type. Some node types derive it from the node
+            configuration instead of the type, so an empty or absent list here does not mean the
+            node never retries: the HTTP node declares it only for GET, HEAD, PUT, DELETE, or
+            when the configuration sets retrySafe, and the compiled plan carries the resolved
+            list for each node.
         defaultTimeoutMs: { type: integer, format: int64 }
         maximumOutputBytes: { type: integer, format: int64 }
         permissions: { type: object }
@@ -999,7 +1007,16 @@ components:
             minimumRunnerVersion: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
         inputs: { type: object }
         outputs: { type: object }
-        configSchema: { type: object }
+        configSchema:
+          type: object
+          description: |
+            JSON Schema of the node configuration. Publication admission is enforced by a
+            strict decoder per node type rather than by this schema, and two properties are
+            wider here than that decoder: switch.cases and transform.select are published as
+            an unconstrained object while both require a string map. A nested value there is
+            rejected even though this schema accepts it. Correcting a published
+            ConfigSchema takes a new node version, because the registry row is immutable and
+            startup compares it against the running binary.
         sensitiveFields:
           type: array
           items: { type: string, pattern: '^/' }

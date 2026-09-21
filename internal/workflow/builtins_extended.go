@@ -82,6 +82,15 @@ var conditionOperators = map[string]struct{}{
 // Required-field, range, and enum checks that were already present are kept, now with a
 // message that names the offending field. Every property a schema declares must appear
 // in the struct below, or strict decoding would reject a legal config.
+//
+// A property whose value type the struct fixes must also declare it, because the published
+// schema is the only description a caller gets. ./internal/workflow/builtin_config_contract_test.go
+// checks keys but not value types, so a wide property schema is a mistake the tests do not
+// catch: switch.cases and transform.select are both published as an unconstrained object while
+// the structs below are string maps, and a nested value is rejected with a message naming a Go
+// struct field. Correcting a published ConfigSchema is not a local edit — node_type_versions
+// rejects UPDATE, and startup compares each seeded row against the Go registry — so it takes a
+// new node version rather than a change here.
 func validateExpressionConfig(raw json.RawMessage) error {
 	var cfg struct {
 		Path     string          `json:"path"`
