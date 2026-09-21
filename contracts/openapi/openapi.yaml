@@ -558,6 +558,7 @@ paths:
       responses:
         '201': { description: Created trigger, content: { application/json: { schema: { $ref: '#/components/schemas/Trigger' } } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /ops/triggers/{triggerId}:
     servers: [{ url: / }]
     get:
@@ -804,6 +805,7 @@ paths:
         '201': { description: Created subscription, content: { application/json: { schema: { $ref: '#/components/schemas/OutboundWebhookSubscription' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /ops/webhook-subscriptions/{subscriptionId}/enable:
     servers: [{ url: / }]
     post:

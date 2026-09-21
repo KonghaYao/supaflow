@@ -326,6 +326,15 @@ func clearBytes(value []byte) {
 }
 
 func triggerError(operation string, err error) error {
+	// triggers 上的 UNIQUE (organization_id, workflow_id, name) 让同名重复创建以 23505 失败，
+	// 两个外键（workflow_id、signing_credential_id）让指向不存在父行的创建以 23503 失败：
+	// 前者改名即可、后者换一个存在的 id 即可，都是调用方能自己修正的输入冲突，此前它们冒成
+	// 500 internal_error，调用方既看不出原因也会去重试一个永远不会成功的请求。public_hash 的
+	// 唯一约束理论上也能给 23505，那是服务端极低概率的随机碰撞，一并报成 conflict 而不为一条
+	// 无法人为触发的分支增加第三种归类。
+	if violation := integrityViolationError(err); violation != nil {
+		return violation
+	}
 	var databaseError *pgconn.PgError
 	if errors.As(err, &databaseError) && databaseError.Code == "53400" {
 		return &RateLimitError{RetryAfter: 5 * time.Second, Reason: "trigger ingress capacity exhausted"}

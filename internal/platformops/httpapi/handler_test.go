@@ -335,6 +335,51 @@ func TestTriggerLifecycleUsesAuthenticatedOrganizationAndRequiresIdempotency(t *
 	}
 }
 
+// 验证 /ops/triggers 把存储侧的调用方冲突翻译成可修正的 4xx：名字/唯一键已被占用
+// （23505 → ErrConflict）回 409 conflict，引用了不存在的 workflow 或凭据（23503 →
+// ErrInvalidArgument）回 400 invalid_request。此前两者都以原始 PgError 冒到这一层，被 respond
+// 兜成 500 internal_error，调用方看不出该改哪个字段，只会去重试一个永远不会成功的请求。
+func TestCreateTriggerClassifiesStorageConflicts(t *testing.T) {
+	store := &httpTriggerStore{}
+	service, err := platformops.NewTriggerService(store, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{services: Services{Triggers: service, Mutations: newHTTPMutationLedger()}}
+	auth, err := api.NewMasterKeyAuthenticator(httpTestMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(key string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/ops/triggers",
+			strings.NewReader(`{"workflowId":"flow","kind":"api","name":"api","config":{}}`))
+		request.Header.Set("Authorization", "Bearer "+httpTestMasterKey)
+		request.Header.Set("X-Fenix-Organization-Id", "organization_auth")
+		request.Header.Set("Idempotency-Key", key)
+		response := httptest.NewRecorder()
+		auth.Middleware(handler.Routes()).ServeHTTP(response, request)
+		return response
+	}
+	store.createErr = platformops.ErrConflict
+	conflict := serve("trigger-name-taken")
+	store.createErr = platformops.ErrInvalidArgument
+	missing := serve("trigger-missing-parent")
+	if conflict.Code != http.StatusConflict || missing.Code != http.StatusBadRequest {
+		t.Fatalf("conflict=%d missing=%d", conflict.Code, missing.Code)
+	}
+	for response, want := range map[*httptest.ResponseRecorder]string{conflict: "conflict", missing: "invalid_request"} {
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err = json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Code != want {
+			t.Fatalf("code=%q want=%q", body.Code, want)
+		}
+	}
+}
+
 // 验证 ops JSON 上限针对完整原始 body，不能把 limit 边界伪装成合法 EOF 后忽略尾部。
 func TestOpsMutationRejectsBodyWithValidJSONPrefixBeyondLimit(t *testing.T) {
 	store := &httpTriggerStore{}
@@ -454,11 +499,15 @@ type httpTriggerStore struct {
 	receivedOrganization string
 	receivedBody         []byte
 	resolveErr           error
+	createErr            error
 	eventFailures        int
 	eventCalls           int
 }
 
 func (s *httpTriggerStore) CreateTrigger(context.Context, platformops.CreateTriggerRequest) (platformops.Trigger, error) {
+	if s.createErr != nil {
+		return platformops.Trigger{}, s.createErr
+	}
 	return platformops.Trigger{}, nil
 }
 func (s *httpTriggerStore) GetTrigger(context.Context, string, string) (platformops.Trigger, error) {

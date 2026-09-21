@@ -82,6 +82,12 @@ func (s *OutboundWebhookRepository) Create(ctx context.Context, request CreateOu
 		return OutboundWebhookSubscription{}, ErrCredentialForbidden
 	}
 	if err != nil {
+		// outbound_webhook_subscriptions 上有 UNIQUE (organization_id, name)：同名重复创建在这里
+		// 以 23505 失败，此前以原始 PgError 冒到 HTTP 面被报成 500，调用方看不出重名。凭据缺失
+		// 不由这一格处理——它被上面的 SELECT 提前拦成 403 credential_forbidden，那是更精确的语义。
+		if violation := integrityViolationError(err); violation != nil {
+			return OutboundWebhookSubscription{}, violation
+		}
 		return OutboundWebhookSubscription{}, fmt.Errorf("create outbound webhook subscription: %w", err)
 	}
 	subscription.Timeout = time.Duration(subscription.TimeoutMS) * time.Millisecond
