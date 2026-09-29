@@ -279,6 +279,14 @@ export const StudioCanvas = forwardRef<CanvasHandle, StudioCanvasProps>(function
   const identity = useRef(0);
   const canvasSignature = JSON.stringify(toWorkflowJSON(document));
   const lastCanvasSignature = useRef(canvasSignature);
+  // The imperative handle keeps a stable identity while its actions read the
+  // latest props. Studio binds this canvas with a callback ref (a state setter),
+  // so a handle recreated on every edit re-invokes that setter from a layout
+  // effect until React aborts with "Maximum update depth exceeded".
+  const latest = useRef({ document, onChange });
+  useEffect(() => {
+    latest.current = { document, onChange };
+  });
   useEffect(() => {
     if (!context.current || canvasSignature === lastCanvasSignature.current) return;
     lastCanvasSignature.current = canvasSignature;
@@ -291,25 +299,26 @@ export const StudioCanvas = forwardRef<CanvasHandle, StudioCanvasProps>(function
       autoLayout: () => void context.current?.tools.autoLayout({}),
       copySelected: () => {
         const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
-        clipboard.current = copySelection(document, ids);
+        clipboard.current = copySelection(latest.current.document, ids);
       },
       paste: () => {
         if (clipboard.current.nodes.length === 0) return;
         identity.current += 1;
-        onChange(pasteSelection(document, clipboard.current, `${Date.now().toString(36)}-${identity.current}`));
+        const suffix = `${Date.now().toString(36)}-${identity.current}`;
+        latest.current.onChange(pasteSelection(latest.current.document, clipboard.current, suffix));
       },
       groupSelected: () => {
         const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
         identity.current += 1;
         const id = `group-${Date.now().toString(36)}-${identity.current}`;
-        onChange(groupSelection(document, ids, id, "New group"));
+        latest.current.onChange(groupSelection(latest.current.document, ids, id, "New group"));
       },
       ungroupSelected: () => {
         const ids = new Set(context.current?.selection.selection.map((entity) => entity.id) ?? []);
-        onChange(ungroupSelection(document, ids));
+        latest.current.onChange(ungroupSelection(latest.current.document, ids));
       },
     }),
-    [document, onChange],
+    [],
   );
 
   return (
