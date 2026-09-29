@@ -1,0 +1,217 @@
+name: publish
+
+# Publishes the three Dockerfile targets to GitHub Container Registry as one
+# multi-architecture manifest list per target:
+#
+#   ghcr.io/<owner>/supaflow-control-plane   distroless control plane
+#   ghcr.io/<owner>/supaflow-worker-runtime  worker with bubblewrap and Python
+#   ghcr.io/<owner>/supaflow-migration       migration job for the same commit
+#
+# Each architecture is built on a runner of that architecture — linux/amd64 on
+# ubuntu-24.04, linux/arm64 on ubuntu-24.04-arm, which GitHub provides free of
+# charge for public repositories — instead of emulating one on the other. The
+# build jobs push per-architecture manifests by digest and never create a tag;
+# only the publish job tags, and only after every architecture succeeded, so a
+# tag never points at an image whose other architecture is missing or still
+# building.
+#
+# `--provenance=false` is deliberate. Buildx attaches an SLSA provenance
+# attestation by default, which turns a single-platform push into an index of
+# its own: the digest in the metadata file then names that index rather than
+# the image, and this merge step would have to unwrap the nesting per
+# architecture. Turning the attestation off keeps each per-architecture digest
+# naming exactly one image. Re-enable it only together with a merge step that
+# knows how to carry the nested attestation manifests through.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Never cancel a publish halfway. Interrupting a build wastes the work but
+  # leaves nothing referenced; the same is not true of a half-written tag.
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  TARGETS: control-plane worker-runtime migration
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive the image prefix and the architecture slug
+        id: arch
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # A container image reference must be lowercase, and the owner name
+          # in GITHUB_REPOSITORY need not be. `tr` rather than the ${name,,}
+          # expansion, which only bash 4 and later understand.
+          prefix="${REGISTRY}/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
+          # The slug names the digest file this job hands to the publish job.
+          # "linux/amd64" would name a path with a directory in it.
+          echo "slug=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      # The builder that ships with the runner is backed by the daemon, which
+      # cannot push an image that was built for another architecture and
+      # cannot export anything but the docker image format. A BuildKit
+      # container has no such limits.
+      #
+      # No layer cache is configured. The `gha` cache backend reads
+      # ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN out of the environment of
+      # the process that invokes buildx, and an inline `run` step is not given
+      # them — the documented ways to obtain them are the third-party
+      # crazy-max/ghaction-github-runtime action, or a registry cache under
+      # `--cache-to type=registry,ref=...,mode=max,ignore-error=true`. Neither
+      # is worth its cost here: a publish runs a few times a week, both
+      # architectures build in parallel, and a from-scratch build of this
+      # repository is a few minutes on a free runner.
+      - name: Start a BuildKit builder
+        run: docker buildx create --use --driver docker-container --name publish
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: echo "$GITHUB_TOKEN" | docker login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+
+      - name: Build every target for ${{ matrix.platform }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          PREFIX: ${{ steps.arch.outputs.prefix }}
+          SLUG: ${{ steps.arch.outputs.slug }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          for target in $TARGETS; do
+            metadata="$(mktemp)"
+            docker buildx build \
+              --platform "$PLATFORM" \
+              --target "$target" \
+              --provenance=false \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.title=${target}" \
+              --metadata-file "$metadata" \
+              --output "type=image,name=${PREFIX}/${target},push-by-digest=true,name-canonical=true,push=true" \
+              .
+            digest="$(jq -r '."containerimage.digest" // empty' "$metadata")"
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "no manifest digest was reported for ${target}" >&2; exit 1 ;;
+            esac
+            # One file per target, named so the publish job can pair it with
+            # the digest of the same target from the other architecture.
+            echo "${target} ${digest}" > "digests/${SLUG}-${target}.txt"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.arch.outputs.slug }}
+          path: digests/
+          # The publish job reads these minutes later; they are worthless after.
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: digests
+          merge-multiple: true
+
+      - name: Compute the tags
+        id: tags
+        run: |
+          set -euo pipefail
+          prefix="${REGISTRY}/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
+          tags=()
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # v1.2.3 publishes 1.2.3, 1.2, and latest; a tag that is not a
+            # three-part version publishes only itself and latest.
+            version="${GITHUB_REF_NAME#v}"
+            tags+=("$version")
+            if [[ "$version" == *.*.* ]]; then
+              tags+=("${version%.*}")
+            fi
+            tags+=("latest")
+          else
+            # A branch publishes a moving tag named after the branch.
+            tags+=("$GITHUB_REF_NAME")
+          fi
+          tags+=("sha-${GITHUB_SHA:0:12}")
+          # One tag list shared by all three images, so the images of a single
+          # release can never disagree about which commit they came from.
+          printf 'list=%s\n' "${tags[*]}" >> "$GITHUB_OUTPUT"
+          printf 'Publishing: %s\n' "${tags[*]}"
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: echo "$GITHUB_TOKEN" | docker login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+
+      - name: Assemble the manifest lists
+        env:
+          TAGS: ${{ steps.tags.outputs.list }}
+          PREFIX: ${{ steps.tags.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for target in $TARGETS; do
+            sources=()
+            for file in "digests/"*"-${target}.txt"; do
+              sources+=("${PREFIX}/${target}@$(cut -d' ' -f2 < "$file")")
+            done
+            if (( ${#sources[@]} < 2 )); then
+              echo "${target} has ${#sources[@]} architecture(s), expected 2" >&2
+              exit 1
+            fi
+            tagArgs=()
+            for tag in $TAGS; do
+              tagArgs+=(--tag "${PREFIX}/${target}:${tag}")
+            done
+            docker buildx imagetools create "${tagArgs[@]}" "${sources[@]}"
+          done
+
+      - name: Verify every published manifest
+        env:
+          TAGS: ${{ steps.tags.outputs.list }}
+          PREFIX: ${{ steps.tags.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          for target in $TARGETS; do
+            for tag in $TAGS; do
+              platforms="$(docker buildx imagetools inspect --raw "${PREFIX}/${target}:${tag}" \
+                | jq -r '[.manifests[].platform | select(. != null) | "\(.os)/\(.architecture)"] | sort | join(" ")')"
+              echo "${PREFIX}/${target}:${tag} -> ${platforms}"
+              for expected in linux/amd64 linux/arm64; do
+                case " ${platforms} " in
+                  *" ${expected} "*) ;;
+                  *) echo "${target}:${tag} is missing ${expected}" >&2; exit 1 ;;
+                esac
+              done
+            done
+          done
