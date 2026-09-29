@@ -1,0 +1,52 @@
+name: pressure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: supaflow
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: supaflow_pressure
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U supaflow -d supaflow_pressure"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SUPAFLOW_TEST_DATABASE_URL: postgres://supaflow:ci-only-password@127.0.0.1:5432/supaflow_pressure?sslmode=disable
+      # Binding the evidence to the dispatched commit makes the artifact
+      # auditable; the profile refuses to write evidence without it.
+      SUPAFLOW_RELEASE_COMMIT: ${{ github.sha }}
+      SUPAFLOW_RELEASE_EVIDENCE_DIR: release-evidence/${{ github.sha }}/ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Capacity signal, not release evidence: the profile releases 1,000
+      # simultaneous TCP clients and drives exactly 2,000 fenced advances, and
+      # a shared runner may not sustain it within the fixed budget. Treat a red
+      # run as "needs production-equivalent resources", not as a product
+      # failure. Real release evidence needs a commit-bound run on
+      # production-equivalent staging (docs/operations.md, "Verification").
+      - run: go test -timeout=300s -run '^TestPostgresControlPlanePressure$' -count=1 -v ./tests/load
+      - name: Upload commit-bound evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-control-plane-evidence
+          path: release-evidence/
+          if-no-files-found: ignore
